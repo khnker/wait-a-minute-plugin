@@ -1,0 +1,337 @@
+# OpenSpec Change: wait-a-minute-skill-registry
+
+## Change ID
+wait-a-minute-skill-registry
+
+## Title
+Incorporar Skill Registry externo para Wait a Minute
+
+## Estado
+🟡 En definición — diseño de mecanismo de descubrimiento y selección de skills externas
+
+## Contexto
+Wait a Minute já define 6 políticas cognitivas (Investigate, Scope, Simplify, Debug, Review, Verify) que regulan el comportamiento del agente. Este Change incorpora un mecanismo de Skill Registry externo que permite descubrir, evaluar y seleccionar Agent Skills de repositorios externos sin convertir a Wait a Minute en un catálogo monolítico de skills. El objetivo es actuar como orquestador de capacidades, no como repositorio de skills.
+
+## Problemática
+El ecosistema de Agent Skills crece rápidamente. Las decisiones de diseño:
+
+- **Duplicación**: Copiar skills individualmente dentro de Wait a Minute genera repetición de funcionalidad existente.
+- **Mantenimiento innecesario**: Actualizar skills internas requiere sincronización con repositorios externos.
+- **Divergencia**: Skills internas pueden desviarse de los repositorios originales, creando versiones fragmentadas.
+- **Dificultad para actualizar**: Skills internas requerirían releases del proyecto Wait a Minute para cada cambio upstream.
+- **Acatallamiento a un catálogo específico**: Wait a Minute quedaría atado a un conjunto fijo de skills.
+- **Crecimiento artificial**: El tamaño del proyecto ya no reflejaría el valor real, sino la cantidad de skills empaquetadas.
+
+Wait a Minute debe conservar sus 6 políticas nativas y utilizar repositorios externos como fuentes de capacidades especializadas, manteniendo separación clara entre comportamiento fundamental y capacidades extensibles.
+
+## Objetivo
+Incorporar a Wait a Minute un mecanismo de descubrimiento, indexación y selección de Agent Skills externos que:
+- Funcionen como catálogo consultable, no como repositorio propio
+- Permitan reutilizar skills existentes sin duplicación
+- Sigan un proceso evaluado (discovered → evaluating → approved/active/rejected) antes de ser usadas
+- No impliquen instalación o activación automática
+- Mantengan las 6 políticas nativas como autoridad indelegable
+- Permitan versionado concreto de referencias externas
+
+## Arquitectura separada
+
+```
+Wait a Minute
+    │
+    ├── políticas propias
+    │     ├── Investigate   ← nativa, parte del core
+    │     ├── Scope         ← nativa, parte del core
+    │     ├── Simplify      ← nativa, principio Ponytail
+    │     ├── Debug         ← nativa, diagnóstico antes de modificar
+    │     ├── Review        ← nativa, pase crítico posterior
+    │     └── Verify        ← nativa, evidencia para DONE
+    │
+    └── Skill Registry
+          │
+          ├── external skills       ← catálogo consultable, no incrustado
+          ├── metadata              ← format description below
+          ├── compatibility       ← compatibilidad con OpenCode
+          └── quality status      ← discovered/evaluating/approved/rejected
+```
+
+## Formato del Skill Registry
+
+Conceptualmente:
+
+```
+skills:
+  - id: example-skill
+    source:
+      repository: owner/repository
+      path: skills/example-skill
+      ref: main              ← commit o tag para reproducibilidad
+    category: review
+    compatibility:
+      opencode: true
+    status: approved         ← discovered | evaluating | approved | deprecated | rejected
+    capabilities:
+      - code-review
+    risk: low
+```
+
+**Mínimo que debe soportar el formato:**
+
+- **identidad del skill**: id único, fuente identificada
+- **repositorio fuente**: owner/repository con referencia (commit/tag)
+- **ubicación**: path dentro del repositorio (habitualmente skills/ o .skills/)
+- **categoría**: tipo de capability (review, audit, migration, etc.)
+- **compatibilidad**: qué entornos/herrramientas soporta (opencode: true, claude: false, etc.)
+- **estado de evaluación**: discovered | evaluating | approved | deprecated | rejected
+- **capacidades**: lista de capacidades que el skill proporciona (code-review, debugging, etc.)
+- **nivel de riesgo**: low | medium | high (impacto si se ejecuta)
+
+## Estados del Skill
+
+Cada skill descubierto debe tener un estado explícito en este orden:
+
+```
+discovered
+    ↓
+evaluating
+    ↓
+approved
+    ├── active          ← puede ser seleccionada por Wait a Minute
+    └── deprecated      ← marcada como obsoleta, aún usable pero no recomendada
+rejected
+```
+
+**Restricciones clave:**
+
+- Un skill **"discovered"** no debe ser utilizado automáticamente por Wait a Minute.
+- Solamente los skills que hayan alcanzado estado **approved** (o **active**) pueden ser seleccionados por Wait a Minute para ejecutarse.
+- Un skill en estado **rejected** nunca será seleccionado.
+- El estado **deprecated** puede ser seleccionado solo si no existe approved alternativo y el usuario confirma.
+
+## Quality Gate (evaluación previa a approval)
+
+Antes de incorporar un skill externo, Wait a Minute debe evaluar al menos:
+
+### Compatibilidad
+
+- **formato "SKILL.md"**: El skill debe contener archivo SKILL.md con metadatos nombre/description/triggers/compatibility
+- **compatibilidad con OpenCode**: verification de que el skill está diseñado para funcionar en entorno OpenCode (no asume Claude-specific patterns, no requiere herramientas que no estén disponibles)
+- **herramientas requeridas**: lista de herramientas que el skill necesita (bash, grep, read, etc.)
+- **dependencias**: dependencias declaradas y sus versiones
+- **estructura de archivos**: existencia de archivos esperados, ausencia de patrones peligrosos
+
+### Calidad
+
+- **claridad de instrucciones**: las triggers y descripciones deben ser claras, no ambiguas
+- **tamaño y complejidad**: skills excesivamente grandes o complejos reciben score bajo
+- **duplicación respecto de otros skills**: comparación contra skills ya evaluadas para evitar overlap
+- **coherencia interna**: las triggers, descripción y capacidades deben alinearse sin contradicciones
+- **calidad de triggers**: triggers deterministas preferibles a los basados en pattern-matching amplio
+- **instrucciones deterministas cuando corresponda**: cuando el skill especifica pasos, estos deben ser seguibles y reproducibles
+
+### Riesgo
+
+Detectar y marcar lo siguiente:
+
+- **instrucciones destructivas**: commands que borran, modifican o dañan state
+- **ejecución arbitraria de comandos**: uso de bash/eval que podría ejecutar código no intencionado
+- **acceso innecesario a secretos**: prompts que piden credenciales sin necesidad
+- **modificaciones fuera de scope**: changes que van más allá de la capability del skill
+- **side effects**: efectos colaterales no documentados
+- **dependencia excesiva de herramientas externas**: skills que requieren servicios externos obligatorios
+- **instrucciones que entren en conflicto con las políticas de Wait a Minute**: skills que intentarán saltarse Investigate, Scope, Verify, etc.
+
+## Solapamiento (Overlap Detection)
+
+Un skill externo no debe duplicar innecesariamente una política nativa.
+
+**Ejemplo:**
+
+```
+external: ponytail (skill con principios de simplificación)
+native:  Simplify (política de Wait a Minute)
+```
+
+**Decisión:** Wait a Minute debe conservar **"Simplify"** como autoridad política y utilizar el skill externo **únicamente** cuando aporte capacidades adicionales que no estén cubiertas por la política nativa. El skill externo no debe reimplementar lo que ya hace el core.
+
+## Selección dinámica
+
+Wait a Minute debe seleccionar skills según la naturaleza de la tarea, considerando:
+
+- **intención de la tarea**: qué seTrying lograr, no solo palabras clave
+- **categoría**: match contra category del skill
+- **riesgo**: risk level del skill vs. riesgo tolerado para la tarea
+- **archivos afectados**: skills que operan en áreas del código relevantes
+- **herramientas disponibles**: qué tools tiene disponibles el entorno OpenCode
+- **compatibilidad**: metadata compatibility field match
+- **políticas activas**: las 6 nativas están activas y qué significado tienen para esta tarea
+- **complejidad**: complexity del task match con capability del skill
+
+**Ejemplo:**
+
+```
+Task: Modificar autenticación OAuth
+        │
+        ▼
+Analyze task
+        │
+        ├── Investigate      ← política nativa
+        ├── Scope            ← política nativa
+        ├── security capability  ← skill external: security-audit (risk: low, approved)
+        ├── Review           ← política nativa
+        └── Verify           ← política nativa
+        │
+        ▼
+Skill Registry
+        │
+        └── seleccionar skills aprobados
+```
+
+La selección no debe basarse exclusivamente en coincidencia textual de triggers. Debe considerar el conjunto completo de factors arriba listados.
+
+## Native vs External
+
+### Políticas nativas
+
+Son parte del comportamiento fundamental de Wait a Minute e **no dependen** de un repositorio externo:
+
+- **Investigate** — adquisición de contexto antes de cambiar
+- **Scope** — mantener acotado el alcance
+- **Simplify** — principio Ponytail: mínima solución
+- **Debug** — diagnóstico antes de modificar
+- **Review** — pase crítico posterior
+- **Verify** — evidencia antes de completar
+
+Estas políticas tienen precedencia sobre cualquier skill externo.
+
+### External skills
+
+Son capacidades especializadas que **pueden evolucionar independientemente** del core:
+
+- security-audit
+- database-migration
+- frontend-accessibility
+- performance-analysis
+- terraform-review
+- api-design
+- etc.
+
+Estas skills pueden añadirse, actualizarse o quitarse sin modificar el core de Wait a Minute.
+
+## Regla de precedencia
+
+Cuando haya conflicto, el orden de autoridad es:
+
+```
+Wait a Minute policy
+    >
+OpenSpec requirements
+    >
+external skill instructions
+```
+
+**Sin embargo**, un skill externo no puede utilizarse para ignorar requisitos explícitos de OpenSpec. Si un skill sugiere una acción que viola un requisito de OpenSpec, el requisito de OpenSpec prevalece.
+
+## No instalación automática
+
+El descubrimiento de un skill **no implica**:
+
+```
+discover → install
+```
+
+Debe existir separación explícita:
+
+```
+discover
+   ↓
+evaluate
+   ↓
+approve
+   ↓
+make available
+   ↓
+select
+   ↓
+execute
+```
+
+Esto reduce el riesgo de incorporar accidentalmente instrucciones no auditadas. Wait a Minute debe mostrar al usuario las skills aprobadas disponibles y permitir una selección deliberada, nunca activar una por defecto.
+
+## Versionado
+
+El Registry debe poder fijar una referencia concreta del repositorio externo:
+
+```
+source:
+  repository: owner/repository
+  ref: <commit/tag>     ← pinned version, no "main" por defecto
+```
+
+- No depender exclusivamente de "main" para reproducibilidad
+- La actualización de una referencia debe poder volver a pasar por el Quality Gate
+- El cache/materialización puede usarse para evitar depender de GitHub durante cada ejecución, pero la fuente canónica continúa siendo el repositorio declarado en el Registry
+- **No se debe modificar silenciosamente** el contenido de un skill externo tras aprobado; cambios deberían pasar por nuevo ciclo de evaluación
+
+## Seguridad
+
+Los skills externos deben considerarse **código/instrucciones no confiables** hasta ser evaluados.
+
+Wait a Minute no debe otorgar privilegios adicionales a un skill simplemente porque esté registrado. En particular, un skill no debe poder:
+
+- saltarse Verify
+- ampliar Scope
+- ignorar restricciones de seguridad
+- modificar configuración global sin autorización
+- introducir dependencias arbitrarias
+- ejecutar acciones destructivas sin los gates correspondientes
+
+## Criterio de éxito
+
+La implementación será considerada correcta cuando Wait a Minute pueda:
+
+1. registrar un skill externo
+2. identificar su fuente (repository + ref)
+3. evaluar compatibilidad (Quality Gate)
+4. asignarle metadata (formato SKILL.md fields)
+5. marcarlo como aprobado/rechazado
+6. descubrir capacidades disponibles
+7. seleccionar un skill apropiado para una tarea
+8. cargarlo en OpenCode cuando corresponda (mediante hook o comando deliberado)
+9. mantener las políticas nativas de Wait a Minute como autoridad
+10. evitar instalar o activar automáticamente skills no evaluados
+
+## Referencias
+
+- https://github.com/whobat/AI-Agent-skills — Primary source for portable skills
+- https://github.com/khasky/awesome-agent-skills — Secondary discovery catalog
+- https://github.com/sickn33/antigravity-awesome-skills — Discovery pool (large quantity, reference only)
+- https://opencode.ai/docs/es/skills/ — OpenCode skill format and patterns
+
+## Fuera de alcance
+
+Este Change no pretende:
+
+- crear cientos de skills propios
+- sincronizar automáticamente todos los repositorios
+- ejecutar automáticamente cualquier skill descubierto
+- reemplazar OpenSpec
+- reemplazar el sistema nativo de Skills de OpenCode
+- implementar un marketplace UI
+- resolver la UI para administrar skills
+- permitir instalación automática sin evaluación
+
+## Decisión firme de fuentes
+
+- **whobat/AI-Agent-skills** — Fuente primaria para skills portables y compatibles
+- **khasky/awesome-agent-skills** — Catálogo secundario para descubrimiento potencial
+- **sickn33/antigravity-awesome-skills** — Pool de descubrimiento por volumen, referencia, **no** fuente de instalación automática
+
+Esto evita que el tamaño del catálogo termine dictando la arquitectura de Wait a Minute.
+
+## Change log
+
+- Creado: 2026-08-30 — Diseño inicial de Skill Registry externo para Wait a Minute
+- Pendiente: Definir formato JSON/YAML exacto y mapeo de campos vs SKILL.md
+- Pendiente: Implementar Quality Gate checks en engine.js
+- Pendiente: Implementar selección dinámica según categoría/riesgo/intención
+- Pendiente: Integrar con hook `chat.message` existente y estructura de sesión
