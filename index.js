@@ -1,4 +1,4 @@
-import { analyze } from "./engine";
+import { analyze } from "./engine.js";
 import { loadConfig, saveActivePreset, saveActiveMode } from "./router/config";
 import { getActiveTiers, resolvePresetName } from "./router/protocol";
 import { resolveEnforcementMode } from "./router/enforcement";
@@ -66,7 +66,7 @@ const WaitAMinutePlugin = async (ctx) => {
         const summaryLine = `[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`;
         if (!output?.system) output.system = [];
         output.system.unshift({
-          type: "text" as const,
+          type: "text",
           text: `${summaryLine}\n`,
         });
       }
