@@ -1,0 +1,17 @@
+{
+  "name": "wait-a-minute",
+  "description": "OpenCode plugin con hook de prompt para pre-flight cognitivo Wait a Minute. Analiza peticiones antes de resolución de skills y agente execution.",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo 'No tests specified'"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "wait-a-minute",
+    "pre-flight",
+    "cognitive-layer"
+  ],
+  "license": "MIT"
+}
