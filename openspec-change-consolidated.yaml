@@ -1,0 +1,297 @@
+# OpenSpec Change: wait-a-minute-policy-engine-consolidated
+
+## Change ID
+wait-a-minute-policy-engine-consolidated
+
+## Title
+Policy Engine ligero de Wait a Minute — decisiones proporcionales al riesgo, sin orchestrator pesado
+
+## Estado
+✅ Aprobado — reemplaza y ajusta cambios anteriores (cognitive-policies, skill-registry, policy-engine)
+
+## Principio Recto
+«El rigor debe ser proporcional al riesgo de la tarea.»
+
+Wait a Minute no debe convertirse en un framework multi-agent ni reemplazar el runtime de Skills de OpenCode. Su propósito es decidir **cuánto rigor** necesita una tarea antes, durante y después de su ejecución, y delegar la ejecución real a OpenCode.
+
+## Problemática que Resuelve
+
+Los cambios previos definían 6 políticas nativas, un Skill Registry externo con Quality Gate, tiers MINIMAL/STANDARD/RIGOROUS con procesos detallados, Plan Delta, Readiness Gate, etc.
+
+**Riesgo**: Se convertían en un framework multi-agent pesado que limitaba la libertad técnica y añadía ceremonia innecesaria para tareas triviales.
+
+## Solución: Policy Engine Ligero
+
+Wait a Minute evoluciona hacia un engine que:
+1. **Decide cuánto rigor** necesita una tarea antes, durante y después de su ejecución
+2. **Aplica gates correspondientes** (selectivamente, no todos para todo)
+3. **Delegará ejecución real** a OpenCode
+4. **Evita dos extremos**:
+   - Agentes que actúan demasiado pronto sin comprender el contexto
+   - Workflows excesivamente ceremoniosos para tareas triviales
+
+## 1. Responsabilidades
+
+### Wait a Minute
+- Analizar la tarea
+- Estimar nivel de rigor requerido
+- Determinar qué políticas deben activarse
+- Detectar ambigüedad y scope
+- Seleccionar skills externos cuando sean necesarios
+- Controlar cambios de alcance durante la ejecución
+- Exigir revisión cuando el riesgo lo justifique
+- Exigir evidencia antes de permitir "DONE"
+
+### OpenCode (responsable de)
+- Ejecución
+- Edición de archivos
+- Ejecución de comandos
+- Utilización del runtime de skills
+- Interacción con herramientas
+
+### OpenSpec (responsable de)
+- Definición del cambio
+- Requisitos
+- Escenarios
+- Criterios de aceptación
+- Contrato del trabajo
+
+## 2. Modelo Conceptual
+
+```
+USER TASK / OPENSPEC
+    │
+    ▼
+ WAIT A MINUTE (Policy Engine)
+    │
+    │ Task Assessment
+    │  • Complexity
+    │  • Risk
+    │  • Scope
+    │  • Ambiguity
+    ▼
+  PROCESS SELECTION
+  ─────────────────────
+  MINIMAL    STANDARD    RIGOROUS
+     │              │           │
+     └──────────────┼───────────┘
+                    ▼
+                 OpenCode
+                    │
+                    ▼
+                 EXECUTION
+                    │
+          ┌────────┴────────┐
+          ▼                 ▼
+        REVIEW            DEBUG
+          │                 │
+          └────────┬────────┘
+                    ▼
+                  VERIFY
+                    │
+          ┌────┴────┐
+          ▼         ▼
+        PASS       FAIL
+          │         │
+          ▼         ▼
+        DONE      DEBUG
+```
+
+## 3. Clasificación de Rigor (3 Niveles)
+
+### MINIMAL
+- **Para**: cambios de texto, triviales, localizados, evidentes
+- **Proceso**: Scope → Execute → Verify
+- **Ejemplos**: Renombrar variable, arreglar typo, formateo menor
+
+### STANDARD
+- **Para**: cambios normales de código, funciones nuevas, fixes simples
+- **Proceso**: Investigate → Scope → Execute → Review → Verify
+- **Cuándo aplicar**: Cuando hayamiliaridad con el código pero aún se necesita contexto
+
+### RIGOROUS
+- **Para**: cambios arquitectónicos, seguridad, migraciones, alto blast radius, requisitos ambiguos, alto riesgo de regresión
+- **Proceso**: Investigate → Scope → Plan → Execute → Review → Verify
+- **Debug**: activarse cuando exista evidencia de fallo, independientemente del tier
+- **Cuándo aplicar**: Cambios con impacto amplio, riesgo alto, requisitos poco claros
+
+## 4. Readiness Gate (Checkpoint Pre-Execution)
+
+**Antes** de iniciar implementación STANDARD o RIGOROUS, comprobar como mínimo:
+
+- [ ] scope known (alcance conocido)
+- [ ] affected surface reasonably known (superficie afectada razonablemente conocida)
+- [ ] verification strategy known (estrategia de verificación conocida)
+- [ ] critical ambiguity resolved (ambigüedades críticas resueltas)
+
+**Si un elemento crítico no está resuelto**: WAIT — el sistema no debe permitir que el agente compensa incertidumbre crítica simplemente empezando a editar código.
+
+## 5. Skill Registry (Simplificado)
+
+**Objetivo**: Soportar skills externos sin convertirse en repositorio monolítico.
+
+**Fuentes** (referenciadas, no incrustadas):
+- whobat/AI-Agent-skills (primary)
+- khasky/awesome-agent-skills (secondary)
+- sickn33/antigravity-awesome-skills (discovery pool)
+
+**Registro por skill (mínimo)**:
+```
+skill:
+  id: <identificador>
+  source:
+    repository: <owner/repo>
+    path: <path/within/repo>
+    ref: <commit/tag>  ← pinned version, NOT "main" by default
+  category: <tipo>
+  capabilities: <lista>
+  compatibility:
+    opencode: true
+  risk: low|medium|high
+  status: discovered|evaluating|approved|active|deprecated|rejected
+```
+
+**Estados**:
+- discovered: detectado, **no automático**
+- evaluating: en evaluación
+- approved: aprobado → puede seleccionarse
+- active: en uso
+- deprecated: obsoleto
+- rejected: rechazado (nunca automático)
+
+**Quality Gate previo a approval**: estructura SKILL.md, compatibilidad OpenCode, riesgos detectados.
+
+## 5. Skill Selection
+
+**¿Qué capacidad adicional necesita esta tarea?**
+
+```
+authentication change
+    ↓
+security capability
+    ↓
+Skill Registry
+    ↓
+security-review
+```
+
+**Considerar**:
+- Intención de la tarea
+- Categoría
+- Riesgo
+- Archivos afectados
+- Herramientas disponibles
+- Compatibilidad
+- Políticas activas
+- Complejidad
+
+**No necesario**: semantic search, embeddings, SQLite, graph databases, MCP para v1.
+
+**Implementación simple y determinista** preferible.
+
+## 5. OpenCode Integration
+
+**Usar runtime nativo de Skills de OpenCode** — no crear segundo runtime.
+
+```
+Wait a Minute
+    ↓
+select capability
+    ↓
+OpenCode skill runtime
+    ↓
+load SKILL.md
+```
+
+Wait a Minute **controla cuándo y por qué** usar una capacidad.
+OpenCode **controla cómo** cargarla y ejecutarla.
+
+## 6. Precedencia
+
+Cuando haya conflictos:
+```
+Wait a Minute safety/completion gates
+    >
+OpenSpec requirements
+    >
+external skill instructions
+```
+
+**Un skill externo no puede**:
+- saltarse Verify
+- ampliar silenciosamente Scope
+- ignorar requisitos
+- desactivar gates
+- introducir acciones destructivas sin autorización
+
+## 7. Qué NO se Implementa (Fuera de Alcance)
+
+**Este Change explícitamente NO**:
+
+- Arquitectura multi-agent compleja
+- Agentes especializados permanentes
+- Consenso entre múltiples modelos
+- Memoria persistente compleja
+- MCP obligatorio
+- Graph database
+- SQLite para Skill Registry v1
+- Marketplace
+- Sincronización automática de hundreds de skills
+- Instalación automática de skills
+- Reemplazo del runtime de Skills de OpenCode
+
+## 7. Criterios de Aceptación
+
+La implementación debe demostrar que:
+
+| Criterio | Descripción |
+|----------|-------------|
+| Assessment | Tarea clasificable como MINIMAL/STANDARD/RIGOROUS; clasificación considera riesgo/ambigüedad/blast radius; proceso cambia según nivel |
+| Scope | Agente identifica scope antes de cambios relevantes; cambios no relacionados no incorporados silenciosamente; cambios materiales generan reevaluación |
+| Investigation | Tareas simples pueden saltirse investigación; tareas complejas pueden requerirla; profundidad proporcional al contexto |
+| Review | Review puede activarse condicionalmente; Review y Verify tienen responsabilidades distintas |
+| Verify | DONE requiere evidencia; Verify fallido impide completar; evidencia proporcional al riesgo |
+| Debug | Fallos generan ciclo diagnóstico; "test verde" no es explicación de causa raíz |
+| Skills | Skill externo puede registrarse, evaluarse, aprobarsele, seleccionarse; OpenCode puede cargarlo vía nativo; skills no aprobados no se activan automáticamente |
+| Plan Delta | Cambio material de scope detectado; genera reevaluación; puede exigir nueva verificación |
+
+## 8. Referencias
+
+- **Agent rigor**: https://github.com/ccromp/agent-rigor — Review/Verify separación, Verify como completion gate, rigor proporcional, políticas ligeras
+- **OpenCode Agentic Workflows**: https://github.com/ABIvan-Tech/opencode-agentic-workflows — process tiers, readiness gate, investigation depth, Plan Delta, routing condicional
+- **Ponytail**: https://github.com/MetalbolicX/opencode-ponytail — YAGNI, mínima complejidad, reutilización, reducción de cambios innecesarios
+- **Agent Skills**: https://github.com/whobat/AI-Agent-skills — Fuente primaria para skills portables
+- **Awesome Agent Skills**: https://github.com/khasky/awesome-agent-skills — Fuente secundaria para descubrimiento
+- **Antigravity Awesome Skills**: https://github.com/sickn33/antigravity-awesome-skills — Pool de descubrimiento; no instalar automáticamente
+- **OpenCode Skills**: https://opencode.ai/docs/skills — Referencia del runtime nativo de Skills
+
+## 8. Principio de Diseño
+
+«Wait a Minute debe añadir control, no ceremonia.»
+
+- Una tarea sencilla debe permanecer sencilla
+- Una tarea peligrosa debe volverse deliberada
+- Una tarea ambigua debe detenerse antes de producir cambios incorrectos
+- Ninguna tarea debe declararse terminada sin evidencia suficiente
+
+## Change Log
+
+- Creado: 2026-08-30 — Policy Engine consolidado de Wait a Minute, reemplaza/ajusta cambios previos (cognitive-policies, skill-registry, policy-engine)
+- Pendiente: Validación en sesión de cómo cada nivel (MINIMAL/STANDARD/RIGOROUS) se activa según tipo de tarea
+- Pendiente: Integración con hook `chat.message` y estructura de sesión de OpenCode
+
+## Referencias Cruzadas
+
+**Reemplaza y ajusta anteriormente**:
+- `wait-a-minute-cognitive-policies` — concepts merged into tiered framework
+- `wait-a-minute-skill-registry` — mechanism simplified, external sourcing retained but de-emphasized
+- `wait-a-minute-policy-engine` — superseded by consolidated design
+
+**Mantiene compatibilidad con**:
+- Estructura del repositorio wait-a-minute-plugin
+- Plugin registration en opencode.jsonc
+- Hook `chat.message` existente
+
+---
+*Change consolidado: otorga libertad técnica al implementador con límites arquitectánicos claros, evita orchestrator pesado, y es el diseño definitivo para Wait a Minute.*
+
