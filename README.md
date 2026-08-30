@@ -133,7 +133,7 @@ El plugin consta de 3 componentes:
 
 ## Licencia
 
-MIT © nicolasdev
+MIT © khnker
 
 ## Referencias
 
