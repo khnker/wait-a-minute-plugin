@@ -1,0 +1,123 @@
+# OpenSpec Change: wait-a-minute-cognitive-policies
+
+## Change ID
+wait-a-minute-cognitive-policies
+
+## Title
+Incorporar políticas de razonamiento y control de ejecución en Wait a Minute
+
+## Estado
+🟡 En desarrollo — policies documentadas, listas para ser validadas en próxima sesión
+
+## Contexto
+Wait a Minute es una capa de pre-flight cognitivo para OpenCode que intercepta prompts antes de la resolución de skills y la ejecución del agente. El cambio incorpora un conjunto explícito de políticas de comportamiento del agente que funcionan como contexto reutilizable y se activan proporcionalmente según la complejidad, riesgo, ambigüedad y blast radius de cada tarea.
+
+## Principio rector
+Wait a Minute actúa como orquestador de profundidad — determina cuándo y con qué profundidad aplicar cada política, no como una pipeline rígida que se ejecuta siempre de principio a fin. Las políticas son composables y pueden usarse desde distintos workflows de Wait a Minute.
+
+## Problemática
+Los coding agents cometen fallos sistemáticos:
+- Modificar código sin comprender el contexto
+- Expandir innecesariamente el alcance (scope creep)
+- Sobreingenierizar soluciones (overengineering)
+- Corregir síntomas sin diagnóstico
+- Aceptar implementaciones sin revisión
+- Declarar tareas terminadas sin evidencia
+
+## Solución
+Incorporar 6 políticas de comportamiento en Wait a Minute, seleccionadas y adaptadas del ecosistema Ponytail/OpenCode, que funcionan como restricciones cognitivas operativas:
+
+### 1. Investigate
+**Antes de modificar código, adquirir contexto mínimo del repositorio.**
+- Favorecer inspección de implementación existente, patrones y convenciones locales, código relacionado, dependencias y puntos de integración, reutilización de mecanismos existentes
+- No convertir investigación en fase burocrática para cambios triviales
+- Principio: «Understand enough before changing anything.»
+
+### 2. Scope
+**Mantener explícitamente acotado el alcance de la tarea.**
+- Detectar scope creep, refactors no solicitados, cambios colaterales, mejoras oportunistas, abstracciones prematuras, modificaciones que aumentan innecesariamente el blast radius
+- Cuando encuentre trabajo adicional legítimo pero fuera del alcance, separarlo de la tarea actual en lugar de incorporarlo silenciosamente
+- Principio: «Solve the requested problem, not every adjacent problem.»
+
+### 3. Simplify
+**Principio transversal Ponytail — código existente antes que nuevas abstracciones.**
+- Preferir la solución más pequeña que satisfaga el requerimiento, mecanismos existentes antes que nuevas dependencias, soluciones locales antes que generalizaciones, eliminar complejidad innecesaria antes de agregarla
+- Evitar abstracciones especulativas, frameworks internos innecesarios, generalización prematura, dependencias sin necesidad, refactors por preferencias estilísticas
+- Principio: «The simplest solution that fully satisfies the requirement is preferred.»
+
+### 4. Debug
+**Cuando existe un fallo, no entrar inmediatamente en ciclo de modificación tentativa.**
+- Seguir proporcionalmente: observación → hipótesis → evidencia → identificación de causa → corrección → verificación
+- La corrección debe estar sustentada por evidencia suficiente para distinguir causa raíz de síntoma
+- Principio: «Diagnose before modifying.»
+
+### 5. Review
+**Después de implementar un cambio relevante, realizar un segundo pase crítico deliberado.**
+- Buscar errores introducidos, requisitos omitidos, regresiones, edge cases, complejidad innecesaria, cambios fuera de scope, inconsistencias con código existente, tests insuficientes, supuestos no demostrados
+- Review no debe significar repetir mecánicamente el proceso de implementación
+- Principio: «Review the result as if someone else wrote it.»
+
+### 6. Verify
+**No declarar tarea completada únicamente por haber ejecutado acciones esperadas.**
+- Requerir evidencia proporcional a la naturaleza del cambio: build → demostrar compilación, tests → demostrar comportamiento esperado, lint → demostrar cumplimiento, runtime → demostrar comportamiento real, diff → demostrar alcance del cambio
+- Nivel de verificación proporcional al riesgo
+- Principio: «Do not confuse an action performed with a result demonstrated.»
+
+## Integración con Wait a Minute
+
+Las políticas no forman una pipeline rígida que se ejecute siempre de principio a fin. Wait a Minute actúa como orquestador de profundidad:
+
+```
+Task
+  │
+  ├── Investigate?      ← ¿Necesario según complejidad/ambiguedad?
+  ├── Scope?            ← ¿Se detecta scope creep o expansión no solicitada?
+  ├── Simplify?         ← ¿Aplicar principios Ponytail por defecto?
+  ├── Implement         ← Ejecución de la tarea
+  ├── Debug?            ← ¿Evidence of failure exists?
+  ├── Review?           ← ¿Cambio relevante fue realizado?
+  └── Verify            ← ¿Evidence available for completion?
+```
+
+**Profundidad por tipo de tarea:**
+- **Tarea trivial**: Scope → Implement → Verify
+- **Modificación normal**: Investigate → Scope → Simplify → Implement → Review → Verify
+- **Cambio complejo o alto riesgo**: Investigate → Scope → Design/implementation → Review → Verify (Debug activado solo cuando evidencia de fallo)
+
+## No-Goals (lo que este Change NO hace)
+- No crear un skill independiente para cada principio (duplicaría instrucciones)
+- No obligar al agente a ejecutar todas las fases en todas las tareas
+- No convertir Investigate en investigación exhaustiva por defecto
+- No permitir que Simplify se convierta en excusa para omitir requisitos
+- No permitir que Scope impida cambios necesarios para completar la tarea
+- No permitir que Verify se reduzca a afirmación textual de que algo funciona
+- Las políticas son composables y pueden usarse desde distintos workflows de Wait a Minute
+- El mecanismo de selección de profundidad queda separado de las políticas mismas
+
+## Resultado esperado
+Wait a Minute proporciona al agente un conjunto pequeño y coherente de restricciones cognitivas que reducen:
+- Implementación prematura
+- Scope creep
+- Sobreingeniería
+- Debugging por ensayo y error
+- Errores no detectados durante review
+- Declaraciones falsas de finalización
+
+El resultado es un agente que se detiene cuando corresponde, investigue cuando corresponde, simplifique cuando corresponde y exija evidencia antes de considerar terminado un trabajo.
+
+## Referencias (fuentes esenciales, sin relleno)
+
+1. **Especificación Wait a Minute** — El prompt y diseño del usuario sobre capa de pre-flight cognitivo, analysis de proyecto, assumption audit, classification de tareas, modes FAST/NORMAL/STRICT, 4 categorías KNOWN/INFERRED/ASSUMED/UNKNOWN, skill discovery mediante mecanismos nativos de OpenCode. Conversación directa con agente en sesiones actuales.
+
+2. **Arquitectura de OpenCode** — Exploración realizada en este trabajo: `/home/nicolas/.config/opencode/opencode.jsonc`, plugin system con hook `chat.message`, `tierCaps`, `sessionStore`, `enforcement modes`, `preset`/`budget` commands, `modes` system. Studied en `opencode-model-router` package source y configuración abierta.
+
+3. **Formato SKILL.md de OpenCode** — Estructura observada en habilidades existentes: `efficient-coding/SKILL.md`, `nestjs-best-practices/SKILL.md`, metadatos `name/description/triggers/compatibility/metadata`, `triggers` y `negatives` fields. Patrón de `tool` tool usage guidelines.
+
+4. **Hook `chat.message` en OpenCode** — Mecanismo de intercepción de prompts estudiado en `opencode-model-router` source (`/home/nicolas/.cache/opencode/packages/opencode-model-router/node_modules/opencode-model-router/src/index.ts`). Fires antes de skill resolution y agente execution. Capacidad de modificar prompt, archivos, skills y metadata. Este es el punto de extensión principal utilizado por Wait a Minute.
+
+5. **Discovery nativo de skills en OpenCode** — Decisión de diseño explícita: aprovechar directorios `.opencode/skills`, `~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills` en lugar de crear registry paralelo. Compatible con skills de Claude y patrón de carga bajo demanda. Decisión tomada después de verificar que OpenCode ya expone skills al agente con metadata/descripción y carga bajo demanda.
+
+## Change log
+- Creado: 2026-08-30 — Documentación inicial de 6 políticas de comportamiento para Wait a Minute
+- Pendiente: Validación en sesión de cómo cada política se activa proporcionalmente según clasificación de tarea (FAST/NORMAL/STRICT)
+- Pendiente: Integración con hook `chat.message` existente y estructura de sesión de OpenCode
