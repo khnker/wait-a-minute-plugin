@@ -298,4 +298,76 @@ export default {
 
     return strictPatterns.some(p => p.test(lower));
   },
+
+  /**
+   * Presentar validación de pre-flight al agente/usuario.
+   * 
+   * Muestra un resumen estructurado del análisis y solicita confirmación
+   * sobre la estrategia a seguir. Retorna el modo de respuesta esperado:
+   * 'continue' (proceder), 'correct' (necesita ajustes) o 'more-info'
+   * (mostrar detalle completo).
+   * 
+   * @param {Object} analysis - Resultado del análisis wait-a-minute.analysis
+   * @param {Object} [ctx] - Contexto de OpenCode (sistema prompt, etc.)
+   * @returns {Object} - Modo de respuesta: continue | correct | more-info
+   */
+  presentValidation: async function({ analysis, ctx } = {}) {
+    // Si no hay análisis, retornarcontinue por defecto
+    if (!analysis) {
+      return { mode: 'continue', advice: 'No hay análisis previo' };
+    }
+
+    const summary = this.generateSummary(analysis);
+    const mode = analysis.strategy || 'NORMAL';
+    
+    // Determinar si mostrar validación según modo
+    const showValidation = mode !== 'FAST'; // FAST omite validación
+    
+    if (!showValidation) {
+      return { mode: 'continue', advice: 'Tarea trivial - proceder directamente' };
+    }
+
+    // Construir mensaje de validación
+    const validationLines = [
+      'Wait a minute — Confirmación estratégica',
+      '',
+      `Intención: ${analysis.intent.classification} (confianza: ${analysis.intent.confidence}%) | Modo: ${mode}`,
+      `Stack: ${analysis.project.detected_stack}`,
+      analysis.project.architecture !== 'unknown' && `Arquitectura: ${analysis.project.architecture}`,
+      '',
+      'Conocido(s): ' + (analysis.known.length > 0 ? analysis.known.slice(0, 3).join(', ') : 'ninguno'),
+      'Inferido(s): ' + (analysis.inferred.length > 0 ? analysis.inferred.slice(0, 3).join(', ') : 'ninguno'),
+      'Asumido(s): ' + (analysis.assumed.length > 0 ? analysis.assumed.slice(0, 3).join(', ') : 'ninguno'),
+      'Desconocido(s): ' + (analysis.unknown.length > 0 ? analysis.unknown.slice(0, 3).join(', ') : 'ninguno'),
+      '',
+      'Skills seleccionadas: ' + analysis.skills.selected.join(', '),
+      analysis.skills.rejected.length > 0 && `Skills rechazadas: ${analysis.skills.rejected.join(', ')}`,
+      '',
+      `Riesgo: ${analysis.risk} | Complejidad: ${analysis.complexity} | Ambigüedad: ${analysis.ambiguity}`,
+      `Estrategia recomendada: ${analysis.strategy}`,
+      '',
+      '¿Proceder con esta estrategia?',
+      '  [continuar]   → Ejecutar implementación con estrategia ' + mode,
+      '  [corregir]    → Ver detalles y hacer ajustes',
+      '  [más información] → Expandir análisis completo',
+      '',
+      'Respuesta esperada: continuar / corregir / más información',
+    ];
+
+    // Inyectar en el sistema prompt si hay contexto ctx
+    if (ctx && ctx?.system) {
+      ctx.system.unshift({
+        type: 'text' as const,
+        text: validationLines.join('\n') + '\n',
+      });
+    }
+
+    // Retornar estructura para que el agente principal procese la respuesta
+    return {
+      mode: 'validation-pending',
+      summary: summary,
+      validationLines,
+      advice: 'Esperando respuesta del agente/usuario',
+    };
+  },
 };
