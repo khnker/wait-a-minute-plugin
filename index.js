@@ -1,4 +1,6 @@
 import { analyze, getTaskState, persistTaskState } from "./engine.js";
+import fs from "node:fs";
+import path from "node:path";
 
 /**
  * Wait a Minute plugin for OpenCode — Pre-Flight Cognitive Layer.
@@ -299,9 +301,7 @@ const waitAMinute = {
    */
   loadBundledRegistry: function() {
     try {
-      const fs = require("node:fs");
-      const path = require("node:path");
-      const registryPath = path.join(path.dirname(new URL(import.meta.url).pathname), "skills", "registry.json");
+      const registryPath = path.join(import.meta.dirname, "skills", "registry.json");
       if (!fs.existsSync(registryPath)) return {};
       const entries = JSON.parse(fs.readFileSync(registryPath, "utf-8"));
       const reg = {};

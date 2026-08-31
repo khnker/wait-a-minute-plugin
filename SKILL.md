@@ -166,8 +166,12 @@ Para:
 
 Wait a Minute debe aprovechar el sistema nativo de skills de OpenCode. No debe cargar indiscriminadamente todas las skills.
 
+**Fuentes de skills:**
+1. **Catálogo embebido de WAM** (`skills/registry.json`, ~2.000 skills curadas) — corpus autocontenido distribuido con el plugin; la única fuente de skills externas, sin red en runtime.
+2. Skills nativas del sistema OpenCode (`.opencode/skills`, `~/.config/opencode/skills`, `.claude/skills`, `~/.claude/skills`, `.agents/skills`, `~/.agents/skills`)
+
 **Proceso:**
-1. Observar las skills disponibles (`.opencode/skills`, `~/.config/opencode/skills`, `.claude/skills`, `~/.claude/skills`, `.agents/skills`, `~/.agents/skills`)
+1. Observar las skills disponibles (catálogo embebido + ubicaciones OpenCode)
 2. Comparar sus descripciones con la tarea
 3. Seleccionar las potencialmente relevantes
 4. Cargar el contenido completo solamente de las skills candidatas
@@ -175,6 +179,7 @@ Wait a Minute debe aprovechar el sistema nativo de skills de OpenCode. No debe c
 6. Recomendar el conjunto mínimo necesario
 
 **Skills compatibles:**
+- Catálogo embebido WAM (`skills/registry.json`)
 - `.opencode/skills`
 - `~/.config/opencode/skills`
 - `.claude/skills`
@@ -183,6 +188,8 @@ Wait a Minute debe aprovechar el sistema nativo de skills de OpenCode. No debe c
 - `~/.agents/skills`
 
 Y cualquier otra ubicación soportada oficialmente por OpenCode.
+
+> Nota: los repos upstream (khasky/whobat/antigravity) son SOLO fuentes de build del maintainer vía `scripts/build-registry.cjs`; nunca se consultan en runtime.
 
 ## Skill Selection
 

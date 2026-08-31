@@ -235,5 +235,19 @@ try {
   failed++;
 }
 
+// --- Escenario 16: catálogo embebido autocontenido (offline) ---
+console.log('16. Catálogo embebido autocontenido (sin red)');
+try {
+  const bundled = waitAMinute.loadBundledRegistry();
+  assert(bundled && Object.keys(bundled).length > 500, `Bundled catalog should have >500 skills (got ${Object.keys(bundled || {}).length})`);
+  const sample = Object.values(bundled)[0];
+  assert(sample.id && sample.description, 'skills embebidas tienen id + descripción');
+  console.log(`   ✓ catálogo embebido cargado: ${Object.keys(bundled).length} skills, sin red`);
+  passed++;
+} catch (e) {
+  console.log(`   ✗ Falló: ${e.message}`);
+  failed++;
+}
+
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 process.exitCode = failed > 0 ? 1 : 0;
