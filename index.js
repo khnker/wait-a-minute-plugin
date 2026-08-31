@@ -45,8 +45,9 @@ function emitTextPart(output, text, meta = {}) {
 // -- v1-enforcement: estado durable, contrato y progreso --------
 
 function nextActionFrom(state) {
-  const pending = (state?.requirements || []).find((r) => r.status !== "done");
-  if (pending) return `Implementar ${pending.title} (${pending.id} pendiente)`;
+  const pending = (state?.requirements || []).find((r) => !["done", "verified"].includes(r.status));
+  if (pending) return `Implementar ${pending.title} (${pending.id} ${pending.status})`;
+  if (state?.requirements?.length && state.requirements.some(r => r.status === "implemented")) return "Verificar requisitos antes de DONE";
   if (state?.requirements?.length) return "Verificar requisitos completos antes de DONE";
   return "Continuar tarea";
 }
@@ -214,7 +215,22 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       // 6. Inyectar estado + gate + badge + skills (path) al system prompt
       const inject = [];
-      injectOperationalMemory(inject, analysis);
+      injectOperationalMemory(inject);
+      
+      // EXPLICIT CONTRACT EXPOSURE
+      if (state.phase === "PROPOSED") {
+        inject.push(
+          "──────────────────────────────────────────────",
+          "📋 CONTRATO DE TAREA (PROPOSED)",
+          `Objetivo: ${state.contract.objective || "Pendiente definir"}`,
+          "Etapas:",
+          ...state.requirements.map((r, i) => `  ${i+1}. ${r.title}`),
+          "Verificación:",
+          ...state.contract.verification.map((v) => `  - ${v}`),
+          "──────────────────────────────────────────────"
+        );
+      }
+
       if (state.requirements?.length) {
         const pend = state.requirements.filter((r) => r.status !== "done").length;
         inject.push(`[wait-a-minute: task ${taskId} — fase ${state.phase}, ${pend}/${state.requirements.length} requisitos pendientes]`);
