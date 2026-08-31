@@ -3,29 +3,29 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub repo](https://img.shields.io/badge/GitHub-khnker/wait-a-minute-plugin-blue.svg)](https://github.com/khnker/wait-a-minute-plugin)
 
-## Descripción
+## Description
 
-**Wait a Minute** es una capa de pre-flight cognitivo para OpenCode que analiza las peticiones del usuario **antes** de que el agente comience su procesamiento. Su objetivo es reducir decisiones incorrectas causadas por asumir contexto no verificado.
+**Wait a Minute** is a cognitive pre-flight layer for OpenCode that analyzes user requests **before** the agent starts processing them. Its goal is to reduce incorrect decisions caused by assuming unverified context.
 
-El sistema se ejecuta en el hook de sesión `prompt` de OpenCode, interceptando el request antes de la resolución de skills y la invocación del agente.
+The system runs on OpenCode's session `prompt` hook, intercepting the request before skill resolution and agent invocation.
 
-## Características
+## Features
 
-- **Análisis previo al agente**: Intercepta prompts vía hook `chat.message` antes de skill resolution
-- **4 categorías de contexto**: KNOWN, INFERRED, ASSUMED, UNKNOWN — rastreo explícito de qué se sabe, qué se deduce, qué se asume y qué falta por conocer
-- **3 modos de operación**:
-  - `FAST`: Tareas triviales — bypass, proceder directamente
-  - `NORMAL` (por defecto): Análisis ligero, preguntas solo si son necesarias
-  - `STRICT`: Arquitectura, seguridad, migraciones, alto riesgo — análisis profundo requerido
-- **Discovery nativo de skills**: Aprovecha el sistema de skills de OpenCode (`~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills`, etc.) sin registry paralelo
-- **Integración OpenSpec**: Reconocce `openspec/project.md`, `openspec/specs`, `openspec/changes` como fuente de contexto
-- **Auditoría de suposiciones**: Detecta y hace explícitas suposiciones que podrían cambiar la solución
-- **Handoff estructurado**: Resultados almacenados en sesión para el agente principal, evitando re-análisis
-- **15 escenarios de prueba cubiertos**: Bypass trivial, preguntas para ambigüedad, info en repo→no question, arquitectura→deep, selección/rechazo de skills, redundantes→reducción, sin contexto→preguntas, AGENTS.md→uso, OpenSpec→integración, errores de herramienta, prevention de loops, preservación de prompt, modos FAST/NORMAL/STRICT, operaciones destructivas→STRICT
+- **Pre-agent analysis**: Intercepts prompts via the `chat.message` hook before skill resolution
+- **4 context categories**: KNOWN, INFERRED, ASSUMED, UNKNOWN — explicit tracking of what is known, deduced, assumed, and still missing
+- **3 operating modes**:
+  - `FAST`: Trivial tasks — bypass, proceed directly
+  - `NORMAL` (default): Light analysis, questions only when necessary
+  - `STRICT`: Architecture, security, migrations, high risk — in-depth analysis required
+- **Native skill discovery**: Leverages OpenCode's skills system (`~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills`, etc.) without a parallel registry
+- **OpenSpec integration**: Recognizes `openspec/project.md`, `openspec/specs`, `openspec/changes` as a context source
+- **Assumption auditing**: Detects and makes explicit assumptions that could change the solution
+- **Structured handoff**: Results stored in the session for the main agent, avoiding re-analysis
+- **15 covered test scenarios**: trivial bypass, questions for ambiguity, repo info→no question, architecture→deep, skill selection/rejection, redundant→reduction, no context→questions, AGENTS.md→use, OpenSpec→integration, tool errors, loop prevention, prompt preservation, FAST/NORMAL/STRICT modes, destructive operations→STRICT
 
-## Instalación
+## Installation
 
-El plugin está registrado en la configuración de OpenCode:
+The plugin is registered in the OpenCode configuration:
 
 ```json
 // /home/nicolas/.config/opencode/opencode.jsonc
@@ -39,159 +39,159 @@ El plugin está registrado en la configuración de OpenCode:
 ]
 ```
 
-## Cómo funciona
+## How it works
 
-1. **Usuario envía prompt** a OpenCode
-2. **Hook `chat.message`** se ejecuta antes de skill resolution
-3. **Wait a Minute analiza**:
-   - Clasificación de la petición (trivial/normal/architectural)
-   - Inspección del proyecto (AGENTS.md, package.json, OpenSpec specs, stack tecnológico)
-   - Auditoría de suposiciones (KNOWN/INFERRED/ASSUMED/UNKNOWN)
-   - Discovery y selección de skills pertinentes
-   - Determinación de modo (FAST/NORMAL/STRICT)
-4. **Resultados almacenados** en sesión (`sessionStore.set("waitAnalysis", analysis)`)
-5. **Agente principal recibe** contexto y decide cómo proceder
-6. **Si `ready: true`**: Proceed with implementation
-7. **Si `ready: false`**: Presentar summary y preguntas al usuario
+1. **User sends prompt** to OpenCode
+2. **`chat.message` hook** runs before skill resolution
+3. **Wait a Minute analyzes**:
+   - Request classification (trivial/normal/architectural)
+   - Project inspection (AGENTS.md, package.json, OpenSpec specs, tech stack)
+   - Assumption audit (KNOWN/INFERRED/ASSUMED/UNKNOWN)
+   - Discovery and selection of relevant skills
+   - Mode determination (FAST/NORMAL/STRICT)
+4. **Results stored** in session (`sessionStore.set("waitAnalysis", analysis)`)
+5. **Main agent receives** context and decides how to proceed
+6. **If `ready: true`**: Proceed with implementation
+7. **If `ready: false`**: Present summary and questions to the user
 
-## Output de ejemplo
+## Example output
 
 ```
 Wait a minute.
 
-Intención: implementation (confianza: 75%)
+Intention: implementation (confidence: 75%)
 Stack: typescript
-Conocido(s): AGENTS.md presente en el proyecto; package.json detectado; Dependencias: typescript, @nestjs/core
-Inferido(s): NestJS framework detectado
-Asumido(s): El usuario asume que se necesita agregar nueva funcionalidad
-Desconocido(s): Contexto del proyecto limitado - inspección recomendada
+Known: AGENTS.md present in project; package.json detected; Dependencies: typescript, @nestjs/core
+Inferred: NestJS framework detected
+Assumed: User assumes new functionality needs to be added
+Unknown: Limited project context - inspection recommended
 
-Skills candidatas: oauth (rel 80), security-review (rel 70), nestjs (rel 60)
-Skills seleccionadas: oauth, security-review, nestjs
-Skills rechazadas: frontend, testing, architecture
+Candidate skills: oauth (rel 80), security-review (rel 70), nestjs (rel 60)
+Selected skills: oauth, security-review, nestjs
+Rejected skills: frontend, testing, architecture
 
-Riesgo: medium
-Complejidad: medium
-Ambigüedad: medium
-Estrategia: NORMAL
+Risk: medium
+Complexity: medium
+Ambiguity: medium
+Strategy: NORMAL
 
-¿Listo para proceder?: NO
+Ready to proceed?: NO
 
-Consejo: Falta una decisión que cambia la implementación: ¿quieres mantener JWT como sesión interna o pasar a sesiones gestionadas por OAuth?
+Advice: A decision that changes the implementation is missing: do you want to keep JWT as an internal session or move to OAuth-managed sessions?
 ```
 
-## Casos de uso
+## Use cases
 
-### Petición trivial → Bypass
-> "Renombra la variable X a Y"
+### Trivial request → Bypass
+> "Rename variable X to Y"
 - Wait a Minute: `FAST mode, trivial`
-- Agente: Proceder directamente con el rename
+- Agent: Proceed directly with the rename
 
-### Petición ambigua → Preguntas
-> "Agrega Redis para mejorar el rendimiento"
-- Wait a Minute: Inspecciona proyecto, detecta que Redis no está configurado, pregunta sobre decisión crítica
-- Agente: Esperar respuesta del usuario antes de implementar
+### Ambiguous request → Questions
+> "Add Redis to improve performance"
+- Wait a Minute: Inspects the project, detects Redis is not configured, asks about the critical decision
+- Agent: Wait for the user's answer before implementing
 
-### Arquitectura → Modo STRICT
-> "Migra PostgreSQL a proveedor cloud"
+### Architecture → STRICT mode
+> "Migrate PostgreSQL to a cloud provider"
 - Wait a Minute: `STRICT mode, high risk`
-- Agente: Análisis profundo antes de cualquier cambio
+- Agent: In-depth analysis before any change
 
-### Contexto disponible → No preguntar
-> "¿Qué framework usa el proyecto?"
-- Wait a Minute: Detecta `package.json` con `nestjs`/`angular`/`express`, responde basándose en el repo
-- Agente: Continuar sin preguntas
+### Available context → No questions
+> "What framework does the project use?"
+- Wait a Minute: Detects `package.json` with `nestjs`/`angular`/`express`, answers based on the repo
+- Agent: Continue without questions
 
-## Arquitectura
+## Architecture
 
-El plugin consta de 3 componentes:
+The plugin consists of 3 components:
 
-1. **`index.js`**: Plugin factory registrada en OpenCode, hook `chat.message`, API pública (`analyze`, `generateSummary`, `isTrivial`, `requiresStrict`, `presentValidation`)
-2. **`engine.js`**: Motor de análisis core - clasificación, inspección de proyecto, auditoría de suposiciones, discovery de skills, determinación de modo
-3. **`SKILL.md`**: Filosofía, framework de 4 categorías, definiciones de modos, heurísticas de skill discovery
+1. **`index.js`**: Plugin factory registered in OpenCode, `chat.message` hook, public API (`analyze`, `generateSummary`, `isTrivial`, `requiresStrict`, `presentValidation`)
+2. **`engine.js`**: Core analysis engine - classification, project inspection, assumption audit, skill discovery, mode determination
+3. **`SKILL.md`**: Philosophy, 4-category framework, mode definitions, skill discovery heuristics
 
-## Confirmación Estratégica (`presentValidation`)
+## Strategic Confirmation (`presentValidation`)
 
-Después del análisis pre-flight, para tareas en modo **NORMAL** o **STRICT**, Wait a Minute presenta un checkpoint de confirmación antes de que el agente principal proceda con la implementación.
+After the pre-flight analysis, for tasks in **NORMAL** or **STRICT** mode, Wait a Minute presents a confirmation checkpoint before the main agent proceeds with implementation.
 
-Este checkpoint asegura que el usuario valida la estrategia determinada por el sistema, evitando que el agente ejecute cambios basados en suposiciones no verificadas.
+This checkpoint ensures the user validates the strategy determined by the system, preventing the agent from executing changes based on unverified assumptions.
 
-### Cómo aparece
+### How it appears
 
 ```
-Wait a minute — Confirmación estratégica
+Wait a minute — Strategic confirmation
 
-Intención: implementation (confianza: 75%) | Modo: NORMAL
-Stack: typescript | Arquitectura: nestjs project
+Intention: implementation (confidence: 75%) | Mode: NORMAL
+Stack: typescript | Architecture: nestjs project
 
-Conocido(s): AGENTS.md presente; package.json detectado; Dependencias: typescript, @nestjs/core
-Inferido(s): NestJS framework detectado
-Asumido(s): Se mantiene JWT como sesión interna (por definir)
-Desconocido(s): ¿El nuevo endpoint OAuth reemplaza o extiende la autenticación actual?
+Known: AGENTS.md present; package.json detected; Dependencies: typescript, @nestjs/core
+Inferred: NestJS framework detected
+Assumed: JWT kept as internal session (to be defined)
+Unknown: Does the new OAuth endpoint replace or extend the current authentication?
 
-Skills seleccionadas: oauth, security-review
-Skills rechazadas: [risk: high] destructive-skill
+Selected skills: oauth, security-review
+Rejected skills: [risk: high] destructive-skill
 
-Riesgo: medium | Complejidad: medium | Ambigüedad: medium
+Risk: medium | Complexity: medium | Ambiguity: medium
 
-Estrategia recomendada: NORMAL
+Recommended strategy: NORMAL
 
-¿Proceder con esta estrategia?
-  [continuar]   → Ejecutar implementación con estrategia NORMAL
-  [corregir]    → Ver detalles y hacer ajustes
-  [más información] → Expandir análisis completo
+Proceed with this strategy?
+  [continue]        → Run implementation with NORMAL strategy
+  [correct]         → See details and make adjustments
+  [more info]       → Expand full analysis
 ```
 
-### Opciones de respuesta
+### Response options
 
-| Opción | Qué hace |
-|--------|----------|
-| `continuar` | Procede con la implementación usando la estrategia determinada por Wait a Minute |
-| `corregir` | Muestra detalles adicionales y permite hacer ajustes antes de continuar |
-| `más información` | Expande el análisis completo con todos los campos y detalle adicional |
+| Option | What it does |
+|--------|--------------|
+| `continue` | Proceeds with implementation using the strategy determined by Wait a Minute |
+| `correct` | Shows additional details and allows adjustments before continuing |
+| `more info` | Expands the full analysis with all fields and extra detail |
 
-### Comportamiento por modo
+### Behavior by mode
 
-| Modo | ¿Muestra checkpoint? | Detalle |
-|------|---------------------|---------|
-| **FAST** | No — bypass | Tareas triviales proceden directamente sin preguntas |
-| **NORMAL** | Sí | Checkpoint estándar con resumen de análisis |
-| **STRICT** | Sí (+ profundidad) | Checkpoint con campos ampliados de riesgo/ambigüedad |
+| Mode | Shows checkpoint? | Detail |
+|------|-------------------|--------|
+| **FAST** | No — bypass | Trivial tasks proceed directly without questions |
+| **NORMAL** | Yes | Standard checkpoint with analysis summary |
+| **STRICT** | Yes (+ depth) | Checkpoint with expanded risk/ambiguity fields |
 
-### Origen del prompt
+### Prompt origin
 
-La determinación de modo (y por tanto si aparece el checkpoint) se basa en el **contenido del prompt**, no en quién lo envía:
+Mode determination (and therefore whether the checkpoint appears) is based on the **prompt content**, not on who sends it:
 
-- Prompt trivial (`rename`, `list`, `show`, etc.) de usuario **o** agente → modo FAST → sin checkpoint
-- Prompt no trivial de usuario **o** agente → modo NORMAL/STRICT → checkpoint obligatorio
+- Trivial prompt (`rename`, `list`, `show`, etc.) from user **or** agent → FAST mode → no checkpoint
+- Non-trivial prompt from user **or** agent → NORMAL/STRICT mode → mandatory checkpoint
 
-## Desarrollo
+## Development
 
-### Estructura del repo
+### Repo structure
 
 ```
 /home/nicolas/dev/wait-a-minute-plugin/
-├── README.md          ← Este archivo
-├── SKILL.md           Filosofía y framework
-├── engine.js          Motor de análisis
-├── index.js           Plugin factory + API pública
-└── package.json       Metadatos
+├── README.md          ← This file
+├── SKILL.md           Philosophy and framework
+├── engine.js          Analysis engine
+├── index.js           Plugin factory + public API
+└── package.json       Metadata
 ```
 
-### Para contribuir
+### Contributing
 
-1. Fork el repositorio
-2. Crear rama: `git checkout -b feature/nueva-caracteristica`
-3. Commit: `git commit -m "Add nueva característica"`
+1. Fork the repository
+2. Create a branch: `git checkout -b feature/new-feature`
+3. Commit: `git commit -m "Add new feature"`
 4. Push: `git push origin main`
 5. Pull Request
 
-## Licencia
+## License
 
 MIT © khnker
 
-## Referencias
+## References
 
 - OpenCode Documentation: https://opencode.ai
 - OpenSpec: https://openspec.io
-- Skill Discovery: Usa habilidades nativas en `.opencode/skills`, `~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills`
+- Skill Discovery: Uses native skills in `.opencode/skills`, `~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills`
