@@ -540,9 +540,21 @@ export async function analyze(options) {
   // Step 5: Select skills for this task
   const skillSelection = discoverSkillsForTask(prompt, projectInfo, filterAvailableSkills);
 
-  // Step 6: Determine mode
+  // Step 6: Determine mode and contract
   const riskLevel = assumptions.some(a => /alto riesgo|high risk|peligroso|destructivo/.test(a)) ? "high" : "medium";
   const modeInfo = determineMode(classification, projectInfo, riskLevel);
+
+  // Completion Contract proposal
+  const completionContract = {
+    requirements: [
+        "Tarea completada según intención",
+        "Resultados verificables"
+    ],
+    constraints: [],
+    verification: ["Evidencia de satisfacción del contrato"],
+    status: "PROPOSED",
+    rigor: modeInfo.mode
+  };
 
   // Step 7: Build the output
   const result = {
@@ -551,6 +563,7 @@ export async function analyze(options) {
       ambiguity: classification.ambiguity,
       confidence: classification.confidence,
     },
+    completionContract,
     project: {
       detected_stack: projectInfo.detected_stack || "unknown",
       architecture: projectInfo.known?.includes("openspec") ? "openspec project" : "unknown",

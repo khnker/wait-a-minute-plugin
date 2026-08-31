@@ -51,7 +51,7 @@ const WaitAMinutePlugin = async (ctx) => {
 
       if (!promptText.trim()) return;
 
-      // Run wait-a-minute pre-flight analysis
+    // Run wait-a-minute pre-flight analysis
       const analysis = await waitAMinute.analyze({
         prompt: promptText,
         projectPath: ctx.directory,
@@ -61,8 +61,12 @@ const WaitAMinutePlugin = async (ctx) => {
         activeMode: cfg.activeMode,
       });
 
+      // Completion Contract lifecycle: PROPOSED by default for any analysis
+      analysis.completionContract.status = "PROPOSED";
+      
       // Store analysis results in session for access by agent
       sessionStore.set("waitAnalysis", analysis);
+      sessionStore.set("completionContract", analysis.completionContract);
 
       // Present strategic confirmation for every message
       waitAMinute.presentValidation({ analysis, ctx: output });
@@ -309,7 +313,11 @@ const waitAMinute = {
     const mode = analysis.strategy || "NORMAL";
 
     const validationLines = [
-      "Wait a minute — Confirmación estratégica",
+      "Wait a minute — Completion Contract (PROPOSED)",
+      "",
+      `Contract Status: ${analysis.completionContract.status} | Rigor: ${analysis.completionContract.rigor}`,
+      `Requirements: ${analysis.completionContract.requirements.join(", ")}`,
+      `Verification: ${analysis.completionContract.verification.join(", ")}`,
       "",
       `Intención: ${analysis.intent.classification} (confianza: ${analysis.intent.confidence}%) | Modo: ${mode}`,
       `Stack: ${analysis.project.detected_stack}`,
