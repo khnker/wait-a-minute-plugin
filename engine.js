@@ -54,9 +54,9 @@ function fileExists(filePath) {
 /**
  * Ejecuta un comando y captura salida, falla silenciosamente
  */
-function runCommand(cmd) {
+function runCommand(cmd, cwd) {
   try {
-    return execSync(cmd, { cwd: process.cwd, timeout: 10000, encoding: "utf-8" });
+    return execSync(cmd, { cwd: cwd || process.cwd(), timeout: 30000, encoding: "utf-8" });
   } catch {
     return "";
   }
@@ -316,14 +316,384 @@ function evaluatePersistentPolicies(prompt, projectInfo, classification, mode) {
 // metadata -> routing -> aprobación -> carga on-demand. No contamina contexto.
 // ---------------------------------------------------------------------------
 
-const SKILL_REGISTRY_SOURCES = [
-  { id: "awesome-agent-skills", repo: "https://github.com/khasky/awesome-agent-skills" },
-  { id: "ai-agent-skills", repo: "https://github.com/whobat/AI-Agent-skills" },
-  { id: "antigravity-awesome-skills", repo: "https://github.com/sickn33/antigravity-awesome-skills" },
+// Fuentes declarativas — configurables vía config.sources, no hardcodeadas en el router.
+// Los repos externos son fuentes de ADQUISICIÓN, no la fuente de verdad del runtime.
+const SOURCE_CONFIG = [
+  {
+    id: "khasky-awesome-agent-skills",
+    type: "git",
+    repository: "https://github.com/khasky/awesome-agent-skills.git",
+    enabled: true,
+    trust: "curated",
+    description: "Curated source for coding-agent skills",
+  },
+  {
+    id: "whobat-ai-agent-skills",
+    type: "git",
+    repository: "https://github.com/whobat/AI-Agent-skills.git",
+    enabled: true,
+    trust: "community",
+    description: "Additional discovery source",
+  },
+  {
+    id: "antigravity-awesome-skills",
+    type: "git",
+    repository: "https://github.com/sickn33/antigravity-awesome-skills.git",
+    enabled: true,
+    trust: "community",
+    description: "Large discovery corpus — no auto-approval",
+  },
 ];
 
 const SKILL_LIFECYCLE = ["DISCOVERED", "EVALUATING", "APPROVED", "AVAILABLE", "LOADED", "USED", "REJECTED", "DEPRECATED", "DISABLED"];
 const APPROVED_STATUSES = ["APPROVED", "AVAILABLE", "LOADED"];
+
+// Pesos de scoring configurables (spec §7)
+const DEFAULT_SCORING_WEIGHTS = {
+  name: 5,
+  capability: 4,
+  keyword: 3,
+  description: 2,
+  domain: 1,
+};
+
+/**
+ * Asegura la estructura del corpus local .wam/skills/
+ */
+function ensureSkillCorpus(baseDir) {
+  const root = path.join(baseDir || process.cwd(), ".wam", "skills");
+  try {
+    for (const sub of ["sources", "registry", "cache", "policies"]) {
+      const dir = path.join(root, sub);
+      if (!fileExists(dir)) fs.mkdirSync(dir, { recursive: true });
+    }
+    return root;
+  } catch {
+    return null; // corpus no disponible (permisos/ruta inválida) — continuar sin persistencia
+  }
+}
+
+/**
+ * Parseo de frontmatter YAML mínimo (name, description, keywords, compatibility).
+ * v1: regex simple, sin dependencias. No carga contenido post-frontmatter.
+ */
+function parseFrontmatter(skillMdContent) {
+  const meta = { name: null, description: "", keywords: [], compatibility: [] };
+  const match = skillMdContent.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!match) return meta;
+
+  const block = match[1];
+  const nameMatch = block.match(/^name\s*:\s*(.+)$/im);
+  if (nameMatch) meta.name = nameMatch[1].trim();
+
+  const descMatch = block.match(/^description\s*:\s*(.+)$/im);
+  if (descMatch) meta.description = descMatch[1].trim();
+
+  const kwMatch = block.match(/keywords\s*:\s*([\s\S]*?)(?:\n\w|\n---|$)/i);
+  if (kwMatch) {
+    const kwLines = kwMatch[1]
+      .split("\n")
+      .map((l) => l.trim().replace(/^-\s*/, "").replace(/^["']|["']$/g, ""))
+      .filter(Boolean);
+    meta.keywords = kwLines;
+  }
+
+  // Khasky usa metadata.tags — soportar ambos formatos
+  if (meta.keywords.length === 0) {
+    const tagsMatch = block.match(/tags\s*:\s*(\[[^\]]*\]|[\s\S]*?)(?:\n\w|\n---|$)/i);
+    if (tagsMatch) {
+      const tags = tagsMatch[1].trim();
+      if (tags.startsWith("[")) {
+        meta.keywords = tags
+          .replace(/^\[|\]$/g, "")
+          .split(",")
+          .map((t) => t.trim().replace(/^["']|["']$/g, ""))
+          .filter(Boolean);
+      } else {
+        meta.keywords = tags
+          .split("\n")
+          .map((l) => l.trim().replace(/^-\s*/, "").replace(/^["']|["']$/g, ""))
+          .filter(Boolean);
+      }
+    }
+  }
+
+  const compatMatch = block.match(/compatibility\s*:\s*(.+)$/im);
+  if (compatMatch) {
+    meta.compatibility = compatMatch[1]
+      .split(/[,\s]+/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return meta;
+}
+
+/**
+ * Genera keywords deterministas desde name + description.
+ * Las keywords derivadas quedan marcadas (spec §9).
+ */
+function deriveKeywords(name, description) {
+  const words = new Set();
+  const source = `${name || ""} ${description || ""}`.toLowerCase();
+  for (const w of source.split(/[^a-z0-9]+/)) {
+    if (w.length >= 3 && !["the", "and", "for", "with", "skill", "skills", "this"].includes(w)) {
+      words.add(w);
+    }
+  }
+  return [...words].slice(0, 12);
+}
+
+/**
+ * Lee el commit actual de un repo local.
+ */
+function getRepoCommit(repoDir) {
+  const head = path.join(repoDir, ".git", "HEAD");
+  if (!fileExists(head)) return null;
+  const ref = readFileSafely(head).trim().replace(/^ref:\s*/, "");
+  const refPath = path.join(repoDir, ".git", ref);
+  const sha = fileExists(refPath) ? readFileSafely(refPath).trim() : null;
+  return sha || ref;
+}
+
+/**
+ * Escanea un source clonado buscando SKILL.md, normaliza metadata, status DISCOVERED.
+ * No carga contenido post-frontmatter (spec §5).
+ */
+function scanSourceSkills(source, sourceDir) {
+  if (!fileExists(sourceDir)) return [];
+  const found = [];
+  const walk = (dir) => {
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (![".git", "node_modules"].includes(entry.name)) walk(full);
+        } else if (entry.name === "SKILL.md") {
+          const content = readFileSafely(full);
+          const fm = parseFrontmatter(content);
+          const relPath = path.relative(sourceDir, full).replace(/\\/g, "/");
+          const skillName =
+            fm.name?.toLowerCase().replace(/[^a-z0-9]+/g, "-") ||
+            path.basename(path.dirname(full)).toLowerCase();
+          const keywords = fm.keywords.length > 0 ? fm.keywords : deriveKeywords(fm.name, fm.description);
+          found.push({
+            id: `${source.id}-${skillName}`,
+            name: fm.name || skillName,
+            description: fm.description || "",
+            keywords,
+            keywordsDerived: fm.keywords.length === 0,
+            capabilities: [], // derivadas desde keywords en normalize
+            domain: [],
+            compatibility: fm.compatibility.length > 0 ? fm.compatibility : ["opencode"],
+            risk: "low",
+            source: {
+              id: source.id,
+              repository: source.repository,
+              path: relPath,
+              commit: getRepoCommit(sourceDir),
+            },
+            status: "DISCOVERED",
+            trust: source.trust,
+          });
+        }
+      }
+    } catch {}
+  };
+  walk(sourceDir);
+  return found;
+}
+
+/**
+ * Clona la fuente si no existe; si existe y hay git, hace fetch/pull best-effort.
+ */
+function acquireSource(source, baseDir) {
+  const dir = path.join(baseDir, "sources", source.id);
+  if (!fileExists(dir)) {
+    try {
+      runCommand(`git clone --depth 1 ${source.repository} "${dir}"`);
+    } catch {}
+    return { source, cloned: fileExists(dir), dir };
+  }
+
+  // Update: re-evaluar skills modificadas luego
+  const headBefore = getRepoCommit(dir);
+  try {
+    runCommand(`git -C "${dir}" fetch --all --quiet && git -C "${dir}" reset --hard origin/HEAD --quiet`);
+  } catch {}
+  return { source, cloned: true, dir, headBefore, headAfter: getRepoCommit(dir) };
+}
+
+/**
+ * Construye registry unificado: skills locales instaladas (APPROVED, confianza local)
+ * + skills descubiertas del corpus (DISCOVERED, requieren approval).
+ */
+function buildRegistryWithCorpus(availableSkills, baseDir, sources) {
+  const registry = buildSkillRegistry(availableSkills);
+  const corpusRoot = ensureSkillCorpus(baseDir);
+  const sourceList = sources && sources.length > 0 ? sources : SOURCE_CONFIG;
+
+  // Adquisición + indexado (solo si corpus disponible)
+  const acquired = [];
+  if (corpusRoot) {
+    for (const source of sourceList) {
+      if (source.enabled === false) continue;
+      try {
+        const res = acquireSource(source, corpusRoot);
+        if (res.cloned) {
+          const skills = scanSourceSkills(source, res.dir);
+          acquired.push(...skills);
+        }
+      } catch {}
+    }
+  }
+
+  // Registry persistente skills.json — load previo si existe
+  let registryFile = null;
+  let persisted = {};
+  if (corpusRoot) {
+    registryFile = path.join(corpusRoot, "registry", "skills.json");
+    if (fileExists(registryFile)) {
+      try {
+        persisted = JSON.parse(readFileSafely(registryFile));
+      } catch {}
+    }
+  }
+
+  // Merge: skills locales instaladas ganan (source of truth local), corpus añade DISCOVERED
+  for (const skill of acquired) {
+    if (registry[skill.name]) continue; // no pisen skills locales
+    const prev = persisted[skill.id];
+    registry[skill.id] = { ...skill, status: prev?.status || "DISCOVERED" };
+  }
+
+  return { registry, corpusRoot, sources: sourceList, registryFile };
+}
+
+/**
+ * Persiste el registry en skills.json (spec §2). No incluye contenido, solo metadata.
+ */
+function persistRegistry(registryFile, registry) {
+  fs.writeFileSync(registryFile, JSON.stringify(registry, null, 2));
+}
+
+/**
+ * Score de relevancia ponderado (spec §7) — pesos configurables.
+ */
+function scoreSkill(skill, promptTokens, weights) {
+  const w = { ...DEFAULT_SCORING_WEIGHTS, ...(weights || {}) };
+  const lowerPrompt = promptTokens.toLowerCase();
+  const name = (skill.name || "").toLowerCase();
+  const desc = (skill.description || "").toLowerCase();
+  let score = 0;
+
+  if (name && lowerPrompt.includes(name)) score += w.name;
+  for (const c of skill.capabilities || []) {
+    if (lowerPrompt.includes(c.toLowerCase())) score += w.capability;
+  }
+  for (const k of skill.keywords || []) {
+    if (lowerPrompt.includes(k.toLowerCase())) score += w.keyword;
+  }
+  if (desc && lowerPrompt.includes(desc.slice(0, 20))) score += w.description;
+  for (const d of skill.domain || []) {
+    if (lowerPrompt.includes(d.toLowerCase())) score += w.domain;
+  }
+  return score;
+}
+
+/**
+ * Detección de duplicados por similitud de nombre (spec §19).
+ * Clúster: canonical + alternatives. Nunca elimina automáticamente.
+ */
+function dedupRegistry(registry) {
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const clusters = [];
+  const seen = new Set();
+
+  for (const [id, skill] of Object.entries(registry)) {
+    const base = norm(skill.name || id).replace(/-(skill|skills)$/, "");
+    const baseWords = base.split("-");
+    const key = baseWords.slice(0, 2).join("-");
+    if (!seen.has(key)) {
+      seen.add(key);
+      clusters.push({ canonical: id, alternatives: [] });
+    } else {
+      const cluster = clusters.find((c) => norm(registry[c.canonical].name).startsWith(key) || key.startsWith(norm(registry[c.canonical].name).slice(0, 6)));
+      if (cluster) cluster.alternatives.push(id);
+    }
+  }
+  return clusters.filter((c) => c.alternatives.length > 0);
+}
+
+/**
+ * Registra uso de skill para auditabilidad (spec §24).
+ */
+function recordSkillUsage(usage, baseDir) {
+  const logFile = path.join(baseDir || process.cwd(), ".wam", "skills", "registry", "usage.log");
+  const entry = { at: new Date().toISOString(), ...usage };
+  let log = [];
+  if (fileExists(logFile)) {
+    try {
+      log = JSON.parse(readFileSafely(logFile));
+    } catch {}
+  }
+  log.push(entry);
+  if (log.length > 200) log = log.slice(-200);
+  fs.writeFileSync(logFile, JSON.stringify(log, null, 2));
+  return entry;
+}
+
+/**
+ * Routing con scoring ponderado + persistencia. Reemplaza routeSkills() en analyze.
+ */
+function routeSkillsV2(prompt, projectInfo, registry, mode, options = {}) {
+  const rigor = options.rigor || (mode === "FAST" ? "MINIMAL" : mode === "STRICT" ? "RIGOROUS" : "STANDARD");
+  const lower = prompt.toLowerCase();
+  const candidates = [];
+  const rejected = [];
+
+  for (const [id, skill] of Object.entries(registry)) {
+    if (!APPROVED_STATUSES.includes(skill.status)) {
+      rejected.push({ name: skill.name || id, reason: `estado ${skill.status} — requiere approval` });
+      continue;
+    }
+    const score = scoreSkill(skill, lower, options.weights);
+    if (score > 0) {
+      candidates.push({
+        id,
+        name: skill.name || id,
+        score,
+        matchingKeywords: (skill.keywords || []).filter((k) => lower.includes(k.toLowerCase())).slice(0, 4),
+        matchingCapabilities: (skill.capabilities || []).filter((c) => lower.includes(c.toLowerCase())),
+        risk: skill.risk,
+        source: skill.source?.id || "local",
+      });
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const limit = rigor === "MINIMAL" ? 0 : rigor === "RIGOROUS" ? 5 : 3;
+  const selected = candidates.slice(0, limit);
+  const overflow = candidates.slice(limit);
+
+  return {
+    candidates,
+    selected: selected.map((c) => ({
+      name: c.name,
+      relevance: c.score,
+      reason: `score ${c.score} (${c.matchingCapabilities.join(",") || c.matchingKeywords.join(",")})`,
+      capabilities: c.matchingCapabilities,
+      keywords: c.matchingKeywords,
+      risk: c.risk,
+      source: c.source,
+    })),
+    rejected: rejected.map((r) => r.name),
+    exceeded: overflow.map((c) => c.name),
+    counts: { selected: selected.length, limit, total: candidates.length },
+    explain: () =>
+      selected.map((c) => `  ${c.name}: score ${c.score} | caps: ${c.matchingCapabilities.join(",") || "-"} | kw: ${c.matchingKeywords.join(",") || "-"} | risk: ${c.risk} | src: ${c.source}`).join("\n"),
+  };
+}
 
 /**
  * Descubre skills en el registro (dirs locales), extrae metadata sin cargar contenido.
@@ -807,9 +1177,12 @@ export async function analyze(options) {
   // Step 3: Audit assumptions
   const assumptions = auditAssumptions(prompt, projectInfo);
 
-  // Step 5: Select skills for this task (registry metadata-first)
+  // Step 5: Select skills (registry unificado: local APPROVED + corpus DISCOVERED)
   const availableSkills = discoverSkills();
-  const skillRegistry = buildSkillRegistry(availableSkills);
+  const baseDir = projectPath || process.cwd();
+  const sources = config?.sources?.length > 0 ? config.sources : null;
+  const { registry: skillRegistry, corpusRoot, sources: usedSources, registryFile } =
+    buildRegistryWithCorpus(availableSkills, baseDir, sources);
 
   // Step 6: Determine mode and contract
   const riskLevel = assumptions.some(a => /alto riesgo|high risk|peligroso|destructivo/.test(a)) ? "high" : "medium";
@@ -818,16 +1191,24 @@ export async function analyze(options) {
   // Step 6.5: Persistent policies — transversal, siempre evaluadas
   const persistentPolicies = evaluatePersistentPolicies(prompt, projectInfo, classification, modeInfo.mode);
 
-  // Step 5.5: Skill routing por registry (metadata-first, límite por rigor)
+  // Step 5.5: Skill routing v2 — scoring ponderado + persistencia registry
   const rigor = modeInfo.mode === "FAST" ? "MINIMAL" : modeInfo.mode === "STRICT" ? "RIGOROUS" : "STANDARD";
-  const skillSelection = routeSkills(prompt, projectInfo, skillRegistry, rigor);
-  const skillQuality = Object.keys(skillRegistry).map((id) => evaluateSkill(id, skillRegistry));
-  const selectedSkills = skillSelection.selected.map((name) => ({
-    ...loadSkillOnDemand(name, skillRegistry),
-    name,
-    registryStatus: skillRegistry[name]?.status,
-    capabilities: skillRegistry[name]?.capabilities || [],
-  }));
+  const skillSelection = routeSkillsV2(prompt, projectInfo, skillRegistry, rigor, { rigor, weights: config?.scoringWeights });
+  try { persistRegistry(registryFile, skillRegistry); } catch {}
+
+  // Explicalidad: qué skills seleccionadas y por qué (spec §23)
+  const selectionExplain = skillSelection.explain();
+  const auditEntries = [];
+  try {
+    for (const s of skillSelection.selected) {
+      auditEntries.push(
+        recordSkillUsage(
+          { skill_id: s.name, source: s.source, selected_because: s.reason, loaded: false },
+          baseDir
+        )
+      );
+    }
+  } catch {}
 
   // Completion Contract proposal
   const completionContract = {
@@ -875,15 +1256,26 @@ export async function analyze(options) {
     // Skill Registry: metadata-first routing, on-demand
     skillRegistry: {
       total: Object.keys(skillRegistry).length,
-      approved: skillQuality.filter((s) => s.status === "APPROVED").length,
-      rejected: skillQuality.filter((s) => s.status !== "APPROVED").length,
-      sources: SKILL_REGISTRY_SOURCES.map((s) => s.id),
+      approved: Object.values(skillRegistry).filter((s) => APPROVED_STATUSES.includes(s.status)).length,
+      discovered: Object.values(skillRegistry).filter((s) => s.status === "DISCOVERED").length,
+      rejected: Object.values(skillRegistry).filter((s) => !APPROVED_STATUSES.includes(s.status) && s.status !== "DISCOVERED").length,
+      sources: usedSources.map((s) => s.id),
+      corpus: corpusRoot,
     },
     skills: {
-      candidates: skillSelection.candidates,
-      selected: selectedSkills,
+      candidates: skillSelection.candidates.map((c) => ({
+        name: c.name,
+        relevance: c.score,
+        capabilities: c.matchingCapabilities,
+        keywords: c.matchingKeywords,
+        risk: c.risk,
+        source: c.source,
+      })),
+      selected: skillSelection.selected,
       rejected: skillSelection.rejected,
+      exceeded: skillSelection.exceeded,
       limit: skillSelection.counts.limit,
+      explanation: selectionExplain,
     },
 
     risk: riskLevel,

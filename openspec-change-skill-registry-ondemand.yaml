@@ -1,0 +1,245 @@
+# OpenSpec Change: wait-a-minute-skill-registry-ondemand
+
+## Change ID
+wait-a-minute-skill-registry-ondemand
+
+## Title
+Skill Registry & On-Demand Skill Loading — adquisición, indexación y selección de skills desde repos externos sin contaminar contexto
+
+## Estado
+🔄 En implementación — reemplaza y amplía openspec-change-skill-registry.yaml
+
+## Principio Recto
+«WAM debe poseer el índice y decidir qué skill necesita la tarea; OpenCode debe seguir siendo responsable de cargar y ejecutar la skill.»
+
+Los repos externos son **fuentes de adquisición**, no la fuente de verdad del runtime. WAM clona, indexa y normaliza; OpenCode carga bajo demanda únicamente las skills que WAM selecciona. Las políticas perpetuas (Scope/Verify/Simplify) quedan **fuera** de este mecanismo.
+
+## Problemática que Resuelve
+
+El corpus de skills puede crecer a cientos o miles (antigravity-awesome-skills, etc.). Cargar todo al contexto destruye la ventana del agente. Se necesita:
+
+1. Adquisición de skills desde repos externos (clone local)
+2. Indexación metadata-first (nunca cargar SKILL.md completo salvo selección)
+3. Routing con scoring ponderado configurables
+4. Carga on-demand vía runtime nativo de OpenCode
+5. Políticas perpetuas separadas e independientes del registry
+
+## Arquitectura
+
+```
+EXTERNAL REPOS
+ │
+ ┌──────────────┼──────────────┐
+ ▼              ▼              ▼
+ khasky         whobat        antigravity
+ │              │              │
+ └──────────────┼──────────────┘
+                ▼
+         LOCAL CORPUS  (.wam/skills/sources/<repo>/)
+                │
+                ▼
+          WAM INDEXER
+                │
+      ┌─────────┴─────────┐
+      ▼                   ▼
+SKILL REGISTRY        METADATA INDEX
+(skills.json)         (keywords/capabilities/domain)
+      │                   │
+      └─────────┬─────────┘
+                ▼
+              TASK
+                │
+                ▼
+     COMPLETION CONTRACT
+                │
+      ┌─────────┴──────────┐
+      ▼                    ▼
+PERSISTENT POLICIES     SKILL ROUTER
+Scope/Verify/Simplify   keyword/capability
+                        │
+                        │ top candidates
+                        │ approved only
+                        │ 1–3 normally
+                        ▼
+                 ON-DEMAND LOAD
+                        │
+                        ▼
+                     OpenCode
+                        │
+                        ▼
+                     EXECUTE → VERIFY → DONE
+```
+
+## 1. Source Registry (declarativo, configurable)
+
+Sin hardcodear fuentes en el Skill Router. Config en DEFAULT_CONFIG:
+
+```yaml
+sources:
+  - id: khasky-awesome-agent-skills
+    type: git
+    repository: https://github.com/khasky/awesome-agent-skills.git
+    enabled: true
+    trust: curated
+  - id: whobat-ai-agent-skills
+    type: git
+    repository: https://github.com/whobat/AI-Agent-skills.git
+    enabled: true
+    trust: community
+  - id: antigravity-awesome-skills
+    type: git
+    repository: https://github.com/sickn33/antigravity-awesome-skills.git
+    enabled: true
+    trust: community
+```
+
+## 2. Local Skill Corpus
+
+```
+.wam/skills/
+├── sources/<source-id>/        # clones de trabajo, no modificables directamente
+├── registry/skills.json        # índice normalizado
+├── cache/                      # contenido cargo on-demand
+└── policies/                   # simplify.md, scope.md, verify.md (separadas)
+```
+
+## 3. Discovery
+
+- Recorrer repos clonados buscando `SKILL.md`
+- Parsear frontmatter YAML (name, description, license, compatibility, metadata.keywords)
+- Estado inicial: `discovered`
+- No cargar contenido posterior al frontmatter durante indexado
+
+## 4. Metadata Normalization
+
+Campos mínimos: id, name, description, keywords, capabilities, domain, compatibility, risk, source{id,path,commit}, status.
+
+## 5. Missing Metadata
+
+Sin modificar el repo original. Completa localmente con prioridad:
+1. Explicit frontmatter
+2. Repository structure
+3. Name + description extraction
+4. Deterministic keyword generation (marcadas como derivadas)
+5. LLM enrichment opcional (solo durante indexación)
+
+## 6. Keyword Index
+
+Basado en name, description, keywords, capabilities, domain. Sin vector DB/embeddings en v1.
+
+## 7. Skill Scoring (pesos configurables)
+
+```
+Name match        × 5
+Capability match  × 4
+Keyword match     × 3
+Description match × 2
+Domain match      × 1
+```
+
+## 8. Skill Selection
+
+Solo `approved` + compatible con runtime. Límites: trivial→0, normal→1–3, complejo/riesgoso→más si justificado.
+
+## 9. On-Demand Loading
+
+Resolve SKILL.md → OpenCode skill runtime → load → execute. Contenido completo nunca antes de selección.
+
+## 10. Runtime Exposure
+
+Corpus 1000+ → índice → 3 seleccionadas → OpenCode. Existir en corpus ≠ disponible en contexto.
+
+## 11. Persistent Policies (separadas)
+
+`.wam/policies/simplify.md`, `scope.md`, `verify.md`. No pasan por router, no necesitan keyword match ni loading. Simplify incorpora Ponytail (YAGNI, reuse, stdlib, minimum surface, no speculative abstraction, no unnecessary deps).
+
+## 12. Approval Lifecycle
+
+```
+DISCOVERED → EVALUATING → APPROVED
+             ↘ REJECTED / DISABLED / DEPRECATED
+```
+Solo APPROVED entra en routing automático.
+
+## 13. Evaluation (heurística v1)
+
+Valid SKILL.md, source, compatibility, quality, scope, risk, duplication, instruction safety.
+
+## 14. Deduplication
+
+Detectar equivalentes (code-review / pr-review / awesome-code-review) → cluster con canonical + alternatives. Nunca eliminar automáticamente.
+
+## 15. Source Versioning
+
+Registrar commit de origen por skill. Permite saber exactamente qué instrucciones se usaron.
+
+## 16. Updating Sources
+
+`wam skills update`: git fetch/pull → detect changes → re-index → detect new/removed/modified. Skill modificada debe volver a evaluación.
+
+## 17. Commands
+
+```
+wam skills scan
+wam skills update
+wam skills list
+wam skills search <query>
+wam skills inspect <skill>
+wam skills approve <skill>
+wam skills reject <skill>
+wam skills disable <skill>
+wam skills explain <task>   (opcional)
+```
+
+## 18. Explainability
+
+Toda selección automática explica: skill, score, matching capabilities, matching keywords, risk, source.
+
+## 19. Audit
+
+Registrar skill_usage: skill_id, source, commit, selected_because, loaded_at. Para RIGOROUS es evidencia del proceso.
+
+## 20. Failure Handling
+
+Skill no existe/corrupta/incompatible → 1) marcar loading failure, 2) alternativa compatible, 3) continuar sin ella solo si tarea segura, 4) bloquear si era obligatoria. Nunca fingir uso.
+
+## 21. Completion Contract Integration
+
+El contrato declara capabilities requeridas → router las convierte en candidatos. Skills no modifican unilateralmente el contrato.
+
+## 22. Security Boundary
+
+Skills externas = instrucciones no confiables hasta aprobación. No pueden: desactivar Verify, modificar Completion Contract, ampliar Scope, eliminar requisitos, ejecutar acciones destructivas sin autorización, cambiar políticas persistentes, modificar el registry.
+
+## 23. No v1
+
+- No auto-install desde URLs arbitrarias
+- No ejecución automática de skills no aprobadas
+- No vector DB / embeddings / Elasticsearch / graph DB
+- No LLM routing obligatorio
+- No custom skill runtime
+- No marketplace
+- No modificación de upstream SKILL.md
+
+## 24. Criterios de Aceptación
+
+- [ ] Las 3 fuentes iniciales pueden clonarse y actualizarse
+- [ ] Fuentes configurables
+- [ ] Detección de SKILL.md + parseo frontmatter
+- [ ] Metadata normalizada + keywords derivadas marcadas
+- [ ] Source + commit registrados
+- [ ] Estados de skills; solo APPROVED auto-seleccionable
+- [ ] Dedup soportado
+- [ ] Scoring ponderado configurable
+- [ ] Número acotado de skills seleccionadas
+- [ ] Skills no seleccionadas no se cargan al contexto
+- [ ] Simplify/Scope/Verify funcionan sin registry
+- [ ] Audit: qué skill, de qué repo, qué commit
+- [ ] Políticas perpetuas separadas en .wam/policies/
+
+## Referencias
+- Ponytail (Simplify): https://github.com/MetalbolicX/opencode-ponytail
+- khasky/awesome-agent-skills (curada)
+- whobat/AI-Agent-skills (comunidad)
+- sickn33/antigravity-awesome-skills (corpus grande)
+- OpenCode Skills runtime: https://opencode.ai/docs/skills

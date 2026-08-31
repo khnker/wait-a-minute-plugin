@@ -123,17 +123,25 @@ const WaitAMinutePlugin = async (ctx) => {
   // Commands registration
   // -------------------------------------------------------------------------
   cfg.commands ??= {};
-  cfg.commands["wait-a-minute"] = {
-    template: "$ARGUMENTS",
-    description:
-      'Run wait-a-minute pre-flight analysis on a prompt. Usage: /wait-a-minute "<prompt>"',
+  // Commands registration
+  // -------------------------------------------------------------------------
+  // Command handler: /wam
+  // -------------------------------------------------------------------------
+  cfg.commands ??= {};
+  cfg.commands["wam"] = {
+    template: "$COMMAND $ARGS",
+    description: "Wait-a-Minute CLI: /wam skills <scan|update|list|search|inspect|approve|reject|disable|explain> [args]",
   };
 
-  cfg.commands["wait-a-minute-status"] = {
-    template: "",
-    description:
-      "Show last wait-a-minute analysis results from current session",
-  };
+  // Process commands if present in ctx
+  if (ctx.command && ctx.command.name === "wam") {
+    const [sub, ...args] = ctx.command.args || [];
+    if (sub === "skills") {
+      const [action, target] = args;
+      // Delegar a engine.js logic
+      // Note: Implementation of these handlers in engine.js is the next step
+    }
+  }
 
   return {
     name: "wait-a-minute",

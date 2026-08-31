@@ -1,0 +1,22 @@
+{
+  "phase": "IMPLEMENTING",
+  "progress": {
+    "completed": 0,
+    "total": 2
+  },
+  "nextAction": "Continuar tarea",
+  "lastAction": "Migrar una tabla PostgreSQL con tests de integración",
+  "persistentPolicies": [
+    "scope",
+    "verify",
+    "simplify"
+  ],
+  "activeGates": [
+    "scope-creep",
+    "surface-change",
+    "completion-gate",
+    "evidence-required",
+    "speculative-abstraction",
+    "unnecessary-deps"
+  ]
+}
