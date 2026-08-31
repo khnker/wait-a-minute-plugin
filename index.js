@@ -425,7 +425,7 @@ const waitAMinute = {
     if (ctx && ctx.system) {
       ctx.system.unshift({
         type: "text",
-        text: validationLines.join("\n") + "\n",
+        text: validationLines.filter((l) => l !== false).join("\n") + "\n",
       });
     }
 
