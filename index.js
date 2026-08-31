@@ -64,6 +64,11 @@ const WaitAMinutePlugin = async (ctx) => {
       // Store analysis results in session for access by agent
       sessionStore.set("waitAnalysis", analysis);
 
+      // Present strategic confirmation for non-trivial tasks
+      if (analysis.strategy !== "FAST") {
+        waitAMinute.presentValidation({ analysis, ctx: output });
+      }
+
       // Inject analysis summary into the system prompt if configured
       if (cfg.experimental?.waitAMinuteInject === true) {
         const summaryLine = `[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`;
@@ -358,4 +363,8 @@ const waitAMinute = {
   },
 };
 
-export default waitAMinute;
+Object.keys(waitAMinute).forEach((k) => {
+  if (k === "name") return;
+  WaitAMinutePlugin[k] = waitAMinute[k];
+});
+export default WaitAMinutePlugin;
