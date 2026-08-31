@@ -402,6 +402,8 @@ const waitAMinute = {
         `Skills rechazadas: ${analysis.skills.rejected.join(", ")}`,
       analysis.skillRegistry &&
         `Skill Registry: ${analysis.skillRegistry.total} total | ${analysis.skillRegistry.approved} aprobadas | límite routing: ${analysis.skills.limit}`,
+      analysis.skillRegistry?.sources?.length > 0 &&
+        `Fuentes: ${analysis.skillRegistry.sources.join(", ")}`,
       "",
       "Políticas persistentes: " +
         (analysis.persistentPolicies?.length > 0

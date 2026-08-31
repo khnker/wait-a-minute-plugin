@@ -502,7 +502,13 @@ export function buildRegistry(availableSkills, baseDir) {
     registry[id] = { ...skill, status: "APPROVED" };
   }
 
-  return { registry, corpusRoot: null, sources: ["bundled"], registryFile: null };
+  const sources = [];
+  for (const [, s] of Object.entries(bundled)) {
+    const repo = s.source?.repository || "bundled-local";
+    if (!sources.includes(repo)) sources.push(repo);
+  }
+
+  return { registry, corpusRoot: null, sources, registryFile: null };
 }
 
 /**
@@ -1193,7 +1199,7 @@ export async function analyze(options) {
       approved: Object.values(skillRegistry).filter((s) => APPROVED_STATUSES.includes(s.status)).length,
       discovered: Object.values(skillRegistry).filter((s) => s.status === "DISCOVERED").length,
       rejected: Object.values(skillRegistry).filter((s) => !APPROVED_STATUSES.includes(s.status) && s.status !== "DISCOVERED").length,
-      sources: usedSources.map((s) => s.id),
+      sources: usedSources.map((s) => (typeof s === "string" ? s : s.id)),
       corpus: corpusRoot,
     },
     skills: {
