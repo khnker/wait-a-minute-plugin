@@ -6,16 +6,23 @@ Pre-flight cognitive layer for OpenCode that intercepts prompts for strategic an
 - **Cognitive Pre-flight**: Analyzes intent, project context, and risk before agent action.
 - **Completion Contract**: Proposes clear requirements, constraints, and verification steps for every task.
 - **Persistent Policies**: Transversal principles (Scope, Verify, Simplify/YAGNI) enforced by default.
-- **On-Demand Skill Registry**: Indexing 2000+ skills from curated sources without polluting context.
+- **Self-Contained Skill Registry**: Ships a curated, versioned catalog (~2,000 skills) bundled inside the plugin. No network, no external repos at runtime.
 - **Progress Gate**: Forces status tracking and prevents premature "DONE" states.
-- **CLI (`/wam`)**: Manage the skill registry, index sources, and audit task strategies.
+- **CLI (`/wam`)**: Inspect the bundled catalog and audit task strategies.
 
-## Skill Sources
-| Source | Type | Role |
-| :--- | :--- | :--- |
-| **Awesome Agent Skills** (khasky) | Curated | Primary for general agent tasks. |
-| **AI-Agent-skills** (whobat) | Discovery | Broad capability coverage. |
-| **Antigravity Awesome Skills** (sickn33) | Corpus | Massive specialized catalog. |
+## Self-Contained Architecture
+
+```
+wait-a-minute-plugin/
+├── skills/
+│   ├── registry.json   ← curated index (metadata-first, ~2,000 skills)
+│   └── ...             ← selected skill content (optional in v1)
+├── policies/           ← persistent policies (simplify, scope, verify)
+├── engine.js           ← analysis, routing, scoring (no network I/O)
+└── index.js            ← plugin factory + /wam CLI
+```
+
+External repos are **build-time sources only** — used by the maintainer to select, validate, deduplicate, and generate `registry.json`, then commit it into WAM before release. Users who install WAM never clone or query them.
 
 ## Persistent Policies
 - **Scope**: Monitors for scope creep and surface change.
@@ -23,11 +30,9 @@ Pre-flight cognitive layer for OpenCode that intercepts prompts for strategic an
 - **Simplify (Ponytail)**: Enforces YAGNI, reuse, and minimum complexity.
 
 ## CLI Usage
-- `/wam skills scan`: Index discovered repositories.
-- `/wam skills update`: Pull and re-index external sources.
-- `/wam skills list`: Show approved skills.
+- `/wam skills list`: Show skills in the bundled catalog.
 - `/wam skills search <query>`: Find relevant capabilities.
-- `/wam skills approve <id>`: Enable automated routing for a skill.
+- `/wam skills inspect <id>`: Show full metadata for a skill.
 
 ## License
 MIT © khnker

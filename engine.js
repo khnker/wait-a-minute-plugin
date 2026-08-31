@@ -7,7 +7,6 @@
 
 const fs = await import("node:fs");
 const path = await import("node:path");
-const { execSync } = await import("node:child_process");
 const os = await import("node:os");
 const tmpdir = os.tmpdir();
 
@@ -48,17 +47,6 @@ function fileExists(filePath) {
     return true;
   } catch {
     return false;
-  }
-}
-
-/**
- * Ejecuta un comando y captura salida, falla silenciosamente
- */
-function runCommand(cmd, cwd) {
-  try {
-    return execSync(cmd, { cwd: cwd || process.cwd(), timeout: 30000, encoding: "utf-8" });
-  } catch {
-    return "";
   }
 }
 
@@ -291,7 +279,7 @@ function evaluatePersistentPolicies(prompt, projectInfo, classification, mode) {
   }
 
   // Simplify: aplica transversalmente (YAGNI/reuso/stdlib)
-  const simplifyRestrictions = PERSISTENT_POLICIES.simplify.rules;
+  const simplifyRestrictions = [...PERSISTENT_POLICIES.simplify.rules];
 
   // Detectar si la tarea toca zonas protegidas (no simplificar restricciones esenciales)
   const protectedHits = SIMPLIFY_PROTECTED.filter((w) => lower.includes(w));
@@ -312,38 +300,8 @@ function evaluatePersistentPolicies(prompt, projectInfo, classification, mode) {
 }
 
 // ---------------------------------------------------------------------------
-// SKILL REGISTRY — catálogo metadata-first de skills bajo demanda.
-// metadata -> routing -> aprobación -> carga on-demand. No contamina contexto.
+// SKILL REGISTRY — catálogo metadata-first de skills autocontenido.
 // ---------------------------------------------------------------------------
-
-// Fuentes declarativas — configurables vía config.sources, no hardcodeadas en el router.
-// Los repos externos son fuentes de ADQUISICIÓN, no la fuente de verdad del runtime.
-const SOURCE_CONFIG = [
-  {
-    id: "khasky-awesome-agent-skills",
-    type: "git",
-    repository: "https://github.com/khasky/awesome-agent-skills.git",
-    enabled: true,
-    trust: "curated",
-    description: "Curated source for coding-agent skills",
-  },
-  {
-    id: "whobat-ai-agent-skills",
-    type: "git",
-    repository: "https://github.com/whobat/AI-Agent-skills.git",
-    enabled: true,
-    trust: "community",
-    description: "Additional discovery source",
-  },
-  {
-    id: "antigravity-awesome-skills",
-    type: "git",
-    repository: "https://github.com/sickn33/antigravity-awesome-skills.git",
-    enabled: true,
-    trust: "community",
-    description: "Large discovery corpus — no auto-approval",
-  },
-];
 
 const SKILL_LIFECYCLE = ["DISCOVERED", "EVALUATING", "APPROVED", "AVAILABLE", "LOADED", "USED", "REJECTED", "DEPRECATED", "DISABLED"];
 const APPROVED_STATUSES = ["APPROVED", "AVAILABLE", "LOADED"];
@@ -459,6 +417,10 @@ function getRepoCommit(repoDir) {
  * Escanea un source clonado buscando SKILL.md, normaliza metadata, status DISCOVERED.
  * No carga contenido post-frontmatter (spec §5).
  */
+/**
+ * Escanea un source existente en el corpus local buscando SKILL.md.
+ * NO realiza operaciones de red.
+ */
 function scanSourceSkills(source, sourceDir) {
   if (!fileExists(sourceDir)) return [];
   const found = [];
@@ -483,7 +445,7 @@ function scanSourceSkills(source, sourceDir) {
             description: fm.description || "",
             keywords,
             keywordsDerived: fm.keywords.length === 0,
-            capabilities: [], // derivadas desde keywords en normalize
+            capabilities: [],
             domain: [],
             compatibility: fm.compatibility.length > 0 ? fm.compatibility : ["opencode"],
             risk: "low",
@@ -491,7 +453,6 @@ function scanSourceSkills(source, sourceDir) {
               id: source.id,
               repository: source.repository,
               path: relPath,
-              commit: getRepoCommit(sourceDir),
             },
             status: "DISCOVERED",
             trust: source.trust,
@@ -505,69 +466,43 @@ function scanSourceSkills(source, sourceDir) {
 }
 
 /**
- * Clona la fuente si no existe; si existe y hay git, hace fetch/pull best-effort.
+ * Carga el catálogo embebido del plugin (skills/registry.json).
+ * El corpus es distribuido con WAM — sin red en runtime.
  */
-function acquireSource(source, baseDir) {
-  const dir = path.join(baseDir, "sources", source.id);
-  if (!fileExists(dir)) {
-    try {
-      runCommand(`git clone --depth 1 ${source.repository} "${dir}"`);
-    } catch {}
-    return { source, cloned: fileExists(dir), dir };
-  }
-
-  // Update: re-evaluar skills modificadas luego
-  const headBefore = getRepoCommit(dir);
+function loadBundledRegistry() {
   try {
-    runCommand(`git -C "${dir}" fetch --all --quiet && git -C "${dir}" reset --hard origin/HEAD --quiet`);
-  } catch {}
-  return { source, cloned: true, dir, headBefore, headAfter: getRepoCommit(dir) };
+    const regFile = path.join(import.meta.dirname, "skills", "registry.json");
+    if (!fileExists(regFile)) return {};
+    const entries = JSON.parse(readFileSafely(regFile));
+    const reg = {};
+    for (const s of Array.isArray(entries) ? entries : Object.values(entries)) {
+      if (!s?.id) continue;
+      if (!s.name || s.name.trim().length < 2) continue; // filtrar ruido (nombres de 1 char)
+      const desc = (s.description || "").replace(/^["']|["']$/g, "");
+      if (desc.length < 20) continue; // filtrar skills sin contenido significativo
+      reg[s.id] = { ...s, description: desc };
+    }
+    return reg;
+  } catch {
+    return {};
+  }
 }
 
 /**
- * Construye registry unificado: skills locales instaladas (APPROVED, confianza local)
- * + skills descubiertas del corpus (DISCOVERED, requieren approval).
+ * Construye registry unificado: skills locales instaladas (APPROVED)
+ * + catálogo embebido distribuido con el plugin (skills/registry.json).
+ * No realiza operaciones de red.
  */
-function buildRegistryWithCorpus(availableSkills, baseDir, sources) {
+export function buildRegistry(availableSkills, baseDir) {
   const registry = buildSkillRegistry(availableSkills);
-  const corpusRoot = ensureSkillCorpus(baseDir);
-  const sourceList = sources && sources.length > 0 ? sources : SOURCE_CONFIG;
+  const bundled = loadBundledRegistry();
 
-  // Adquisición + indexado (solo si corpus disponible)
-  const acquired = [];
-  if (corpusRoot) {
-    for (const source of sourceList) {
-      if (source.enabled === false) continue;
-      try {
-        const res = acquireSource(source, corpusRoot);
-        if (res.cloned) {
-          const skills = scanSourceSkills(source, res.dir);
-          acquired.push(...skills);
-        }
-      } catch {}
-    }
+  for (const [id, skill] of Object.entries(bundled)) {
+    if (registry[id]) continue; // skills locales ganan
+    registry[id] = { ...skill, status: "APPROVED" };
   }
 
-  // Registry persistente skills.json — load previo si existe
-  let registryFile = null;
-  let persisted = {};
-  if (corpusRoot) {
-    registryFile = path.join(corpusRoot, "registry", "skills.json");
-    if (fileExists(registryFile)) {
-      try {
-        persisted = JSON.parse(readFileSafely(registryFile));
-      } catch {}
-    }
-  }
-
-  // Merge: skills locales instaladas ganan (source of truth local), corpus añade DISCOVERED
-  for (const skill of acquired) {
-    if (registry[skill.name]) continue; // no pisen skills locales
-    const prev = persisted[skill.id];
-    registry[skill.id] = { ...skill, status: prev?.status || "DISCOVERED" };
-  }
-
-  return { registry, corpusRoot, sources: sourceList, registryFile };
+  return { registry, corpusRoot: null, sources: ["bundled"], registryFile: null };
 }
 
 /**
@@ -1177,12 +1112,11 @@ export async function analyze(options) {
   // Step 3: Audit assumptions
   const assumptions = auditAssumptions(prompt, projectInfo);
 
-  // Step 5: Select skills (registry unificado: local APPROVED + corpus DISCOVERED)
+  // Step 5: Select skills (registry unificado: local APPROVED + catálogo embebido)
   const availableSkills = discoverSkills();
   const baseDir = projectPath || process.cwd();
-  const sources = config?.sources?.length > 0 ? config.sources : null;
   const { registry: skillRegistry, corpusRoot, sources: usedSources, registryFile } =
-    buildRegistryWithCorpus(availableSkills, baseDir, sources);
+    buildRegistry(availableSkills, baseDir);
 
   // Step 6: Determine mode and contract
   const riskLevel = assumptions.some(a => /alto riesgo|high risk|peligroso|destructivo/.test(a)) ? "high" : "medium";

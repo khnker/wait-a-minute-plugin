@@ -1,0 +1,8 @@
+# Arquitectura autocontenida: WAM distribuye su propio catálogo curado.
+# Estos directorios son solo contenido build-time del maintainer.
+
+# Repos upstream clonados para regenerar skills/registry.json (scripts/build-registry.cjs)
+/upstream/
+
+# Estado runtime del plugin en proyectos del usuario (no debe ir al repo)
+/.wam/

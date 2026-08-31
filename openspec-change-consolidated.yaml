@@ -126,40 +126,56 @@ USER TASK / OPENSPEC
 
 **Si un elemento crítico no está resuelto**: WAIT — el sistema no debe permitir que el agente compensa incertidumbre crítica simplemente empezando a editar código.
 
-## 5. Skill Registry (Simplificado)
+## 5. Skill Registry (Autocontenido)
 
-**Objetivo**: Soportar skills externos sin convertirse en repositorio monolítico.
+**Objetivo**: WAM distribuye un catálogo **versionado y curado** de skills dentro del propio plugin. Sin red en runtime, sin dependencia externa, sin clonado de repos.
 
-**Fuentes** (referenciadas, no incrustadas):
+**Estructura dentro del plugin**:
+```
+wait-a-minute-plugin/
+├── skills/
+│   ├── registry.json   ← índice metadata-first curado (aprox. 2.000 skills)
+│   └── ...             ← contenido de skills seleccionadas (opcional en v1)
+├── policies/           ← políticas persistentes (simplify, scope, verify)
+├── engine.js           ← análisis + routing + scoring (sin I/O de red)
+└── index.js            ← factory del plugin + CLI /wam
+```
+
+**Repos externos = solo fuentes de build (dependencias de desarrollo, NO runtime)**:
 - whobat/AI-Agent-skills (primary)
 - khasky/awesome-agent-skills (secondary)
 - sickn33/antigravity-awesome-skills (discovery pool)
+
+Flujo del maintainer (offline, previo a release):
+```
+Upstream repos → Select → Validate → Normalize frontmatter → Deduplicate → Generate registry.json → Commit en WAM → Release
+```
+
+El usuario final **no clona ni consulta** ningún repo externo: el corpus ya viaja empaquetado con el plugin.
 
 **Registro por skill (mínimo)**:
 ```
 skill:
   id: <identificador>
   source:
-    repository: <owner/repo>
+    repository: <owner/repo>   ← solo como proveniencia (de dónde se incorporó)
     path: <path/within/repo>
-    ref: <commit/tag>  ← pinned version, NOT "main" by default
+    ref: <commit/tag>          ← pinned, reproducibilidad del contenido incorporado
   category: <tipo>
   capabilities: <lista>
   compatibility:
     opencode: true
   risk: low|medium|high
-  status: discovered|evaluating|approved|active|deprecated|rejected
+  status: approved|rejected|deprecated
 ```
 
-**Estados**:
-- discovered: detectado, **no automático**
-- evaluating: en evaluación
-- approved: aprobado → puede seleccionarse
-- active: en uso
-- deprecated: obsoleto
-- rejected: rechazado (nunca automático)
+**Estados** (a partir de la incorporación):
+- approved: aprobado = incluido en el catálogo embebido → puede seleccionarse
+- rejected: rechazado = excluido del catálogo (nunca automático; decisión del maintainer)
 
-**Quality Gate previo a approval**: estructura SKILL.md, compatibilidad OpenCode, riesgos detectados.
+**Quality Gate previo a incorporar**: estructura SKILL.md, compatibilidad OpenCode, riesgos detectados, deduplicación con skills ya embebidas.
+
+**No se incorporan**: skills sin descripción significativa, nombres degenerados (1 char), contenido sin frontmatter válido.
 
 ## 5. Skill Selection
 
@@ -260,9 +276,9 @@ La implementación debe demostrar que:
 - **Agent rigor**: https://github.com/ccromp/agent-rigor — Review/Verify separación, Verify como completion gate, rigor proporcional, políticas ligeras
 - **OpenCode Agentic Workflows**: https://github.com/ABIvan-Tech/opencode-agentic-workflows — process tiers, readiness gate, investigation depth, Plan Delta, routing condicional
 - **Ponytail**: https://github.com/MetalbolicX/opencode-ponytail — YAGNI, mínima complejidad, reutilización, reducción de cambios innecesarios
-- **Agent Skills**: https://github.com/whobat/AI-Agent-skills — Fuente primaria para skills portables
-- **Awesome Agent Skills**: https://github.com/khasky/awesome-agent-skills — Fuente secundaria para descubrimiento
-- **Antigravity Awesome Skills**: https://github.com/sickn33/antigravity-awesome-skills — Pool de descubrimiento; no instalar automáticamente
+- **Agent Skills**: https://github.com/whobat/AI-Agent-skills — Fuente primaria de incorporación para el build del catálogo (no runtime)
+- **Awesome Agent Skills**: https://github.com/khasky/awesome-agent-skills — Fuente secundaria de incorporación (no runtime)
+- **Antigravity Awesome Skills**: https://github.com/sickn33/antigravity-awesome-skills — Pool de descubrimiento para el maintainer (no runtime)
 - **OpenCode Skills**: https://opencode.ai/docs/skills — Referencia del runtime nativo de Skills
 
 ## 8. Principio de Diseño
@@ -277,6 +293,7 @@ La implementación debe demostrar que:
 ## Change Log
 
 - Creado: 2026-08-30 — Policy Engine consolidado de Wait a Minute, reemplaza/ajusta cambios previos (cognitive-policies, skill-registry, policy-engine)
+- 2026-08-30 — **Arquitectura autocontenida**: WAM distribuye un catálogo curado (~2.000 skills) embebido en `skills/registry.json`. Eliminados `acquireSource`/git clone/fetch del runtime, `SOURCE_CONFIG`, y `.wam/skills/sources`. Añadido `scripts/build-registry.cjs` (flujo offline del maintainer: upstream → scan → dedup → registry.json). CLI `/wam skills` (list/search/inspect) opera sobre el catálogo embebido vía `loadBundledRegistry()`. Cero I/O de red en runtime.
 - Pendiente: Validación en sesión de cómo cada nivel (MINIMAL/STANDARD/RIGOROUS) se activa según tipo de tarea
 - Pendiente: Integración con hook `chat.message` y estructura de sesión de OpenCode
 

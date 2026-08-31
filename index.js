@@ -134,12 +134,20 @@ const WaitAMinutePlugin = async (ctx) => {
   };
 
   // Process commands if present in ctx
+  // Process commands if present in ctx
   if (ctx.command && ctx.command.name === "wam") {
-    const [sub, ...args] = ctx.command.args || [];
+    const [sub, action, target] = ctx.command.args || [];
     if (sub === "skills") {
-      const [action, target] = args;
-      // Delegar a engine.js logic
-      // Note: Implementation of these handlers in engine.js is the next step
+      // CLI simple: busca en el registry ya construido
+      if (action === "list") {
+        const skills = Object.values(sessionStore.get("skillRegistry") || {});
+        return skills.map(s => `${s.id} [${s.status}]`).join("\n");
+      }
+      if (action === "search") {
+        const skills = Object.values(sessionStore.get("skillRegistry") || {});
+        return skills.filter(s => s.name.includes(target)).map(s => s.id).join("\n");
+      }
+      return "Comando wam skills no soportado";
     }
   }
 
@@ -155,6 +163,15 @@ const WaitAMinutePlugin = async (ctx) => {
  */
 const waitAMinute = {
   name: "wait-a-minute",
+
+  /**
+   * Obtiene el registry actual.
+   */
+  getRegistry: function() {
+    const lib = sessionStore.get("skillRegistry");
+    if (lib && Object.keys(lib).length > 0) return lib;
+    return this.loadBundledRegistry();
+  },
 
   /**
    * Analiza el prompt del usuario y retorna el contexto de pre-flight.
@@ -274,6 +291,25 @@ const waitAMinute = {
     lines.push(`\nConsejo: ${result.advice || ""}`);
 
     return lines.join("\n");
+  },
+
+  /**
+   * Carga el catálogo embebido (skills/registry.json) del plugin.
+   * El corpus es distribuido con WAM — sin red en runtime.
+   */
+  loadBundledRegistry: function() {
+    try {
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const registryPath = path.join(path.dirname(new URL(import.meta.url).pathname), "skills", "registry.json");
+      if (!fs.existsSync(registryPath)) return {};
+      const entries = JSON.parse(fs.readFileSync(registryPath, "utf-8"));
+      const reg = {};
+      for (const s of entries) reg[s.id] = s;
+      return reg;
+    } catch {
+      return {};
+    }
   },
 
   /**
