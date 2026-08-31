@@ -1,4 +1,5 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand } from "./engine.js";
+import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange } from "./memory.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -19,6 +20,27 @@ const DEFAULT_CONFIG = {
   activeMode: "normal",
   tierPrompts: {},
 };
+
+// opencode 1.18.25: chat.message output = { message, parts } (sin .system).
+// Inyecta texto visible al frente del mensaje de usuario; fallback a .system (API vieja).
+function emitTextPart(output, text, meta = {}) {
+  if (!output) return;
+  const part = {
+    type: "text",
+    text,
+    synthetic: true,
+    ...(meta.sessionID ? { sessionID: meta.sessionID } : {}),
+    ...(meta.messageID ? { messageID: meta.messageID } : {}),
+  };
+  if (Array.isArray(output.parts)) {
+    output.parts.unshift(part);
+    console.error("[wait-a-minute DEBUG] emitTextPart pushed to output.parts, count=" + output.parts.length);
+  } else if (output.system) {
+    output.system.unshift(part);
+  } else {
+    console.error("[wait-a-minute DEBUG] emitTextPart NO TARGET, outKeys=" + Object.keys(output));
+  }
+}
 
 // -- v1-enforcement: estado durable, contrato y progreso --------
 
@@ -54,6 +76,38 @@ function listTaskIds() {
       .map((d) => d.name);
   } catch {
     return [];
+  }
+}
+
+// -- operational memory (memory.js): contexto inicial acelerador (spec §13) --
+
+function updateProjectMemo(analysis) {
+  const pi = analysis?.projectInfo;
+  if (!pi) return;
+  const known = (pi.known || []).filter((k) => /package\.json|Dependencias|framework|AGENTS\.md|openspec/i.test(k));
+  const inferred = pi.inferred || [];
+  const assumed = pi.assumed || [];
+  if (!known.length && !inferred.length && !assumed.length) return;
+  const body = [
+    "# Project Context",
+    "",
+    ...(known.length ? ["## Stack (observed)", ...known.map((k) => `- ${k}`)] : []),
+    ...(inferred.length ? ["", "## Inferred", ...inferred.map((i) => `- ${i}`)] : []),
+    ...(assumed.length ? ["", "## Assumed", ...assumed.map((a) => `- ${a}`)] : []),
+  ].join("\n");
+  const { project } = getOperationalContext();
+  if (project.body.trim() === body.trim()) return;
+  updateContext("project", body, { source: "observed", confidence: inferred.length ? "medium" : "high" });
+}
+
+function injectOperationalMemory(inject, analysis) {
+  try {
+    initMemory();
+    updateProjectMemo(analysis);
+    const note = summarizeOperationalContext();
+    if (note) inject.push(`[wait-a-minute: memoria operacional] ${note}`);
+  } catch (err) {
+    console.error("[wait-a-minute] operational memory load failed:", err);
   }
 }
 
@@ -112,10 +166,14 @@ const WaitAMinutePlugin = async (pluginInput) => {
       try {
       if (bypassed) return;
 
-      // Extract user prompt text
+      // Extract user prompt text (1.18.25: texto vive en output.parts = resolvedParts;
+      // input NO trae message/parts y output.message.parts no está poblado al trigger)
       let promptText = "";
-      if (input?.parts && input.parts.length > 0) {
-        const textPart = input.parts.find(
+      const srcParts = output?.parts?.length
+        ? output.parts
+        : input?.message?.parts || output?.message?.parts || input?.parts;
+      if (srcParts && srcParts.length > 0) {
+        const textPart = srcParts.find(
           (p) => p.type === "text" && typeof p.text === "string"
         );
         promptText = textPart?.text || "";
@@ -124,6 +182,8 @@ const WaitAMinutePlugin = async (pluginInput) => {
       }
 
       if (!promptText.trim()) return;
+
+      console.error("[wait-a-minute DEBUG] hook fired", { promptText, inKeys: Object.keys(input || {}), outKeys: Object.keys(output || {}) });
 
       // 1. Detectar tarea activa o iniciar nueva
       const taskId = input.taskId || readActiveTaskId() || "default-task";
@@ -152,14 +212,9 @@ const WaitAMinutePlugin = async (pluginInput) => {
       // 4. Completion Gate: bloquea DONE prematuro (ENFORCE)
       const gate = waitAMinute.evaluateCompletionGate(state, promptText);
 
-      // 5. Presentar validación con estado de contrato real (GUIDE)
-      waitAMinute.presentValidation({
-        analysis: { ...analysis, contractStatus: state.contract.status, phase: state.phase },
-        ctx: output,
-      });
-
       // 6. Inyectar estado + gate + badge + skills (path) al system prompt
       const inject = [];
+      injectOperationalMemory(inject, analysis);
       if (state.requirements?.length) {
         const pend = state.requirements.filter((r) => r.status !== "done").length;
         inject.push(`[wait-a-minute: task ${taskId} — fase ${state.phase}, ${pend}/${state.requirements.length} requisitos pendientes]`);
@@ -178,16 +233,38 @@ const WaitAMinutePlugin = async (pluginInput) => {
         state.nextAction = nextActionFrom(state);
         persistTaskState(taskId, state);
         const gateHold = `⛔ [wait-a-minute] COMPLETION GATE: faltan ${gate.pending.length} requisitos. No declare DONE. Continuar con: ${state.nextAction}`;
+        emitTextPart(output, gateHold, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
         if (input?.parts && input.parts.length > 0) {
           const tp = input.parts.find((p) => p.type === "text" && typeof p.text === "string");
           if (tp) tp.text = gateHold;
-        } else if (input && typeof input.text === "string") {
-          input.text = gateHold;
         }
       } else if (gate.allDone) {
         state.phase = "DONE";
         state.nextAction = "Tarea completa — contrato verificado";
         persistTaskState(taskId, state);
+        updateTaskMemory(taskId, {
+          summary: [
+            "# Task Summary",
+            "",
+            "## Objective",
+            `- ${taskId} (${analysis.intent?.classification || "task"})`,
+            "",
+            "## Completed",
+            ...(state.contract?.requirements || []).map((r) => `- ${r}`),
+            "",
+            "## Verification",
+            ...(state.requirements || []).map((r) => `- ${r.id}: ${r.status}`),
+            "",
+            "## Status",
+            "COMPLETED",
+          ].join("\n"),
+        });
+        addRecentChange({
+          date: new Date().toISOString().slice(0, 10),
+          scope: taskId,
+          changes: state.contract?.requirements || [],
+          verification: `requisitos completos: ${(state.requirements || []).length}`,
+        });
       }
 
       if (cfg.experimental?.waitAMinuteInject === true) {
@@ -203,9 +280,16 @@ const WaitAMinutePlugin = async (pluginInput) => {
       }
 
       if (inject.length > 0) {
-        if (!output?.system) output.system = [];
-        output.system.unshift({ type: "text", text: inject.join("\n") + "\n" });
+        emitTextPart(output, inject.join("\n") + "\n", { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
       }
+
+      // 5. Presentar validación con estado de contrato real (GUIDE)
+      // (unshift último => queda al tope del mensaje, primero visible)
+      waitAMinute.presentValidation({
+        analysis: { ...analysis, contractStatus: state.contract.status, phase: state.phase },
+        ctx: output,
+        meta: { sessionID: input.sessionID, messageID: output.message?.id || input.messageID },
+      });
 
       // Store for later access by the orchestrator
       input.waitAnalysis = analysis;
@@ -635,7 +719,7 @@ const waitAMinute = {
    * @param {Object} opts.analysis - Resultado de analyze()
    * @returns {Object} - { mode: 'continue'|'validation-pending', ... }
    */
-  presentValidation: async function({ analysis, ctx } = {}) {
+  presentValidation: async function({ analysis, ctx, meta = {} } = {}) {
     if (!analysis) {
       return { mode: "continue", advice: "No hay análisis previo" };
     }
@@ -699,13 +783,25 @@ const waitAMinute = {
       "  [más información] → Expandir análisis completo",
       "",
       "Respuesta esperada: continuar / corregir / más información",
+      "Confirmación seleccionable: /wam contract approve (aprobar contrato)",
     ];
 
-    if (ctx && ctx.system) {
-      ctx.system.unshift({
-        type: "text",
-        text: validationLines.filter((l) => l !== false).join("\n") + "\n",
-      });
+    if (ctx) {
+      const text = validationLines.filter((l) => l !== false).join("\n") + "\n";
+      if (Array.isArray(ctx.parts)) {
+        ctx.parts.unshift({
+          type: "text",
+          text,
+          synthetic: true,
+          ...(meta.sessionID ? { sessionID: meta.sessionID } : {}),
+          ...(meta.messageID ? { messageID: meta.messageID } : {}),
+        });
+        console.error("[wait-a-minute DEBUG] presentValidation unshift a output.parts, count=" + ctx.parts.length);
+      } else if (ctx.system) {
+        ctx.system.unshift({ type: "text", text });
+      } else {
+        console.error("[wait-a-minute DEBUG] presentValidation NO TARGET, outKeys=" + Object.keys(ctx));
+      }
     }
 
     return {

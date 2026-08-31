@@ -65,15 +65,16 @@ test("command.execute.before ignora comandos que no son /wam", async () => {
   assert.equal(output.parts.length, 0);
 });
 
-test("chat.message no crashea (best-effort) y persiste estado en dir escribible", async () => {
+test("chat.message 1.18.25: extrae prompt de message.parts e inyecta validación en output.parts", async () => {
   const attempt = async (dir) => {
     const hooks = await pluginDefault({ directory: dir, client: {}, project: {}, $: {} });
+    const output = { message: {}, parts: [] };
     await hooks["chat.message"](
-      { parts: [{ type: "text", text: "refactoriza el scraper" }], taskId: "test-task" },
-      { system: [] }
+      { sessionID: "s1", messageID: "m1", message: { parts: [{ type: "text", text: "refactoriza el scraper" }] }, taskId: "test-task" },
+      output
     );
     const p = path.join(dir, ".wam", "tasks", "test-task", "state.yaml");
-    return { p, ok: fs.existsSync(p) };
+    return { p, ok: fs.existsSync(p), output };
   };
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wam-test-"));
@@ -87,8 +88,26 @@ test("chat.message no crashea (best-effort) y persiste estado en dir escribible"
     res = await attempt(process.cwd());
   }
   assert.ok(res.ok, `debe persistir estado en ${res.p}`);
+  const visible = res.output.parts.find((p) => p.type === "text" && typeof p.text === "string" && p.text.includes("¿Proceder con esta estrategia?"));
+  assert.ok(visible, "debe inyectar el checkpoint como part visible en output.parts");
+  assert.ok(visible.text.includes("/wam contract approve"), "confirmación seleccionable via /wam");
   try {
     fs.rmSync(path.dirname(res.p), { recursive: true, force: true });
+  } catch {}
+});
+
+test("chat.message compat legacy: shape {parts}/{system} sigue funcionando", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wam-legacy-"));
+  const hooks = await pluginDefault({ directory: tmp, client: {}, project: {}, $: {} });
+  const output = { system: [] };
+  await hooks["chat.message"](
+    { parts: [{ type: "text", text: "refactoriza el scraper" }], taskId: "legacy-task" },
+    output
+  );
+  assert.ok(output.system.length > 0, "debe inyectar en output.system (API vieja)");
+  assert.ok(output.system.some((p) => p.text.includes("¿Proceder con esta estrategia?")), "legacy: checkpoint presente");
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true });
   } catch {}
 });
 
@@ -120,7 +139,10 @@ test("Task Resume: /wam task switch fija tarea activa; chat.message persiste baj
   assert.ok(outSwitch.parts[0].text.includes(`Tarea activa: ${taskId}`));
   assert.ok(fs.existsSync(path.join(process.cwd(), ".wam", "active-task")), "active-task persistido");
 
-  await hooks["chat.message"]({ parts: [{ type: "text", text: "continuar implementación" }] }, { system: [] });
+  await hooks["chat.message"](
+    { sessionID: "s2", message: { parts: [{ type: "text", text: "continuar implementación" }] } },
+    { message: {}, parts: [] }
+  );
   const st = getTaskState(taskId);
   assert.ok(st, "estado persistido bajo la tarea activa, no default-task");
 
@@ -135,21 +157,62 @@ test("Task Resume: /wam task switch fija tarea activa; chat.message persiste baj
   } catch {}
 });
 
-test("Hard Block: claim de DONE con requisitos pendientes es reescrito a directiva de bloqueo", async () => {
+test("Hard Block: claim de DONE con requisitos pendientes inyecta directiva de bloqueo en output.parts", async () => {
   const taskId = `hb-${Date.now()}`;
   const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
 
   await hooks["chat.message"](
-    { parts: [{ type: "text", text: "implementar migración postgres con tests" }], taskId },
-    { system: [] }
+    { sessionID: "s3", message: { parts: [{ type: "text", text: "implementar migración postgres con tests" }] }, taskId },
+    { message: {}, parts: [] }
   );
 
-  const inp = { parts: [{ type: "text", text: "terminé la tarea, está done" }], taskId };
-  await hooks["chat.message"](inp, { system: [] });
-  const rewritten = inp.parts[0].text;
-  assert.ok(rewritten.startsWith("⛔"), "el claim debe reescribirse a directiva de bloqueo");
-  assert.ok(rewritten.includes("COMPLETION GATE"), "directiva menciona el gate");
-  assert.ok(rewritten.includes("No declare DONE"), "directiva prohíbe DONE");
+  const output = { message: {}, parts: [] };
+  await hooks["chat.message"](
+    { sessionID: "s3", message: { parts: [{ type: "text", text: "terminé la tarea, está done" }] }, taskId },
+    output
+  );
+  const gatePart = output.parts.find((p) => p.type === "text" && typeof p.text === "string" && p.text.startsWith("⛔"));
+  assert.ok(gatePart, "el gate debe inyectarse como part visible en output.parts");
+  assert.ok(gatePart.text.startsWith("⛔"), "el claim debe reescribirse a directiva de bloqueo");
+  assert.ok(gatePart.text.includes("COMPLETION GATE"), "directiva menciona el gate");
+  assert.ok(gatePart.text.includes("No declare DONE"), "directiva prohíbe DONE");
+
+  try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
+  } catch {}
+});
+
+test("Memory on DONE: tarea completada deriva summary.md + recent-changes.md (spec §12/§14)", async () => {
+  const taskId = `done-${Date.now()}`;
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+
+  await hooks["chat.message"](
+    { sessionID: "s4", message: { parts: [{ type: "text", text: "implementar migración con tests" }] }, taskId },
+    { message: {}, parts: [] }
+  );
+  assert.equal(pluginDefault.approveContract(taskId).status, "APPROVED");
+
+  const st = getTaskState(taskId);
+  assert.ok(st.requirements?.length > 0, "contrato con requisitos");
+  for (const r of st.requirements) {
+    pluginDefault.markRequirement(taskId, r.id, "done", "evidencia de test");
+  }
+
+  const output = { message: {}, parts: [] };
+  await hooks["chat.message"](
+    { sessionID: "s4", message: { parts: [{ type: "text", text: "tarea completada, está done" }] }, taskId },
+    output
+  );
+
+  const sumFile = path.join(process.cwd(), ".wam", "tasks", taskId, "summary.md");
+  assert.ok(fs.existsSync(sumFile), "summary.md derivado en disco");
+  const summary = fs.readFileSync(sumFile, "utf8");
+  assert.ok(summary.includes("## Status"), "summary incluye Status");
+  assert.ok(summary.includes("COMPLETED"), "summary marca COMPLETED");
+
+  const today = new Date().toISOString().slice(0, 10);
+  const rc = fs.readFileSync(path.join(process.cwd(), ".wam", "context", "recent-changes.md"), "utf8");
+  assert.ok(rc.includes(`## ${today} — ${taskId}`), "recent-changes registra la tarea completada");
 
   try {
     fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });

@@ -6,3 +6,5 @@
 
 # Estado runtime del plugin en proyectos del usuario (no debe ir al repo)
 /.wam/
+# Engram AI agent memory
+.engram/
