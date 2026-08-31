@@ -11,7 +11,6 @@ const { execSync } = await import("node:child_process");
 const os = await import("node:os");
 const tmpdir = os.tmpdir();
 
-const PROMPT = await import("./SKILL.md");
 
 // -- Project Analysis Helpers --
 
@@ -104,7 +103,7 @@ function detectStack(projectPath) {
   if (deps.svelte) languages.push("svelte");
 
   // Python
-  if (pkg.python || pkg.get("dependencies", {}).get("flask") || pkg.get("dependencies", {}).get("django")) {
+  if (deps.flask || deps.django) {
     languages.push("python");
   }
 
@@ -283,7 +282,7 @@ async function inspectProject(projectPath) {
     // Detect framework
     const deps = { ...(pkgJson.dependencies || {}), ...(pkgJson.devDependencies || {}) };
     if (deps["@nestjs/*"] || deps.nestjs) inferred.push("NestJS framework detectado");
-    if (deps.@angular/core || deps.angular) inferred.push("Angular framework detectado");
+    if (deps["@angular/core"] || deps.angular) inferred.push("Angular framework detectado");
     if (deps.express) inferred.push("Express.js detectado");
     if (deps["@nestjs/core"]) inferred.push("NestJS core detectado");
   }
@@ -347,7 +346,7 @@ function auditAssumptions(prompt, projectInfo) {
   }
 
   // If mentions cache/redis
-  if /(cache|redis)/.test(lower) {
+  if (/(cache|redis)/.test(lower)) {
     assumptions.push("El usuario asume que se necesita cache/redis");
   }
 
@@ -460,7 +459,7 @@ function discoverSkillsForTask(prompt, projectInfo, availableSkills) {
       question: ["frontend-boundary-protection", "efficient-coding"],
       research: ["graphify", "nestjs-best-practices"],
       debugging: ["nestjs-best-practices", "efficient-coding"],
-      bug-fix: ["nestjs-best-practices", "efficient-coding"],
+      "bug-fix": ["nestjs-best-practices", "efficient-coding"],
       implementation: ["nestjs-best-practices", "efficient-coding"],
       refactoring: ["nestjs-best-practices", "efficient-coding"],
       architecture: ["architectural-governance", "nestjs-best-practices"],
@@ -472,7 +471,7 @@ function discoverSkillsForTask(prompt, projectInfo, availableSkills) {
       documentation: ["nestjs-best-practices", "efficient-coding"],
       investigation: ["graphify", "nestjs-best-practices"],
       planning: ["nestjs-best-practices", "efficient-coding"],
-      destructiveoperation: ["nestjs-best-practices", "efficient-coding"],
+      "destructive-operation": ["nestjs-best-practices", "efficient-coding"],
     }[type.type] || ["efficient-coding"];
 
     for (const skill of fallbackSkills) {

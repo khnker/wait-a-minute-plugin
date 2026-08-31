@@ -106,9 +106,64 @@ Consejo: Falta una decisión que cambia la implementación: ¿quieres mantener J
 
 El plugin consta de 3 componentes:
 
-1. **`index.js`**: Plugin factory registrada en OpenCode, hook `chat.message`, API pública (`analyze`, `generateSummary`, `isTrivial`, `requiresStrict`)
+1. **`index.js`**: Plugin factory registrada en OpenCode, hook `chat.message`, API pública (`analyze`, `generateSummary`, `isTrivial`, `requiresStrict`, `presentValidation`)
 2. **`engine.js`**: Motor de análisis core - clasificación, inspección de proyecto, auditoría de suposiciones, discovery de skills, determinación de modo
 3. **`SKILL.md`**: Filosofía, framework de 4 categorías, definiciones de modos, heurísticas de skill discovery
+
+## Confirmación Estratégica (`presentValidation`)
+
+Después del análisis pre-flight, para tareas en modo **NORMAL** o **STRICT**, Wait a Minute presenta un checkpoint de confirmación antes de que el agente principal proceda con la implementación.
+
+Este checkpoint asegura que el usuario valida la estrategia determinada por el sistema, evitando que el agente ejecute cambios basados en suposiciones no verificadas.
+
+### Cómo aparece
+
+```
+Wait a minute — Confirmación estratégica
+
+Intención: implementation (confianza: 75%) | Modo: NORMAL
+Stack: typescript | Arquitectura: nestjs project
+
+Conocido(s): AGENTS.md presente; package.json detectado; Dependencias: typescript, @nestjs/core
+Inferido(s): NestJS framework detectado
+Asumido(s): Se mantiene JWT como sesión interna (por definir)
+Desconocido(s): ¿El nuevo endpoint OAuth reemplaza o extiende la autenticación actual?
+
+Skills seleccionadas: oauth, security-review
+Skills rechazadas: [risk: high] destructive-skill
+
+Riesgo: medium | Complejidad: medium | Ambigüedad: medium
+
+Estrategia recomendada: NORMAL
+
+¿Proceder con esta estrategia?
+  [continuar]   → Ejecutar implementación con estrategia NORMAL
+  [corregir]    → Ver detalles y hacer ajustes
+  [más información] → Expandir análisis completo
+```
+
+### Opciones de respuesta
+
+| Opción | Qué hace |
+|--------|----------|
+| `continuar` | Procede con la implementación usando la estrategia determinada por Wait a Minute |
+| `corregir` | Muestra detalles adicionales y permite hacer ajustes antes de continuar |
+| `más información` | Expande el análisis completo con todos los campos y detalle adicional |
+
+### Comportamiento por modo
+
+| Modo | ¿Muestra checkpoint? | Detalle |
+|------|---------------------|---------|
+| **FAST** | No — bypass | Tareas triviales proceden directamente sin preguntas |
+| **NORMAL** | Sí | Checkpoint estándar con resumen de análisis |
+| **STRICT** | Sí (+ profundidad) | Checkpoint con campos ampliados de riesgo/ambigüedad |
+
+### Origen del prompt
+
+La determinación de modo (y por tanto si aparece el checkpoint) se basa en el **contenido del prompt**, no en quién lo envía:
+
+- Prompt trivial (`rename`, `list`, `show`, etc.) de usuario **o** agente → modo FAST → sin checkpoint
+- Prompt no trivial de usuario **o** agente → modo NORMAL/STRICT → checkpoint obligatorio
 
 ## Desarrollo
 

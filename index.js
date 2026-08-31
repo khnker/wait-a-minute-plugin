@@ -1,21 +1,29 @@
 import { analyze } from "./engine.js";
-import { loadConfig, saveActivePreset, saveActiveMode } from "./router/config";
-import { getActiveTiers, resolvePresetName } from "./router/protocol";
-import { resolveEnforcementMode } from "./router/enforcement";
 
 /**
- * Wait a Minute plugin for OpenCode.
- * 
+ * Wait a Minute plugin for OpenCode — Pre-Flight Cognitive Layer.
+ *
  * Intercepts the prompt via chat.message hook before skill resolution and
  * agent execution. Runs pre-flight cognitive analysis classifying the request,
  * inspecting the project, detecting assumptions, and selecting relevant skills.
- * 
+ *
  * The analysis results are stored in the session and can be accessed by the
  * main agent before proceeding with implementation.
  */
+
+const DEFAULT_CONFIG = {
+  tierCaps: { fast: 8, medium: 5, heavy: 3 },
+  activePreset: "omni",
+  activeMode: "normal",
+  tierPrompts: {},
+};
+
+/**
+ * Plugin factory — loaded by OpenCode when registered in opencode.jsonc.
+ * Autocontained: no external deps beyond ./engine.js.
+ */
 const WaitAMinutePlugin = async (ctx) => {
-  let cfg = loadConfig();
-  const activeTiers = getActiveTiers(cfg);
+  let cfg = { ...DEFAULT_CONFIG };
 
   // Per-plugin-instance session store
   const sessionStore = new Map();
@@ -28,7 +36,6 @@ const WaitAMinutePlugin = async (ctx) => {
   // -------------------------------------------------------------------------
   ctx.on("chat.message", async (input, output) => {
     try {
-      // Check bypass
       if (bypassed) return;
 
       // Extract user prompt text
@@ -49,13 +56,9 @@ const WaitAMinutePlugin = async (ctx) => {
         prompt: promptText,
         projectPath: ctx.directory,
         config: cfg,
-        tierCaps: {
-          fast: cfg.tierCaps?.fast ?? 8,
-          medium: cfg.tierCaps?.medium ?? 5,
-          heavy: cfg.tierCaps?.heavy ?? 3,
-        },
-        activePreset: cfg.activePreset || "omni",
-        activeMode: cfg.activeMode || "normal",
+        tierCaps: cfg.tierCaps,
+        activePreset: cfg.activePreset,
+        activeMode: cfg.activeMode,
       });
 
       // Store analysis results in session for access by agent
@@ -73,7 +76,6 @@ const WaitAMinutePlugin = async (ctx) => {
 
       // Store for later access by the orchestrator
       input.waitAnalysis = analysis;
-
     } catch (err) {
       // Best-effort: never crash the session on wait-a-minute error
       console.error("[wait-a-minute] Pre-flight analysis failed:", err);
@@ -85,23 +87,22 @@ const WaitAMinutePlugin = async (ctx) => {
   // -------------------------------------------------------------------------
   ctx.experimental = ctx.experimental || {};
   ctx.experimental.waitAMinute = {
-    inject: () => {/* handled in chat.message */},
+    inject: () => {},
     setConfig: (cfgPatch) => {
       try {
         Object.assign(cfg, cfgPatch);
-        saveActivePreset(cfg.activePreset || "omni");
       } catch {}
     },
   };
 
   // -------------------------------------------------------------------------
-  // Configurable commands
+  // Commands registration
   // -------------------------------------------------------------------------
   cfg.commands ??= {};
   cfg.commands["wait-a-minute"] = {
     template: "$ARGUMENTS",
     description:
-      "Run wait-a-minute pre-flight analysis on a prompt. Usage: /wait-a-minute \"<prompt>\"",
+      'Run wait-a-minute pre-flight analysis on a prompt. Usage: /wait-a-minute "<prompt>"',
   };
 
   cfg.commands["wait-a-minute-status"] = {
@@ -109,18 +110,6 @@ const WaitAMinutePlugin = async (ctx) => {
     description:
       "Show last wait-a-minute analysis results from current session",
   };
-
-  // -------------------------------------------------------------------------
-  // Preset/configuration integration
-  // -------------------------------------------------------------------------
-  for (const [name, tier] of Object.entries(activeTiers)) {
-    const resolvedPrompt = tier.prompt ?? cfg.tierPrompts?.[name];
-
-    // Inject wait-a-minute awareness into tier prompts
-    if (resolvedPrompt && !resolvedPrompt.includes("wait-a-minute")) {
-      tier.prompt = `${resolvedPrompt}\n\n[wait-a-minute will analyze this prompt before skill resolution.]`;
-    }
-  }
 
   return {
     name: "wait-a-minute",
@@ -130,49 +119,38 @@ const WaitAMinutePlugin = async (ctx) => {
 };
 
 /**
- * Wait a Minute - Pre-Flight Cognitive Layer for OpenCode
- * 
- * Main entry point. Analiza una petición de usuario antes de que el agente
- * comience su procesamiento. Devuelve un resumen estructurado que el agente
- * puede usar para decidir cómo proceder.
+ * Wait a Minute — Pre-Flight Cognitive Layer public API.
  */
-
-export default {
+const waitAMinute = {
   name: "wait-a-minute",
 
   /**
    * Analiza el prompt del usuario y retorna el contexto de pre-flight.
-   * 
-   * @param {Object} options - Options for analysis
+   *
+   * @param {Object} options
    * @param {string} options.prompt - El prompt del usuario
-   * @param {string} [options.projectPath] - Ruta del proyecto (opcional, usa cwd por defecto)
-   * @param {Object} [options.config] - Configuración de OpenCode
+   * @param {string} [options.projectPath] - Ruta del proyecto (usa cwd por defecto)
+   * @param {Object} [options.config] - Configuración
    * @param {Object} [options.tierCaps] - Caps por tier
-   * @param {string} [options.activePreset] - Preset activo
-   * @param {string} [options.activeMode] - Modo activo
    * @returns {Object} - Resultado del análisis de pre-flight
    */
-  analyze: async function({ prompt, projectPath, config, tierCaps, activePreset, activeMode } = {}) {
-    // Validate prompt
+  analyze: async function({
+    prompt,
+    projectPath,
+    config,
+    tierCaps,
+    activePreset,
+    activeMode,
+  } = {}) {
     if (!prompt || typeof prompt !== "string") {
-      throw new Error("Prompt is required and must be a string");
-    }
-
-    // Trim and validate
-    const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt) {
       return {
         intent: { classification: "trivial", ambiguity: "low", confidence: 100 },
         project: { detected_stack: "unknown", architecture: "unknown", relevant_files: [] },
-        known: ["Prompt vacío o nulo"],
+        known: [],
         inferred: [],
         assumed: [],
         unknown: ["No hay prompt para analizar"],
-        skills: {
-          candidates: [],
-          selected: [],
-          rejected: [],
-        },
+        skills: { candidates: [], selected: [], rejected: [] },
         risk: "low",
         complexity: "trivial",
         ambiguity: "low",
@@ -182,22 +160,35 @@ export default {
       };
     }
 
-    // Run the engine analysis
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt) {
+      return {
+        intent: { classification: "trivial", ambiguity: "low", confidence: 100 },
+        project: { detected_stack: "unknown", architecture: "unknown", relevant_files: [] },
+        known: ["Prompt vacío o nulo"],
+        inferred: [],
+        assumed: [],
+        unknown: ["No hay prompt para analizar"],
+        skills: { candidates: [], selected: [], rejected: [] },
+        risk: "low",
+        complexity: "trivial",
+        ambiguity: "low",
+        strategy: "FAST",
+        ready: true,
+        advice: "Sin prompt - sin análisis necesario",
+      };
+    }
+
     const result = await analyze({
       prompt: trimmedPrompt,
       projectPath: projectPath || process.cwd(),
       config,
-      tierCaps: tierCaps || {
-        fast: 8,
-        medium: 5,
-        heavy: 3,
-      },
-      activePreset: activePreset || "omni",
-      activeMode: activeMode || "normal",
+      tierCaps: tierCaps || DEFAULT_CONFIG.tierCaps,
+      activePreset: activePreset || DEFAULT_CONFIG.activePreset,
+      activeMode: activeMode || DEFAULT_CONFIG.activeMode,
     });
 
-    // Post-process: add human-readable summary
-    const summary = generateSummary(result);
+    const summary = this.generateSummary(result);
 
     return {
       ...result,
@@ -211,16 +202,14 @@ export default {
   generateSummary: function(result) {
     const lines = [];
 
-    // Intent
-    lines.push(`Intención: ${result.intent.classification} (confianza: ${result.intent.confidence}%)`);
-
-    // Project
+    lines.push(
+      `Intención: ${result.intent.classification} (confianza: ${result.intent.confidence}%)`
+    );
     lines.push(`Stack: ${result.project.detected_stack}`);
     if (result.project.architecture !== "unknown") {
       lines.push(`Arquitectura: ${result.project.architecture}`);
     }
 
-    // Known/Inferred/Assumed/Unknown
     if (result.known.length > 0) {
       lines.push(`\nConocido(s): ${result.known.slice(0, 5).join("; ")}`);
     }
@@ -234,32 +223,30 @@ export default {
       lines.push(`Desconocido(s): ${result.unknown.slice(0, 3).join("; ")}`);
     }
 
-    // Skills
-    lines.push(`\nSkills candidatas: ${result.skills.candidates.slice(0, 5).map(c => c.name).join(", ")}`);
+    lines.push(
+      `\nSkills candidatas: ${result.skills.candidates
+        .slice(0, 5)
+        .map((c) => c.name)
+        .join(", ")}`
+    );
     lines.push(`Skills seleccionadas: ${result.skills.selected.join(", ")}`);
     if (result.skills.rejected.length > 0) {
       lines.push(`Skills rechazadas: ${result.skills.rejected.join(", ")}`);
     }
 
-    // Risk/Complexity/Ambiguity
     lines.push(`\nRiesgo: ${result.risk}`);
     lines.push(`Complejidad: ${result.complexity}`);
     lines.push(`Ambigüedad: ${result.ambiguity}`);
-
-    // Strategy/mode
     lines.push(`\nEstrategia: ${result.strategy}`);
-
-    // Readiness
     lines.push(`\n¿Listo para proceder?: ${result.ready ? "SÍ" : "NO"}`);
-
-    // Advice
     lines.push(`\nConsejo: ${result.advice || ""}`);
 
     return lines.join("\n");
   },
 
   /**
-   * Verifica si el prompt puede ser procesado en modo FAST (trivial)
+   * Verifica si el prompt puede ser procesado en modo FAST (trivial).
+   * Basado en el CONTENIDO del prompt, no en el origen (usuario/agente).
    */
   isTrivial: function(prompt) {
     const lower = prompt.toLowerCase().trim();
@@ -296,78 +283,79 @@ export default {
       /destructivo|destructive/i,
     ];
 
-    return strictPatterns.some(p => p.test(lower));
+    return strictPatterns.some((p) => p.test(lower));
   },
 
   /**
    * Presentar validación de pre-flight al agente/usuario.
-   * 
-   * Muestra un resumen estructurado del análisis y solicita confirmación
-   * sobre la estrategia a seguir. Retorna el modo de respuesta esperado:
-   * 'continue' (proceder), 'correct' (necesita ajustes) o 'more-info'
-   * (mostrar detalle completo).
-   * 
-   * @param {Object} analysis - Resultado del análisis wait-a-minute.analysis
-   * @param {Object} [ctx] - Contexto de OpenCode (sistema prompt, etc.)
-   * @returns {Object} - Modo de respuesta: continue | correct | more-info
+   *
+   * Checkpoint estratégico: muestra el resumen y solicita confirmación
+   * sobre la estrategia a seguir. En modo FAST se omita (proceder directo).
+   *
+   * @param {Object} opts
+   * @param {Object} opts.analysis - Resultado de analyze()
+   * @returns {Object} - { mode: 'continue'|'validation-pending', ... }
    */
   presentValidation: async function({ analysis, ctx } = {}) {
-    // Si no hay análisis, retornarcontinue por defecto
     if (!analysis) {
-      return { mode: 'continue', advice: 'No hay análisis previo' };
+      return { mode: "continue", advice: "No hay análisis previo" };
     }
 
     const summary = this.generateSummary(analysis);
-    const mode = analysis.strategy || 'NORMAL';
-    
-    // Determinar si mostrar validación según modo
-    const showValidation = mode !== 'FAST'; // FAST omite validación
-    
+    const mode = analysis.strategy || "NORMAL";
+
+    // FAST omite validación (basado en contenido, no origen)
+    const showValidation = mode !== "FAST";
     if (!showValidation) {
-      return { mode: 'continue', advice: 'Tarea trivial - proceder directamente' };
+      return { mode: "continue", advice: "Tarea trivial - proceder directamente" };
     }
 
-    // Construir mensaje de validación
     const validationLines = [
-      'Wait a minute — Confirmación estratégica',
-      '',
+      "Wait a minute — Confirmación estratégica",
+      "",
       `Intención: ${analysis.intent.classification} (confianza: ${analysis.intent.confidence}%) | Modo: ${mode}`,
       `Stack: ${analysis.project.detected_stack}`,
-      analysis.project.architecture !== 'unknown' && `Arquitectura: ${analysis.project.architecture}`,
-      '',
-      'Conocido(s): ' + (analysis.known.length > 0 ? analysis.known.slice(0, 3).join(', ') : 'ninguno'),
-      'Inferido(s): ' + (analysis.inferred.length > 0 ? analysis.inferred.slice(0, 3).join(', ') : 'ninguno'),
-      'Asumido(s): ' + (analysis.assumed.length > 0 ? analysis.assumed.slice(0, 3).join(', ') : 'ninguno'),
-      'Desconocido(s): ' + (analysis.unknown.length > 0 ? analysis.unknown.slice(0, 3).join(', ') : 'ninguno'),
-      '',
-      'Skills seleccionadas: ' + analysis.skills.selected.join(', '),
-      analysis.skills.rejected.length > 0 && `Skills rechazadas: ${analysis.skills.rejected.join(', ')}`,
-      '',
+      analysis.project.architecture !== "unknown" &&
+        `Arquitectura: ${analysis.project.architecture}`,
+      "",
+      "Conocido(s): " +
+        (analysis.known.length > 0 ? analysis.known.slice(0, 3).join(", ") : "ninguno"),
+      "Inferido(s): " +
+        (analysis.inferred.length > 0 ? analysis.inferred.slice(0, 3).join(", ") : "ninguno"),
+      "Asumido(s): " +
+        (analysis.assumed.length > 0 ? analysis.assumed.slice(0, 3).join(", ") : "ninguno"),
+      "Desconocido(s): " +
+        (analysis.unknown.length > 0 ? analysis.unknown.slice(0, 3).join(", ") : "ninguno"),
+      "",
+      "Skills seleccionadas: " + analysis.skills.selected.join(", "),
+      analysis.skills.rejected.length > 0 &&
+        `Skills rechazadas: ${analysis.skills.rejected.join(", ")}`,
+      "",
       `Riesgo: ${analysis.risk} | Complejidad: ${analysis.complexity} | Ambigüedad: ${analysis.ambiguity}`,
       `Estrategia recomendada: ${analysis.strategy}`,
-      '',
-      '¿Proceder con esta estrategia?',
-      '  [continuar]   → Ejecutar implementación con estrategia ' + mode,
-      '  [corregir]    → Ver detalles y hacer ajustes',
-      '  [más información] → Expandir análisis completo',
-      '',
-      'Respuesta esperada: continuar / corregir / más información',
+      "",
+      "¿Proceder con esta estrategia?",
+      "  [continuar]   → Ejecutar implementación con estrategia " + mode,
+      "  [corregir]    → Ver detalles y hacer ajustes",
+      "  [más información] → Expandir análisis completo",
+      "",
+      "Respuesta esperada: continuar / corregir / más información",
     ];
 
-    // Inyectar en el sistema prompt si hay contexto ctx
-    if (ctx && ctx?.system) {
+    if (ctx && ctx.system) {
       ctx.system.unshift({
-        type: 'text' as const,
-        text: validationLines.join('\n') + '\n',
+        type: "text",
+        text: validationLines.join("\n") + "\n",
       });
     }
 
-    // Retornar estructura para que el agente principal procese la respuesta
     return {
-      mode: 'validation-pending',
-      summary: summary,
+      mode: "validation-pending",
+      summary,
       validationLines,
-      advice: 'Esperando respuesta del agente/usuario',
+      advice: "Esperando respuesta del agente/usuario",
     };
   },
 };
+
+export default waitAMinute;

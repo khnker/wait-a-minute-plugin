@@ -1,4 +1,6 @@
 // CommonJS test - no spaces in variable names
+(async () => {
+
 const assert = require('assert');
 
 console.log('=== Wait a Minute Simple Test Suite (CJS) ===\n');
@@ -152,3 +154,5 @@ try {
 
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 process.exitCode = failed > 0 ? 1 : 0;
+
+})();
