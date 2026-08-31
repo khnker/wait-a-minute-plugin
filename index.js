@@ -29,6 +29,34 @@ function nextActionFrom(state) {
   return "Continuar tarea";
 }
 
+const ACTIVE_FILE = () => path.join(process.cwd(), ".wam", "active-task");
+
+function readActiveTaskId() {
+  try {
+    const v = fs.readFileSync(ACTIVE_FILE(), "utf-8").trim();
+    return v || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeActiveTaskId(id) {
+  fs.mkdirSync(path.dirname(ACTIVE_FILE()), { recursive: true });
+  fs.writeFileSync(ACTIVE_FILE(), id);
+}
+
+function listTaskIds() {
+  const dir = path.join(process.cwd(), ".wam", "tasks");
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    return [];
+  }
+}
+
 function projectState(analysis) {
   return {
     contract: {
@@ -83,7 +111,7 @@ const WaitAMinutePlugin = async (ctx) => {
       if (!promptText.trim()) return;
 
       // 1. Detectar tarea activa o iniciar nueva
-      const taskId = input.taskId || "default-task";
+      const taskId = input.taskId || readActiveTaskId() || "default-task";
 
       // 2. Ejecutar análisis (pre-flight existente)
       const analysis = await waitAMinute.analyze({
@@ -115,8 +143,12 @@ const WaitAMinutePlugin = async (ctx) => {
         ctx: output,
       });
 
-      // 6. Inyectar gate + badge + contenido de skills al system prompt
+      // 6. Inyectar estado + gate + badge + skills (path) al system prompt
       const inject = [];
+      if (state.requirements?.length) {
+        const pend = state.requirements.filter((r) => r.status !== "done").length;
+        inject.push(`[wait-a-minute: task ${taskId} — fase ${state.phase}, ${pend}/${state.requirements.length} requisitos pendientes]`);
+      }
       if (gate.blocked) {
         inject.push(
           "──────────────────────────────────────────────",
@@ -130,6 +162,13 @@ const WaitAMinutePlugin = async (ctx) => {
         state.phase = "IMPLEMENTING";
         state.nextAction = nextActionFrom(state);
         persistTaskState(taskId, state);
+        const gateHold = `⛔ [wait-a-minute] COMPLETION GATE: faltan ${gate.pending.length} requisitos. No declare DONE. Continuar con: ${state.nextAction}`;
+        if (input?.parts && input.parts.length > 0) {
+          const tp = input.parts.find((p) => p.type === "text" && typeof p.text === "string");
+          if (tp) tp.text = gateHold;
+        } else if (input && typeof input.text === "string") {
+          input.text = gateHold;
+        }
       } else if (gate.allDone) {
         state.phase = "DONE";
         state.nextAction = "Tarea completa — contrato verificado";
@@ -138,16 +177,13 @@ const WaitAMinutePlugin = async (ctx) => {
 
       if (cfg.experimental?.waitAMinuteInject === true) {
         inject.push(`[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`);
-        let budget = 4000;
+        const registry = waitAMinute.getRegistry();
         for (const s of analysis.skills?.selected || []) {
-          if (!s.content) continue;
-          const block = `\n[wait-a-minute: skill "${s.name}" — instrucciones]\n${s.content}`;
-          if (budget - block.length < 0) {
-            inject.push(`\n[wait-a-minute: cuerpo truncado — /wam skills inspect ${s.name}]`);
-            break;
-          }
-          inject.push(block);
-          budget -= block.length;
+          const entry = Object.values(registry).find((r) => r.id === s.id);
+          if (!entry || !s.hasContent) continue;
+          const dl = waitAMinute.loadSkillOnDemand(entry.id, registry, ctx.directory);
+          if (!dl.loaded) continue;
+          inject.push(`[wait-a-minute: skill "${s.name}" — SKILL.md materializado en ${dl.contentPath}. Cargar via runtime nativo si se ejecuta.]`);
         }
       }
 
@@ -195,7 +231,7 @@ const WaitAMinutePlugin = async (ctx) => {
   // Process commands if present in ctx
   if (ctx.command && ctx.command.name === "wam") {
     const [sub, action, ...rest] = ctx.command.args || [];
-    const taskId = "default-task";
+    const taskId = readActiveTaskId() || "default-task";
 
     if (sub === "skills") {
       const skills = waitAMinute.getRegistry();
@@ -263,7 +299,31 @@ const WaitAMinutePlugin = async (ctx) => {
       return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> pending";
     }
 
-    return "Uso: /wam <skills|contract|progress>";
+    if (sub === "task") {
+      if (action === "list") {
+        const ids = listTaskIds();
+        if (!ids.length) return "Sin tareas persistidas (.wam/tasks)";
+        const active = readActiveTaskId();
+        return ids
+          .map((id) => {
+            const st = getTaskState(id);
+            return `${id}${id === active ? " *activa" : ""} [${st?.phase || "?"}] ${st?.contract?.status || ""}`;
+          })
+          .join("\n");
+      }
+      if (action === "switch") {
+        const id = rest.join(" ");
+        if (!id) return "Uso: /wam task switch <taskId>";
+        writeActiveTaskId(id);
+        const st = getTaskState(id);
+        return st
+          ? `Tarea activa: ${id} [${st.phase}] — ${st.nextAction || ""}`
+          : `Tarea activa: ${id} (sin estado persistido — enviar primer mensaje)`;
+      }
+      return "Uso: /wam task <list|switch <id>>";
+    }
+
+    return "Uso: /wam <skills|contract|progress|task>";
   }
 
   return {

@@ -9,6 +9,7 @@
 
 import waitAMinute from './index.js';
 import { getTaskState } from './engine.js';
+import fs from 'node:fs';
 
 const test = globalThis.test || ((name, fn) => { try { fn(); console.log(`  ✓ ${name}`); } catch (err) { console.log(`  ✗ ${name}: ${err.message}`); process.exitCode = 1; } });
 
@@ -250,17 +251,19 @@ try {
   failed++;
 }
 
-// --- Escenario 17: contenido real cargado bajo demanda ---
-console.log('17. Skill bajo demanda entrega contenido real (no simulado)');
+// --- Escenario 17: contenido real materializado bajo demanda (no simulado) ---
+console.log('17. Skill bajo demanda materializa SKILL.md real (path local)');
 try {
   const bundled = waitAMinute.loadBundledRegistry();
   const withContent = Object.values(bundled).find((s) => s.content && s.content.length > 0);
   assert(withContent, 'Debe existir al menos una skill con contenido embebido');
-  const dl = await waitAMinute.loadSkillOnDemand(withContent.id, bundled);
+  const dl = await waitAMinute.loadSkillOnDemand(withContent.id, bundled, '/tmp/wam-test-bundle');
   assert(dl.loaded === true, `loadSkillOnDemand debe cargar (got loaded=${dl.loaded}, ${dl.reason || ""})`);
-  assert(dl.content && dl.content.length > 0, 'Contenido real no vacío');
-  assert(dl.content.includes("\n") || dl.content.length > 40, 'Contenido parece cuerpo de SKILL.md, no solo metadata');
-  console.log(`   ✓ ${withContent.id}: ${dl.content.length} chars de contenido real`);
+  assert(dl.contentPath && dl.contentPath.endsWith('SKILL.md'), `contentPath local materializado (got ${dl.contentPath})`);
+  assert(fs.existsSync(dl.contentPath), `Archivo materializado debe existir (${dl.contentPath})`);
+  const materialized = fs.readFileSync(dl.contentPath, 'utf-8');
+  assert(materialized.length > 40, 'Archivo materializado no vacío (cuerpo real, no metadata)');
+  console.log(`   ✓ ${withContent.id}: SKILL.md materializado ${materialized.length} chars en ${dl.contentPath}`);
   passed++;
 } catch (e) {
   console.log(`   ✗ Falló: ${e.message}`);
