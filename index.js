@@ -373,7 +373,7 @@ function wamCli(args) {
   }
 
   if (sub === "progress") {
-    const [reqId, op, ...evidence] = rest;
+    const [reqId, op, ...evidence] = [action, ...rest];
     if (!reqId) {
       const st = getTaskState(taskId);
       if (!st) return "Sin estado de tarea (persiste tras el primer mensaje)";
