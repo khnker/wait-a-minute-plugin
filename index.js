@@ -67,17 +67,21 @@ const WaitAMinutePlugin = async (ctx) => {
 
       // Completion Contract lifecycle: PROPOSED by default for any analysis
       analysis.completionContract.status = "PROPOSED";
-      
-      // Store analysis results in session for access by agent
+
+      // Store analysis results + persistent policies + skill registry in session
       sessionStore.set("waitAnalysis", analysis);
       sessionStore.set("completionContract", analysis.completionContract);
+      sessionStore.set("persistentPolicies", analysis.persistentPolicies || []);
+      sessionStore.set("skillRegistry", analysis.skillRegistry || {});
 
-      // 3. Persistir progreso (Progress Gate)
+      // 3. Persistir progreso (Progress Gate) + persistent policies en snapshot
       const state = {
         phase: "IMPLEMENTING",
         progress: { completed: 0, total: analysis.completionContract.requirements.length },
         nextAction: "Continuar tarea",
-        lastAction: promptText
+        lastAction: promptText,
+        persistentPolicies: (analysis.persistentPolicies || []).map((p) => p.policy),
+        activeGates: (analysis.persistentPolicies || []).flatMap((p) => p.gates || []),
       };
       persistTaskState(taskId, state);
 
@@ -346,9 +350,22 @@ const waitAMinute = {
       "Desconocido(s): " +
         (analysis.unknown.length > 0 ? analysis.unknown.slice(0, 3).join(", ") : "ninguno"),
       "",
-      "Skills seleccionadas: " + analysis.skills.selected.join(", "),
-      analysis.skills.rejected.length > 0 &&
+      "Skills seleccionadas: " +
+        (analysis.skills?.selected?.length > 0
+          ? analysis.skills.selected.map((s) => s.name).join(", ")
+          : "ninguna (bajo demanda)"),
+      analysis.skills?.rejected?.length > 0 &&
         `Skills rechazadas: ${analysis.skills.rejected.join(", ")}`,
+      analysis.skillRegistry &&
+        `Skill Registry: ${analysis.skillRegistry.total} total | ${analysis.skillRegistry.approved} aprobadas | límite routing: ${analysis.skills.limit}`,
+      "",
+      "Políticas persistentes: " +
+        (analysis.persistentPolicies?.length > 0
+          ? analysis.persistentPolicies.map((p) => `${p.policy}(${p.status})`).join(", ")
+          : "ninguna"),
+      // Gates activos de políticas persistentes
+      analysis.persistentPolicies?.length > 0 &&
+        `Gates activos: ${analysis.persistentPolicies.flatMap((p) => p.gates).join(", ")}`,
       "",
       `Riesgo: ${analysis.risk} | Complejidad: ${analysis.complexity} | Ambigüedad: ${analysis.ambiguity}`,
       `Estrategia recomendada: ${analysis.strategy}`,

@@ -202,6 +202,263 @@ function discoverSkills() {
   return candidates;
 }
 
+// ---------------------------------------------------------------------------
+// PERSISTENT POLICIES — reglas transversales del Policy Engine.
+// Siempre aplicables. NO son skills; no requieren carga bajo demanda.
+// ---------------------------------------------------------------------------
+
+const PERSISTENT_POLICIES = {
+  scope: {
+    name: "Scope",
+    kind: "persistent",
+    rules: [
+      "Entregar únicamente lo pedido — sin expansión de alcance",
+      "No agregar features no solicitadas",
+      "No refactorizar código ajeno a la tarea",
+      "Cambiar la mínima superficie posible",
+    ],
+    gates: ["scope-creep", "surface-change"],
+  },
+  verify: {
+    name: "Verify",
+    kind: "persistent",
+    rules: [
+      "Toda implementación debe tener resultado verificable",
+      "Ninguna tarea se marca DONE sin evidencia satisfecha",
+      "Ejecutar tests/lint/typecheck de los artefactos tocados",
+      "Verificar consumidores de los cambios, no solo el cambio",
+    ],
+    gates: ["completion-gate", "evidence-required"],
+  },
+  simplify: {
+    name: "Simplify",
+    kind: "persistent",
+    rules: [
+      "YAGNI — no construir para necesidades futuras especulativas",
+      "Reusar código y abstracciones existentes",
+      "Preferir mecanismos nativos y stdlib cuando aplique",
+      "Implementación mínima y superficie de cambio mínima",
+      "Evitar dependencias innecesarias y generalización prematura",
+      "Abstracción solo cuando el requerimiento la exige ahora",
+    ],
+    gates: ["speculative-abstraction", "unnecessary-deps"],
+  },
+};
+
+// Excepciones de Simplify: nunca eliminar restricciones esenciales.
+const SIMPLIFY_PROTECTED = [
+  "security",
+  "seguridad",
+  "data integrity",
+  "integridad",
+  "explicit requirements",
+  "requisito",
+  "error handling",
+  "manejo de errores",
+  "trust-boundary",
+  "observability",
+  "observabilidad",
+  "required tests",
+  "tests requeridos",
+];
+
+/**
+ * Evalúa las políticas persistentes contra la tarea.
+ * Aplica transversalmente en todo ciclo; devuelve qué políticas aplican y las gates activas.
+ */
+function evaluatePersistentPolicies(prompt, projectInfo, classification, mode) {
+  const lower = prompt.toLowerCase();
+  const applied = [];
+
+  // Scope: siempre aplica salvo tareas triviales puras
+  if (classification.type !== "trivial") {
+    applied.push({
+      policy: "scope",
+      status: "ACTIVE",
+      gates: ["scope-creep", "surface-change"],
+      restrictions: PERSISTENT_POLICIES.scope.rules.slice(0, 2),
+    });
+  }
+
+  // Verify: aplica a toda tarea con resultado material; gate de completitud
+  if (classification.type !== "trivial") {
+    applied.push({
+      policy: "verify",
+      status: "ACTIVE",
+      gates: ["completion-gate", "evidence-required"],
+      restrictions: PERSISTENT_POLICIES.verify.rules,
+    });
+  }
+
+  // Simplify: aplica transversalmente (YAGNI/reuso/stdlib)
+  const simplifyRestrictions = PERSISTENT_POLICIES.simplify.rules;
+
+  // Detectar si la tarea toca zonas protegidas (no simplificar restricciones esenciales)
+  const protectedHits = SIMPLIFY_PROTECTED.filter((w) => lower.includes(w));
+  if (protectedHits.length > 0) {
+    simplifyRestrictions.unshift(
+      `Protegido por Simplify: NO eliminar ${protectedHits.join(", ")} — simplificar implementación, no la restricción`
+    );
+  }
+
+  applied.push({
+    policy: "simplify",
+    status: "ACTIVE",
+    gates: ["speculative-abstraction", "unnecessary-deps", ...(protectedHits.length > 0 ? ["protected-restriction"] : [])],
+    restrictions: simplifyRestrictions.slice(0, 6),
+  });
+
+  return { applied, templates: applied, priority: ["scope", "verify", "simplify"] };
+}
+
+// ---------------------------------------------------------------------------
+// SKILL REGISTRY — catálogo metadata-first de skills bajo demanda.
+// metadata -> routing -> aprobación -> carga on-demand. No contamina contexto.
+// ---------------------------------------------------------------------------
+
+const SKILL_REGISTRY_SOURCES = [
+  { id: "awesome-agent-skills", repo: "https://github.com/khasky/awesome-agent-skills" },
+  { id: "ai-agent-skills", repo: "https://github.com/whobat/AI-Agent-skills" },
+  { id: "antigravity-awesome-skills", repo: "https://github.com/sickn33/antigravity-awesome-skills" },
+];
+
+const SKILL_LIFECYCLE = ["DISCOVERED", "EVALUATING", "APPROVED", "AVAILABLE", "LOADED", "USED", "REJECTED", "DEPRECATED", "DISABLED"];
+const APPROVED_STATUSES = ["APPROVED", "AVAILABLE", "LOADED"];
+
+/**
+ * Descubre skills en el registro (dirs locales), extrae metadata sin cargar contenido.
+ * Registry: id, name, source, capabilities, triggers, risk, compatibility, status.
+ */
+function buildSkillRegistry(availableSkills) {
+  const registry = {};
+  const builtinCapabilities = {
+    "nestjs-developer": { capabilities: ["backend", "nestjs", "api"], triggers: ["nestjs", "nest", "api", "endpoint", "guard", "module"], risk: "medium" },
+    "agent-context-engineering": { capabilities: ["context", "prompt", "agent"], triggers: ["contexto", "context", "prompt", "system prompt"], risk: "low" },
+    "angular-developer": { capabilities: ["frontend", "angular", "component"], triggers: ["angular", "componente", "frontend"], risk: "medium" },
+    "angular-new-app": { capabilities: ["frontend", "angular", "scaffold"], triggers: ["angular", "app", "nuevo proyecto"], risk: "low" },
+    "anti-reimplementation": { capabilities: ["design", "reuse"], triggers: ["reimplementar", "reescribir", "desde cero"], risk: "medium" },
+    "architectural-governance": { capabilities: ["architecture", "coherence"], triggers: ["arquitectura", "architecture", "drift"], risk: "high" },
+    "backend-integrity": { capabilities: ["backend", "transactions", "data"], triggers: ["base de datos", "transaccion", "db", "source of truth"], risk: "high" },
+    "frontend-boundary-protection": { capabilities: ["frontend", "contract"], triggers: ["frontend", "componente", "interfaz"], risk: "medium" },
+    "efficient-coding": { capabilities: ["implementation", "efficiency"], triggers: ["implementar", "codigo", "refactor"], risk: "low" },
+    "graphify": { capabilities: ["analysis", "knowledge-graph"], triggers: ["graph", "grafo", "arquitectura", "analisis"], risk: "low" },
+    "repository-semantic-map": { capabilities: ["analysis", "onboarding"], triggers: ["onboarding", "mapear", "explorar"], risk: "low" },
+    "senior-refactor-reviewer": { capabilities: ["refactor", "review"], triggers: ["refactor", "review", "mantenibilidad"], risk: "medium" },
+    "shadcn": { capabilities: ["frontend", "ui"], triggers: ["shadcn", "ui", "component"], risk: "low" },
+    "ui-ux-design-pro": { capabilities: ["frontend", "ui", "design"], triggers: ["ui", "ux", "diseno", "design", "dashboard"], risk: "low" },
+    "fixing-accessibility": { capabilities: ["frontend", "a11y", "accessibility"], triggers: ["accessibilidad", "a11y", "aria"], risk: "low" },
+    "fixing-metadata": { capabilities: ["frontend", "seo", "meta"], triggers: ["seo", "meta", "og", "cannonical"], risk: "low" },
+    "fixing-motion-performance": { capabilities: ["frontend", "performance", "animation"], triggers: ["animacion", "animation", "rendimiento"], risk: "low" },
+    "baseline-ui": { capabilities: ["frontend", "ui"], triggers: ["ui", "css", "tailwind"], risk: "low" },
+    "bailian-cli": { capabilities: ["ai", "bailian", "alibaba"], triggers: ["bailian", "百炼", "dashscope"], risk: "low" },
+    "bailian-finetune": { capabilities: ["ai", "bailian", "finetune"], triggers: ["finetune", "fine-tune", "bailian"], risk: "low" },
+    "bailian-gen": { capabilities: ["ai", "bailian", "generation"], triggers: ["generar", "imagen", "video", "tts", "bailian"], risk: "low" },
+    "bailian-managed-agent": { capabilities: ["ai", "bailian", "agent"], triggers: ["agent", "bailian", "managed-agent"], risk: "low" },
+    "bailian-protocol": { capabilities: ["ai", "bailian", "protocol"], triggers: ["bailian", "protocol"], risk: "low" },
+  };
+
+  for (const [name, info] of Object.entries(availableSkills || {})) {
+    const meta = builtinCapabilities[name] || {
+      capabilities: [],
+      triggers: [],
+      risk: "low",
+    };
+    // Skills locales ya presentes -> marcadas APPROVED (confianza local)
+    registry[name] = {
+      id: name,
+      name,
+      source: { kind: "local", path: info.path, ref: "installed" },
+      capabilities: meta.capabilities,
+      triggers: meta.triggers,
+      risk: meta.risk,
+      compatibility: { opencode: true },
+      status: "APPROVED",
+      cache: false,
+    };
+  }
+
+  return registry;
+}
+
+/**
+ * Evalúa una skill bajo demanda (heurística para v1).
+ * Determinístico: status es APPROVED/REJECTED según criterios de calidad.
+ */
+function evaluateSkill(skillId, registry) {
+  const skill = registry[skillId];
+  if (!skill) return { skillId, status: "REJECTED", reason: "No registrada" };
+  if (!skill.compatibility?.opencode && skill.source?.kind !== "local") {
+    return { skillId, status: "REJECTED", reason: "Incompatible con OpenCode" };
+  }
+  if (skill.risk === "high" && skill.status !== "APPROVED") {
+    return { skillId, status: "REJECTED", reason: "Skill de alto riesgo no aprobada" };
+  }
+  return { skillId, status: "APPROVED", reason: "Aprobada por registry" };
+}
+
+/**
+ * Skill Router — metadata-first. Selecciona skills APPROVED por capability/trigger
+ * e intent. Límite 1-3 salvo rigor RIGOROUS.
+ */
+function routeSkills(prompt, projectInfo, registry, mode) {
+  const lower = prompt.toLowerCase();
+  const candidates = [];
+  const rejected = [];
+
+  for (const [id, skill] of Object.entries(registry)) {
+    if (!APPROVED_STATUSES.includes(skill.status)) {
+      rejected.push({ name: id, reason: `estado ${skill.status}` });
+      continue;
+    }
+
+    let score = 0;
+    const triggerHit = skill.triggers.filter((t) => lower.includes(t.toLowerCase()));
+    if (triggerHit.length > 0) score += 10 * triggerHit.length;
+
+    const projectHits = (projectInfo?.inferred || []).filter((i) =>
+      i.toLowerCase().includes(skill.capabilities.join(" ").toLowerCase()) ||
+      skill.capabilities.some((c) => i.toLowerCase().includes(c))
+    );
+    if (projectHits.length > 0) score += 5;
+
+    if (score > 0) {
+      candidates.push({ id, name: id, score, reason: triggerHit.join(",") || "capability match" });
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+
+  // Límite de skills por rigor
+  const limit = mode === "MINIMAL" ? 0 : mode === "RIGOROUS" ? 5 : 3;
+  const selected = candidates.slice(0, limit).map((c) => c.name);
+  const overflow = candidates.slice(limit).map((c) => c.name);
+
+  return {
+    candidates: candidates.map((c) => ({ name: c.name, relevance: c.score, reason: c.reason })),
+    selected,
+    rejected: rejected.map((r) => r.name).concat(overflow),
+    counts: { selected: selected.length, limit },
+  };
+}
+
+/**
+ * Carga una skill bajo demanda (content-load, sólo tras selección).
+ * read-only: la carga es responsabilidad de OpenCode; aquí se reporta readiness.
+ */
+function loadSkillOnDemand(skillId, registry) {
+  const skill = registry[skillId];
+  if (!skill) return { loaded: false, reason: "No registrada" };
+  if (!APPROVED_STATUSES.includes(skill.status)) {
+    return { loaded: false, reason: `No aprobada (${skill.status})` };
+  }
+  return {
+    loaded: true,
+    skillId,
+    contentPath: skill.source?.path || null,
+    instructions: "Cargar SKILL.md solo si el agente ejecuta esta skill. No cargar al contexto.",
+  };
+}
+
 /**
  * Clasifica la petición del usuario
  */
@@ -211,12 +468,22 @@ function classifyRequest(prompt) {
   // Trivial patterns - bypass wait-a-minute
   const trivialPatterns = [
     /^\s*rename\s+/i,
+    /^\s*renombra\s+/i,
+    /^\s*cambia\s+\w+/i,
     /^\s*change\s+\w+/i,
     /^\s*what(is|are)\s+/i,
+    /^\s*qué\s+es\s+/i,
+    /^\s*que\s+es\s+/i,
     /^\s*explain\s+/i,
+    /^\s*explica\s+/i,
     /^\s*how\s+to\s+/i,
+    /^\s*cómo\s+/i,
+    /^\s*como\s+hago\s+/i,
     /^\s*list\s+/i,
+    /^\s*lista\s+/i,
+    /^\s*listar\s+/i,
     /^\s*show\s+/i,
+    /^\s*muestra\s+/i,
     /^\s*get\s+\w+/i,
   ];
 
@@ -540,23 +807,27 @@ export async function analyze(options) {
   // Step 3: Audit assumptions
   const assumptions = auditAssumptions(prompt, projectInfo);
 
-  // Step 4: Discover available skills and select relevant ones
+  // Step 5: Select skills for this task (registry metadata-first)
   const availableSkills = discoverSkills();
-
-  // Filter skills that exist in the known locations
-  const filterAvailableSkills = {};
-  for (const [name, info] of Object.entries(availableSkills)) {
-    // Check if the skill path exists
-    // We'll include all available skills and let the plugin handle loading
-    filterAvailableSkills[name] = info;
-  }
-
-  // Step 5: Select skills for this task
-  const skillSelection = discoverSkillsForTask(prompt, projectInfo, filterAvailableSkills);
+  const skillRegistry = buildSkillRegistry(availableSkills);
 
   // Step 6: Determine mode and contract
   const riskLevel = assumptions.some(a => /alto riesgo|high risk|peligroso|destructivo/.test(a)) ? "high" : "medium";
   const modeInfo = determineMode(classification, projectInfo, riskLevel);
+
+  // Step 6.5: Persistent policies — transversal, siempre evaluadas
+  const persistentPolicies = evaluatePersistentPolicies(prompt, projectInfo, classification, modeInfo.mode);
+
+  // Step 5.5: Skill routing por registry (metadata-first, límite por rigor)
+  const rigor = modeInfo.mode === "FAST" ? "MINIMAL" : modeInfo.mode === "STRICT" ? "RIGOROUS" : "STANDARD";
+  const skillSelection = routeSkills(prompt, projectInfo, skillRegistry, rigor);
+  const skillQuality = Object.keys(skillRegistry).map((id) => evaluateSkill(id, skillRegistry));
+  const selectedSkills = skillSelection.selected.map((name) => ({
+    ...loadSkillOnDemand(name, skillRegistry),
+    name,
+    registryStatus: skillRegistry[name]?.status,
+    capabilities: skillRegistry[name]?.capabilities || [],
+  }));
 
   // Completion Contract proposal
   const completionContract = {
@@ -593,10 +864,26 @@ export async function analyze(options) {
 
     questions: [],
 
+    // Persistent policies: siempre aplicadas (transversal)
+    persistentPolicies: persistentPolicies.applied.map((p) => ({
+      policy: p.policy,
+      status: p.status,
+      gates: p.gates,
+      restrictions: p.restrictions.slice(0, 3),
+    })),
+
+    // Skill Registry: metadata-first routing, on-demand
+    skillRegistry: {
+      total: Object.keys(skillRegistry).length,
+      approved: skillQuality.filter((s) => s.status === "APPROVED").length,
+      rejected: skillQuality.filter((s) => s.status !== "APPROVED").length,
+      sources: SKILL_REGISTRY_SOURCES.map((s) => s.id),
+    },
     skills: {
-      candidates: skillSelection.candidates.map(c => ({ name: c.name, relevance: c.relevance })),
-      selected: skillSelection.selected,
+      candidates: skillSelection.candidates,
+      selected: selectedSkills,
       rejected: skillSelection.rejected,
+      limit: skillSelection.counts.limit,
     },
 
     risk: riskLevel,
