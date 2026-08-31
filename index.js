@@ -1,4 +1,4 @@
-import { analyze, getTaskState, persistTaskState } from "./engine.js";
+import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand } from "./engine.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -19,6 +19,35 @@ const DEFAULT_CONFIG = {
   activeMode: "normal",
   tierPrompts: {},
 };
+
+// -- v1-enforcement: estado durable, contrato y progreso --------
+
+function nextActionFrom(state) {
+  const pending = (state?.requirements || []).find((r) => r.status !== "done");
+  if (pending) return `Implementar ${pending.title} (${pending.id} pendiente)`;
+  if (state?.requirements?.length) return "Verificar requisitos completos antes de DONE";
+  return "Continuar tarea";
+}
+
+function projectState(analysis) {
+  return {
+    contract: {
+      status: "PROPOSED",
+      rigor: analysis.completionContract?.rigor || "NORMAL",
+      requirements: analysis.completionContract?.requirements || [],
+      verification: analysis.completionContract?.verification || [],
+      constraints: analysis.completionContract?.constraints || [],
+    },
+    requirements: (analysis.completionContract?.requirements || []).map((title, i) => ({
+      id: `req-${i + 1}`,
+      title,
+      status: "pending",
+      evidence: [],
+    })),
+    persistentPolicies: (analysis.persistentPolicies || []).map((p) => p.policy),
+    activeGates: (analysis.persistentPolicies || []).flatMap((p) => p.gates || []),
+  };
+}
 
 /**
  * Plugin factory — loaded by OpenCode when registered in opencode.jsonc.
@@ -55,8 +84,7 @@ const WaitAMinutePlugin = async (ctx) => {
 
       // 1. Detectar tarea activa o iniciar nueva
       const taskId = input.taskId || "default-task";
-      const currentState = getTaskState(taskId);
-      
+
       // 2. Ejecutar análisis (pre-flight existente)
       const analysis = await waitAMinute.analyze({
         prompt: promptText,
@@ -67,37 +95,65 @@ const WaitAMinutePlugin = async (ctx) => {
         activeMode: cfg.activeMode,
       });
 
-      // Completion Contract lifecycle: PROPOSED by default for any analysis
-      analysis.completionContract.status = "PROPOSED";
+      // 3. Estado durable: contrato PROPOSED (primera vez) o preservar APPROVED
+      const state = waitAMinute.buildPersistedState(taskId, analysis);
+      state.lastAction = promptText;
 
       // Store analysis results + persistent policies + skill registry in session
       sessionStore.set("waitAnalysis", analysis);
-      sessionStore.set("completionContract", analysis.completionContract);
+      sessionStore.set("completionContract", state.contract);
       sessionStore.set("persistentPolicies", analysis.persistentPolicies || []);
       sessionStore.set("skillRegistry", analysis.skillRegistry || {});
-
-      // 3. Persistir progreso (Progress Gate) + persistent policies en snapshot
-      const state = {
-        phase: "IMPLEMENTING",
-        progress: { completed: 0, total: analysis.completionContract.requirements.length },
-        nextAction: "Continuar tarea",
-        lastAction: promptText,
-        persistentPolicies: (analysis.persistentPolicies || []).map((p) => p.policy),
-        activeGates: (analysis.persistentPolicies || []).flatMap((p) => p.gates || []),
-      };
       persistTaskState(taskId, state);
 
-      // Present strategic confirmation for every message (ALWAYS)
-      waitAMinute.presentValidation({ analysis, ctx: output });
+      // 4. Completion Gate: bloquea DONE prematuro (ENFORCE)
+      const gate = waitAMinute.evaluateCompletionGate(state, promptText);
 
-      // Inject analysis summary into the system prompt if configured
+      // 5. Presentar validación con estado de contrato real (GUIDE)
+      waitAMinute.presentValidation({
+        analysis: { ...analysis, contractStatus: state.contract.status, phase: state.phase },
+        ctx: output,
+      });
+
+      // 6. Inyectar gate + badge + contenido de skills al system prompt
+      const inject = [];
+      if (gate.blocked) {
+        inject.push(
+          "──────────────────────────────────────────────",
+          "⛔ WAIT A MINUTE — COMPLETION GATE BLOQUEADO",
+          "La tarea NO está completa. No declares DONE ni fin de tarea.",
+          "Requisitos pendientes:",
+          ...gate.pending.map((p) => `  - ${p}`),
+          `Fase actual: ${state.phase}. Continúa con el próximo requisito.`,
+          "──────────────────────────────────────────────"
+        );
+        state.phase = "IMPLEMENTING";
+        state.nextAction = nextActionFrom(state);
+        persistTaskState(taskId, state);
+      } else if (gate.allDone) {
+        state.phase = "DONE";
+        state.nextAction = "Tarea completa — contrato verificado";
+        persistTaskState(taskId, state);
+      }
+
       if (cfg.experimental?.waitAMinuteInject === true) {
-        const summaryLine = `[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`;
+        inject.push(`[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`);
+        let budget = 4000;
+        for (const s of analysis.skills?.selected || []) {
+          if (!s.content) continue;
+          const block = `\n[wait-a-minute: skill "${s.name}" — instrucciones]\n${s.content}`;
+          if (budget - block.length < 0) {
+            inject.push(`\n[wait-a-minute: cuerpo truncado — /wam skills inspect ${s.name}]`);
+            break;
+          }
+          inject.push(block);
+          budget -= block.length;
+        }
+      }
+
+      if (inject.length > 0) {
         if (!output?.system) output.system = [];
-        output.system.unshift({
-          type: "text",
-          text: `${summaryLine}\n`,
-        });
+        output.system.unshift({ type: "text", text: inject.join("\n") + "\n" });
       }
 
       // Store for later access by the orchestrator
@@ -132,25 +188,82 @@ const WaitAMinutePlugin = async (ctx) => {
   cfg.commands ??= {};
   cfg.commands["wam"] = {
     template: "$COMMAND $ARGS",
-    description: "Wait-a-Minute CLI: /wam skills <scan|update|list|search|inspect|approve|reject|disable|explain> [args]",
+    description:
+      "Wait-a-Minute CLI: /wam skills <list|search|inspect|explain> | /wam contract <approve|reject|edit <json>> | /wam progress [<id> <done <evidencia>|pending>]",
   };
 
   // Process commands if present in ctx
-  // Process commands if present in ctx
   if (ctx.command && ctx.command.name === "wam") {
-    const [sub, action, target] = ctx.command.args || [];
+    const [sub, action, ...rest] = ctx.command.args || [];
+    const taskId = "default-task";
+
     if (sub === "skills") {
-      // CLI simple: busca en el registry ya construido
+      const skills = waitAMinute.getRegistry();
+      const list = Object.values(skills);
       if (action === "list") {
-        const skills = Object.values(sessionStore.get("skillRegistry") || {});
-        return skills.map(s => `${s.id} [${s.status}]`).join("\n");
+        return list.map(s => `${s.id} [${s.status}]`).join("\n");
       }
       if (action === "search") {
-        const skills = Object.values(sessionStore.get("skillRegistry") || {});
-        return skills.filter(s => s.name.includes(target)).map(s => s.id).join("\n");
+        const q = rest.join(" ").toLowerCase();
+        return list
+          .filter(s => (s.name || "").toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q))
+          .slice(0, 20)
+          .map(s => s.id)
+          .join("\n");
       }
-      return "Comando wam skills no soportado";
+      if (action === "inspect") {
+        const id = rest.join(" ");
+        const s = skills[id];
+        if (!s) return `Skill ${id} no encontrada`;
+        return [
+          `${s.id} [${s.status}]`,
+          `name: ${s.name}`,
+          `description: ${s.description}`,
+          `risk: ${s.risk}`,
+          `source: ${s.source?.repository || s.source?.kind || "local"} (${s.source?.path || "—"})`,
+          `--- content (max 1500 chars) ---`,
+          `${(s.content || "(sin contenido)").slice(0, 1500)}`,
+        ].join("\n");
+      }
+      if (action === "explain") {
+        const prompt = rest.join(" ");
+        if (!prompt) return "Uso: /wam skills explain <prompt>";
+        const sel = routeSkillsV2(prompt, {}, waitAMinute.getRegistry(), "STANDARD");
+        return sel.selected.length
+          ? sel.selected.map(s => `${s.name}: ${s.reason}`).join("\n")
+          : "Ninguna skill seleccionada para ese prompt";
+      }
+      return "Uso: /wam skills <list|search|inspect|explain> [args]";
     }
+
+    if (sub === "contract") {
+      if (action === "approve") return JSON.stringify(waitAMinute.approveContract(taskId));
+      if (action === "reject") return JSON.stringify(waitAMinute.rejectContract(taskId));
+      if (action === "edit") {
+        try {
+          return JSON.stringify(waitAMinute.editContract(taskId, JSON.parse(rest.join(" "))));
+        } catch {
+          return "Error: JSON inválido para /wam contract edit";
+        }
+      }
+      return "Uso: /wam contract <approve|reject|edit <json>>";
+    }
+
+    if (sub === "progress") {
+      const [reqId, op, ...evidence] = rest;
+      if (!reqId) {
+        const st = getTaskState(taskId);
+        if (!st) return "Sin estado de tarea (persiste tras el primer mensaje)";
+        return st.requirements
+          .map(r => `${r.id} [${r.status}] ${r.title}${r.evidence?.length ? " | evidence: " + r.evidence.join("; ") : ""}`)
+          .join("\n");
+      }
+      if (op === "done") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "done", evidence.join(" ")));
+      if (op === "pending") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "pending", ""));
+      return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> pending";
+    }
+
+    return "Uso: /wam <skills|contract|progress>";
   }
 
   return {
@@ -170,8 +283,6 @@ const waitAMinute = {
    * Obtiene el registry actual.
    */
   getRegistry: function() {
-    const lib = sessionStore.get("skillRegistry");
-    if (lib && Object.keys(lib).length > 0) return lib;
     return this.loadBundledRegistry();
   },
 
@@ -313,6 +424,109 @@ const waitAMinute = {
   },
 
   /**
+   * Estado durable de tarea: contrato + requisitos por evidencia.
+   * PROPOSED la primera vez; preserva contrato APPROVED y progreso existente.
+   */
+  buildPersistedState: function(taskId, analysis) {
+    const existing = getTaskState(taskId);
+    if (existing && existing.requirements && existing.contract?.status === "APPROVED") {
+      const merged = {
+        ...existing,
+        lastAction: existing.lastAction,
+        nextAction: nextActionFrom(existing),
+      };
+      persistTaskState(taskId, merged);
+      return merged;
+    }
+    const fresh = {
+      ...projectState(analysis),
+      phase: "PROPOSED",
+      nextAction: "Revisar contrato — /wam contract approve o edit",
+      lastAction: "",
+    };
+    persistTaskState(taskId, fresh);
+    return fresh;
+  },
+
+  /**
+   * Completion Gate: detecta claims de fin de tarea y bloquea si hay requisitos pendientes.
+   */
+  evaluateCompletionGate: function(state, prompt) {
+    const lower = (prompt || "").toLowerCase().trim();
+    const doneClaims =
+      /(^|\s)(done|finish|finished|complete|completed|terminate|terminated|listo|termin[eé]|complet[ao]|finalizad[oa])\b|(task|tarea)\s+(complete|complet(a|ada|o)|terminad(a|o))|declare.*done/i;
+    if (!doneClaims.test(lower)) return { blocked: false };
+    const pending = (state?.requirements || []).filter((r) => r.status !== "done");
+    if (pending.length === 0) return { blocked: false, allDone: true };
+    return { blocked: true, pending: pending.map((r) => `${r.id} — ${r.title}`) };
+  },
+
+  /** Aprueba el contrato: PROPOSED → APPROVED, fase → IMPLEMENTING. */
+  approveContract: function(taskId) {
+    const state = getTaskState(taskId);
+    if (!state) return { ok: false, reason: "Sin estado de tarea" };
+    state.contract = { ...(state.contract || {}), status: "APPROVED" };
+    if (state.phase !== "DONE") state.phase = "IMPLEMENTING";
+    state.nextAction = nextActionFrom(state);
+    persistTaskState(taskId, state);
+    return { ok: true, status: "APPROVED", phase: state.phase };
+  },
+
+  /** Rechaza el contrato: REJECTED, fase WAITING. */
+  rejectContract: function(taskId) {
+    const state = getTaskState(taskId);
+    if (!state) return { ok: false, reason: "Sin estado de tarea" };
+    state.contract = { ...(state.contract || {}), status: "REJECTED" };
+    state.phase = "WAITING";
+    state.nextAction = "Revisar contrato con el usuario";
+    persistTaskState(taskId, state);
+    return { ok: true, status: "REJECTED", phase: state.phase };
+  },
+
+  /** Edita el contrato (JSON patch), vuelve a PROPOSED. */
+  editContract: function(taskId, patch) {
+    const state = getTaskState(taskId);
+    if (!state) return { ok: false, reason: "Sin estado de tarea" };
+    const contract = state.contract || { status: "PROPOSED", requirements: [], verification: [], constraints: [] };
+    if (Array.isArray(patch?.requirements)) {
+      contract.requirements = patch.requirements;
+      state.requirements = patch.requirements.map((title, i) => ({
+        id: `req-${i + 1}`,
+        title,
+        status: "pending",
+        evidence: [],
+      }));
+    }
+    if (Array.isArray(patch?.verification)) contract.verification = patch.verification;
+    if (Array.isArray(patch?.constraints)) contract.constraints = patch.constraints;
+    contract.status = "PROPOSED";
+    state.contract = contract;
+    state.phase = "PROPOSED";
+    state.nextAction = "Revisar contrato — /wam contract approve o edit";
+    persistTaskState(taskId, state);
+    return { ok: true, status: "PROPOSED", requirements: contract.requirements.length };
+  },
+
+  /** Marca requisito done/pending con evidencia. */
+  markRequirement: function(taskId, reqId, status, evidence) {
+    const state = getTaskState(taskId);
+    if (!state) return { ok: false, reason: "Sin estado de tarea" };
+    const req = (state.requirements || []).find((r) => r.id === reqId);
+    if (!req) return { ok: false, reason: `Requisito ${reqId} no existe` };
+    req.status = status;
+    if (status === "done" && evidence) req.evidence.push(evidence);
+    if (status === "pending") req.evidence = [];
+    state.nextAction = nextActionFrom(state);
+    persistTaskState(taskId, state);
+    return { ok: true, phase: state.phase, nextAction: state.nextAction };
+  },
+
+  /** Carga contenido real de una skill del catálogo bajo demanda. */
+  loadSkillOnDemand: function(skillId, registry) {
+    return loadSkillOnDemand(skillId, registry);
+  },
+
+  /**
    * Verifica si el prompt puede ser procesado en modo FAST (trivial).
    * Basado en el CONTENIDO del prompt, no en el origen (usuario/agente).
    */
@@ -373,12 +587,19 @@ const waitAMinute = {
     const summary = this.generateSummary(analysis);
     const mode = analysis.strategy || "NORMAL";
 
+    const contractStatus = analysis.contractStatus || analysis.completionContract?.status || "PROPOSED";
+    const statusLine =
+      contractStatus === "APPROVED"
+        ? `✅ Contrato aprobado (fase: ${analysis.phase || "IMPLEMENTING"})`
+        : `⚠ Contrato ${contractStatus} NO aprobado — /wam contract approve`;
+
     const validationLines = [
-      "Wait a minute — Completion Contract (PROPOSED)",
+      "Wait a minute — Completion Contract",
       "",
-      `Contract Status: ${analysis.completionContract.status} | Rigor: ${analysis.completionContract.rigor}`,
-      `Requirements: ${analysis.completionContract.requirements.join(", ")}`,
-      `Verification: ${analysis.completionContract.verification.join(", ")}`,
+      statusLine,
+      `Contract Status: ${contractStatus} | Rigor: ${analysis.completionContract?.rigor || "NORMAL"}`,
+      `Requirements: ${(analysis.completionContract?.requirements || []).join(", ")}`,
+      `Verification: ${(analysis.completionContract?.verification || []).join(", ")}`,
       "",
       `Intención: ${analysis.intent.classification} (confianza: ${analysis.intent.confidence}%) | Modo: ${mode}`,
       `Stack: ${analysis.project.detected_stack}`,

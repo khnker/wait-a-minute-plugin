@@ -1,0 +1,75 @@
+# OpenSpec Change: wait-a-minute-v1-enforcement
+
+## Change ID
+wait-a-minute-v1-enforcement
+
+## Title
+WAM v1-enforcement — Completion Gate real, aprobación de contrato, progreso evidenciable y skills con contenido real
+
+## Estado
+🔄 En implementación
+
+## Contexto
+WAM v1 ya tiene THINK (~80%, pre-flight + políticas persistentes + registry) y GUIDE (~65%, contrato + routing).
+Falta ENFORCE (~20%): el plugin aconseja pero no puede impedir DONE prematuro.
+
+Los gaps verificados en código (main):
+- `loadSkillOnDemand` era simulado: devolvía `loaded: true` sin contenido real.
+- `skills/registry.json` era metadata-only; el body del SKILL.md se descartaba en build.
+- Los routers estaban duplicados: `routeSkills()` (muerto) + `routeSkillsV2()`.
+- Estado de tarea: solo `completed/total`, sin requisitos por evidencia; `nextAction` hardcodeado.
+- Sin ciclo de aprobación de contrato (todo quedaba PROPOSED).
+- CLI: solo list/search; scan/update/approve/reject prometidos pero sin handler.
+
+## Objetivo
+Convertir WAM en control layer que pueda **impedir** que el agente declare la tarea terminada prematuramente:
+1. Completion Gate real: bloquea claims de DONE si hay requisitos pendientes.
+2. Contrato aprobable: PROPOSED → APPROVED → IMPLEMENTING → VERIFYING → DONE (+ REJECTED).
+3. Progreso real: requisitos `[{id, title, status, evidence: []}]`, `nextAction` derivado.
+4. Skills con contenido real embebido: `loadSkillOnDemand` entrega el body del SKILL.md, sin red.
+
+## Diseño
+
+### Lifecycle de contrato
+```
+PROPOSED → (user: /wam contract approve) → APPROVED → IMPLEMENTING
+        → (user: /wam contract reject)   → REJECTED (WAITING)
+        → (user: /wam contract edit <json>) → PROPOSED (re-aprobar)
+IMPLEMENTING → (todos los requisitos done + claim DONE) → DONE
+```
+
+### Completion Gate (ENFORCE)
+- El hook `chat.message` detecta claims de fin de tarea (done/finished/listo/terminé/completa…).
+- Si hay requisitos `pending` → inyecta en `output.system` un bloque de bloqueo (primera entrada)
+  listando los requisitos pendientes y la fase actual. El agente NO puede declarar DONE.
+- Si todos los requisitos están done → permite DONE y persiste fase DONE.
+- Sin estado de tarea → gate permisivo (no bloquea).
+
+### Progreso por requisito
+```
+requirements: [{ id: "req-1", title: "...", status: "pending"|"done", evidence: [] }]
+nextAction:  derivado → "Implementar <title> (req-N pendiente)" | "Verificar requisitos antes de DONE"
+```
+- CLI: `/wam progress` | `/wam progress <id> done <evidencia>` | `/wam progress <id> pending`.
+- Retrocompat: estado legacy `progress:{completed,total}` migra a requirements en el primer write.
+
+### Skills con contenido real
+- `scripts/build-registry.cjs` (build-time, maintainer) extrae el body post-frontmatter y lo
+  empaqueta como `content` en `skills/registry.json`. El catálogo viaja embebido; sin red en runtime.
+- `loadSkillOnDemand(id, registry)` (exportado) retorna `{loaded:true, content}` con el body real;
+  `loaded:false` con razón si la skill no existe, no está aprobada o no tiene contenido.
+- `routeSkillsV2` (exportado) adjunta `content`/`loaded` a cada skill seleccionada.
+- Router único: `routeSkills()` eliminado; `scoreSkill()` ponderado (name:5, capability:4, keyword:3,
+  description:2, domain:1) es el único algoritmo.
+
+## Qué NO se implementa
+- Capa MCP paralela (los MCPs de OpenCode ya están disponibles para el agente principal).
+- Red en runtime (el catálogo es build-time + embebido).
+- Instalación automática de skills (aprobación humana o del maintainer).
+- Semantic search / embeddings / SQLite (scoring determinista suficiente para v1).
+- Skills en archivos sueltos `skills/bundled/<id>/SKILL.md` (se usa `content` embebido en registry.json:
+  un único artefacto autocontenido, verificable y con provenance por commit).
+
+## Referencias
+- Auditoría de gaps: THINK 🟢 / GUIDE 🟡 / ENFORCE 🔴 (loading simulado, gate inexistente, routers duplicados).
+- README.md — sección "v1-enforcement".

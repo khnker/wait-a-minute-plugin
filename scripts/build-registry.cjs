@@ -29,7 +29,7 @@ function readSafe(p) { try { return fs.readFileSync(p, "utf8"); } catch { return
 function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
 
 function parseFrontmatter(content) {
-  const meta = { name: "", description: "", keywords: [] };
+  const meta = { name: "", description: "", keywords: [], body: "" };
   const m = content.match(/^---\s*\n([\s\S]*?)\n---/);
   if (!m) return meta;
   const b = m[1];
@@ -41,6 +41,8 @@ function parseFrontmatter(content) {
   if (km) {
     meta.keywords = km[1].split("\n").map((l) => l.trim().replace(/^-\s*/, "").replace(/^["']|["']$/g, "")).filter(Boolean);
   }
+  // Contenido real: todo lo que sigue al frontmatter (cuerpo del SKILL.md)
+  meta.body = content.slice(m[0].length).trim();
   return meta;
 }
 
@@ -62,7 +64,8 @@ function scanSource(source, dir) {
       const full = path.join(d, e.name);
       if (e.isDirectory()) walk(full, relBase);
       else if (e.name === "SKILL.md") {
-        const fm = parseFrontmatter(readSafe(full));
+        const raw = readSafe(full);
+        const fm = parseFrontmatter(raw);
         const relPath = path.relative(relBase, full).replace(/\\/g, "/");
         const slug = fm.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") || path.basename(path.dirname(full)).toLowerCase();
         // Quality Gate: filtrar ruido
@@ -79,6 +82,7 @@ function scanSource(source, dir) {
           source: { id: source.id, repository: source.repository, path: relPath, ref: gitCommit(dir) || "unknown" },
           status: "APPROVED",
           trust: source.trust,
+          content: fm.body,
         });
       }
     }

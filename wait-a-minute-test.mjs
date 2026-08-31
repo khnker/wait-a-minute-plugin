@@ -8,6 +8,7 @@
  */
 
 import waitAMinute from './index.js';
+import { getTaskState } from './engine.js';
 
 const test = globalThis.test || ((name, fn) => { try { fn(); console.log(`  ✓ ${name}`); } catch (err) { console.log(`  ✗ ${name}: ${err.message}`); process.exitCode = 1; } });
 
@@ -243,6 +244,103 @@ try {
   const sample = Object.values(bundled)[0];
   assert(sample.id && sample.description, 'skills embebidas tienen id + descripción');
   console.log(`   ✓ catálogo embebido cargado: ${Object.keys(bundled).length} skills, sin red`);
+  passed++;
+} catch (e) {
+  console.log(`   ✗ Falló: ${e.message}`);
+  failed++;
+}
+
+// --- Escenario 17: contenido real cargado bajo demanda ---
+console.log('17. Skill bajo demanda entrega contenido real (no simulado)');
+try {
+  const bundled = waitAMinute.loadBundledRegistry();
+  const withContent = Object.values(bundled).find((s) => s.content && s.content.length > 0);
+  assert(withContent, 'Debe existir al menos una skill con contenido embebido');
+  const dl = await waitAMinute.loadSkillOnDemand(withContent.id, bundled);
+  assert(dl.loaded === true, `loadSkillOnDemand debe cargar (got loaded=${dl.loaded}, ${dl.reason || ""})`);
+  assert(dl.content && dl.content.length > 0, 'Contenido real no vacío');
+  assert(dl.content.includes("\n") || dl.content.length > 40, 'Contenido parece cuerpo de SKILL.md, no solo metadata');
+  console.log(`   ✓ ${withContent.id}: ${dl.content.length} chars de contenido real`);
+  passed++;
+} catch (e) {
+  console.log(`   ✗ Falló: ${e.message}`);
+  failed++;
+}
+
+// --- Escenario 18: ciclo de vida del contrato PROPOSED → APPROVED ---
+console.log('18. Ciclo de vida del contrato (PROPOSED → APPROVED → IMPLEMENTING)');
+try {
+  const taskId = 'test-contract-task';
+  const analysis = await waitAMinute.analyze({ prompt: 'implementar migración a postgres con tests' });
+  assert(analysis.completionContract?.status === 'PROPOSED', 'Contrato inicia PROPOSED');
+  const state = waitAMinute.buildPersistedState(taskId, analysis);
+  assert(state.contract.status === 'PROPOSED' && state.phase === 'PROPOSED', 'Estado durable inicia PROPOSED');
+  const approved = waitAMinute.approveContract(taskId);
+  assert(approved.ok && approved.status === 'APPROVED' && approved.phase === 'IMPLEMENTING', 'Approve → APPROVED/IMPLEMENTING');
+  const state2 = waitAMinute.buildPersistedState(taskId, analysis);
+  assert(state2.contract.status === 'APPROVED', 'buildPersistedState preserva contrato aprobado');
+  const rejected = waitAMinute.rejectContract(taskId);
+  assert(rejected.ok && rejected.status === 'REJECTED' && rejected.phase === 'WAITING', 'Reject → REJECTED/WAITING');
+  console.log('   ✓ contrato PROPOSED→APPROVED(IMPLEMENTING)→REJECTED(WAITING)');
+  passed++;
+} catch (e) {
+  console.log(`   ✗ Falló: ${e.message}`);
+  failed++;
+}
+
+// --- Escenario 19: progreso real por requisito con evidencia ---
+console.log('19. Progreso por requisito con evidencia');
+try {
+  const taskId = 'test-progress-task';
+  const analysis = await waitAMinute.analyze({ prompt: 'auditar seguridad del API y redactar informe' });
+  const state = waitAMinute.buildPersistedState(taskId, analysis);
+  assert(state.requirements.length === analysis.completionContract.requirements.length, 'Requisitos derivados del contrato');
+  const first = state.requirements[0];
+  const r = waitAMinute.markRequirement(taskId, first.id, 'done', 'tests POST /users pasan');
+  assert(r.ok && r.nextAction.includes(state.requirements[1].title), 'nextAction apunta al siguiente pendiente');
+  const st = await getTaskState(taskId);
+  assert(st.requirements[0].status === 'done' && st.requirements[0].evidence.includes('tests POST /users pasan'), 'Estado persistido con evidencia');
+  waitAMinute.markRequirement(taskId, first.id, 'pending', '');
+  console.log('   ✓ requisito done con evidencia + nextAction derivado');
+  passed++;
+} catch (e) {
+  console.log(`   ✗ Falló: ${e.message}`);
+  failed++;
+}
+
+// --- Escenario 20: Completion Gate bloquea DONE prematuro ---
+console.log('20. Completion Gate bloquea DONE prematuro');
+try {
+  const taskId = 'test-gate-task';
+  const analysis = await waitAMinute.analyze({ prompt: 'refactorizar módulo de pagos con tests' });
+  const state = waitAMinute.buildPersistedState(taskId, analysis);
+  const g1 = waitAMinute.evaluateCompletionGate(state, 'terminé la tarea, está done');
+  assert(g1.blocked === true, `Gate debe bloquear con requisitos pendientes (got ${JSON.stringify(g1)})`);
+  assert(g1.pending.length === state.requirements.filter((r) => r.status !== 'done').length, 'Gate lista los pendientes');
+  state.requirements.forEach((r) => {
+    r.status = 'done';
+    r.evidence.push('verificado');
+  });
+  const g2 = waitAMinute.evaluateCompletionGate(state, 'task complete');
+  assert(g2.blocked === false && g2.allDone === true, 'Gate permite DONE con todos los requisitos cumplidos');
+  const g3 = waitAMinute.evaluateCompletionGate(state, 'hacer commit de los cambios');
+  assert(g3.blocked === false, 'Prompt sin claim de fin no bloquea');
+  console.log('   ✓ bloquea DONE con pendientes, permite cuando todo done');
+  passed++;
+} catch (e) {
+  console.log(`   ✗ Falló: ${e.message}`);
+  failed++;
+}
+
+// --- Escenario 21: router único (routeSkills muerto eliminado) ---
+console.log('21. Router único (sin routeSkills duplicado)');
+try {
+  const fs = await import('node:fs');
+  const src = fs.readFileSync(new URL('./engine.js', import.meta.url), 'utf-8');
+  assert(!/function\s+routeSkills\b/.test(src), 'routeSkills (duplicado) debe estar eliminado');
+  assert(/export\s+function\s+routeSkillsV2/.test(src), 'routeSkillsV2 exportado');
+  assert(/export\s+function\s+loadSkillOnDemand/.test(src), 'loadSkillOnDemand exportado');
+  console.log('   ✓ un solo router (routeSkillsV2 + scoreSkill), loadSkillOnDemand exportado');
   passed++;
 } catch (e) {
   console.log(`   ✗ Falló: ${e.message}`);

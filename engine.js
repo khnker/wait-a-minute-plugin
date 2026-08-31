@@ -14,6 +14,18 @@ const tmpdir = os.tmpdir();
 // -- Task State Management --
 
 export function persistTaskState(taskId, state) {
+  // Migrate legacy progress to requirements if needed
+  if (state.progress && !state.requirements) {
+    const total = state.progress.total || 0;
+    state.requirements = Array.from({length: total}, (_, i) => ({
+      id: `req-${i + 1}`,
+      title: `Requisito ${i + 1}`,
+      status: 'pending',
+      evidence: []
+    }));
+    delete state.progress;
+  }
+
   const dir = path.join(process.cwd(), ".wam", "tasks", taskId);
   if (!fileExists(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "state.yaml"), JSON.stringify(state, null, 2));
@@ -587,7 +599,7 @@ function recordSkillUsage(usage, baseDir) {
 /**
  * Routing con scoring ponderado + persistencia. Reemplaza routeSkills() en analyze.
  */
-function routeSkillsV2(prompt, projectInfo, registry, mode, options = {}) {
+export function routeSkillsV2(prompt, projectInfo, registry, mode, options = {}) {
   const rigor = options.rigor || (mode === "FAST" ? "MINIMAL" : mode === "STRICT" ? "RIGOROUS" : "STANDARD");
   const lower = prompt.toLowerCase();
   const candidates = [];
@@ -619,15 +631,20 @@ function routeSkillsV2(prompt, projectInfo, registry, mode, options = {}) {
 
   return {
     candidates,
-    selected: selected.map((c) => ({
-      name: c.name,
-      relevance: c.score,
-      reason: `score ${c.score} (${c.matchingCapabilities.join(",") || c.matchingKeywords.join(",")})`,
-      capabilities: c.matchingCapabilities,
-      keywords: c.matchingKeywords,
-      risk: c.risk,
-      source: c.source,
-    })),
+    selected: selected.map((c) => {
+      const dl = loadSkillOnDemand(c.id, registry);
+      return {
+        name: c.name,
+        relevance: c.score,
+        reason: `score ${c.score} (${c.matchingCapabilities.join(",") || c.matchingKeywords.join(",")})`,
+        capabilities: c.matchingCapabilities,
+        keywords: c.matchingKeywords,
+        risk: c.risk,
+        source: c.source,
+        content: dl.loaded ? dl.content : null,
+        loaded: dl.loaded,
+      };
+    }),
     rejected: rejected.map((r) => r.name),
     exceeded: overflow.map((c) => c.name),
     counts: { selected: selected.length, limit, total: candidates.length },
@@ -708,65 +725,24 @@ function evaluateSkill(skillId, registry) {
 }
 
 /**
- * Skill Router — metadata-first. Selecciona skills APPROVED por capability/trigger
- * e intent. Límite 1-3 salvo rigor RIGOROUS.
- */
-function routeSkills(prompt, projectInfo, registry, mode) {
-  const lower = prompt.toLowerCase();
-  const candidates = [];
-  const rejected = [];
-
-  for (const [id, skill] of Object.entries(registry)) {
-    if (!APPROVED_STATUSES.includes(skill.status)) {
-      rejected.push({ name: id, reason: `estado ${skill.status}` });
-      continue;
-    }
-
-    let score = 0;
-    const triggerHit = skill.triggers.filter((t) => lower.includes(t.toLowerCase()));
-    if (triggerHit.length > 0) score += 10 * triggerHit.length;
-
-    const projectHits = (projectInfo?.inferred || []).filter((i) =>
-      i.toLowerCase().includes(skill.capabilities.join(" ").toLowerCase()) ||
-      skill.capabilities.some((c) => i.toLowerCase().includes(c))
-    );
-    if (projectHits.length > 0) score += 5;
-
-    if (score > 0) {
-      candidates.push({ id, name: id, score, reason: triggerHit.join(",") || "capability match" });
-    }
-  }
-
-  candidates.sort((a, b) => b.score - a.score);
-
-  // Límite de skills por rigor
-  const limit = mode === "MINIMAL" ? 0 : mode === "RIGOROUS" ? 5 : 3;
-  const selected = candidates.slice(0, limit).map((c) => c.name);
-  const overflow = candidates.slice(limit).map((c) => c.name);
-
-  return {
-    candidates: candidates.map((c) => ({ name: c.name, relevance: c.score, reason: c.reason })),
-    selected,
-    rejected: rejected.map((r) => r.name).concat(overflow),
-    counts: { selected: selected.length, limit },
-  };
-}
-
-/**
  * Carga una skill bajo demanda (content-load, sólo tras selección).
- * read-only: la carga es responsabilidad de OpenCode; aquí se reporta readiness.
+ * El contenido real viaja embebido en el catálogo (build-time); sin red en runtime.
  */
-function loadSkillOnDemand(skillId, registry) {
+export function loadSkillOnDemand(skillId, registry) {
   const skill = registry[skillId];
   if (!skill) return { loaded: false, reason: "No registrada" };
   if (!APPROVED_STATUSES.includes(skill.status)) {
     return { loaded: false, reason: `No aprobada (${skill.status})` };
   }
+  if (!skill.content || !skill.content.trim()) {
+    return { loaded: false, skillId, reason: `Sin contenido embebido (${skillId}) — catálogo metadata-only` };
+  }
   return {
     loaded: true,
     skillId,
+    content: skill.content,
     contentPath: skill.source?.path || null,
-    instructions: "Cargar SKILL.md solo si el agente ejecuta esta skill. No cargar al contexto.",
+    instructions: "Skill cargada bajo demanda: usar su SKILL.md como guía de ejecución si el agente la aplica.",
   };
 }
 
@@ -1143,7 +1119,7 @@ export async function analyze(options) {
     for (const s of skillSelection.selected) {
       auditEntries.push(
         recordSkillUsage(
-          { skill_id: s.name, source: s.source, selected_because: s.reason, loaded: false },
+          { skill_id: s.name, source: s.source, selected_because: s.reason, loaded: s.loaded ?? false },
           baseDir
         )
       );
