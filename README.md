@@ -9,7 +9,9 @@ Pre-flight cognitive layer for OpenCode that intercepts prompts for strategic an
 - **Completion Gate (ENFORCE)**: Blocks premature "DONE" claims. If the agent declares the task finished while requirements are still pending, WAM injects a blocking instruction listing the outstanding requirements.
 - **Real Progress Tracking**: Per-requirement `{id, title, status, evidence}` state; `nextAction` is derived from the first pending requirement (`/wam progress`).
 - **Persistent Policies**: Transversal principles (Scope, Verify, Simplify/YAGNI) enforced by default.
-- **Self-Contained Skill Registry with Real Content**: Ships a curated, versioned catalog (~2,097 skills) with the actual SKILL.md body of each skill embedded. `loadSkillOnDemand` delivers real content — no network, no external repos at runtime.
+- **Self-Contained Skill Registry with Real Content**: Ships a curated, versioned catalog (~2,097 skills) with the actual SKILL.md body of each skill embedded. `loadSkillOnDemand` materializes the real SKILL.md to disk — no network, no external repos at runtime.
+- **Hard Block on DONE**: A premature completion claim is not just flagged — the incoming claim itself is rewritten into a blocking directive, so the agent never sees a "finished" instruction with pending requirements.
+- **Task Resume**: State persists per task; `/wam task switch <id>` sets the active task and the hook re-injects its phase and pending requirements on the next message.
 - **Single Router**: One weighted scoring algorithm (name:5, capability:4, keyword:3, description:2, domain:1).
 - **CLI (`/wam`)**: Inspect the bundled catalog, audit strategies, approve contracts and track progress.
 
@@ -42,7 +44,7 @@ Plus 4 intrinsic WAM/local skills (ref `wam-v1`, APPROVED, no external source).
 
 ## Skill Content On Demand
 
-When routing selects a skill, `loadSkillOnDemand` returns the skill's actual embedded body (`content`). The `chat.message` hook injects the bodies of selected skills into the system prompt (capped at ~4,000 chars combined; `/wam skills inspect <id>` shows the full body). A skill without embedded content is reported as `loaded: false` with a reason — never a fake `loaded: true`.
+When routing selects a skill, `loadSkillOnDemand` materializes the skill's embedded body to `.wam/skills/bundled/<id>/SKILL.md` (write-on-first-use, no network) and returns the **local path**. The `chat.message` hook does not inject bodies inline — it points the agent at the materialized path so OpenCode can load the skill natively; `/wam skills inspect <id>` shows the full body. Routing reports `hasContent` per selection; a skill without embedded content is reported as `loaded: false` with a reason — never a fake `loaded: true`.
 
 ## Persistent Policies
 - **Scope**: Monitors for scope creep and surface change.
@@ -51,7 +53,7 @@ When routing selects a skill, `loadSkillOnDemand` returns the skill's actual emb
 
 ## Completion Gate
 
-The hook detects task-completion claims (`done`, `finished`, `listo`, `terminé`, `completa`, …). If the persisted task state still has pending requirements, a blocking instruction is injected as the first system entry: the agent may **not** declare DONE and must continue with the next pending requirement. When every requirement is `done`, DONE is permitted and the phase transitions to `DONE`.
+The hook detects task-completion claims (`done`, `finished`, `listo`, `terminé`, `completa`, …). If the persisted task state still has pending requirements, a blocking instruction is injected as the first system entry **and the incoming claim is rewritten** into a "do not declare DONE — continue with the next pending requirement" directive: the agent may not see a premature completion. When every requirement is `done`, DONE is permitted and the phase transitions to `DONE`.
 
 ## Task State & Contract Lifecycle
 
@@ -68,6 +70,8 @@ Task state persists per task in `.wam/tasks/<id>/state.yaml`: `contract`, per-re
 - `/wam progress`: List per-requirement status + evidence.
 - `/wam progress <id> done <evidence>`: Mark a requirement done with evidence.
 - `/wam progress <id> pending`: Undo a requirement.
+- `/wam task list`: List persisted tasks with phase/contract status (active marked).
+- `/wam task switch <id>`: Set the active task to resume; the hook re-injects its state on the next message.
 
 ## License
 MIT © khnker

@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import pluginDefault from "./index.js";
+import { getTaskState } from "./engine.js";
 
 test("default export es una función (Plugin factory)", () => {
   assert.equal(typeof pluginDefault, "function");
@@ -95,4 +96,62 @@ test("methods adjuntos al export siguen disponibles (analyze)", async () => {
   const r = await pluginDefault.analyze({ prompt: "rename variable x to y" });
   assert.ok(r.intent && r.strategy, "analyze debe retornar análisis");
   assert.ok(pluginDefault.isTrivial("rename x to y"), "isTrivial detecta rename");
+});
+
+test("Content Materialization: loadSkillOnDemand escribe SKILL.md real a disco", async () => {
+  const registry = pluginDefault.loadBundledRegistry();
+  const withContent = Object.values(registry).find((s) => s.content && s.content.length > 0);
+  assert.ok(withContent, "debe existir skill con contenido embebido");
+  const baseDir = path.join(process.cwd(), ".wam", "test-bundle");
+  const dl = await pluginDefault.loadSkillOnDemand(withContent.id, registry, baseDir);
+  assert.equal(dl.loaded, true, `debe cargar (${dl.reason || ""})`);
+  assert.ok(dl.contentPath?.endsWith("SKILL.md"), "contentPath apunta a SKILL.md");
+  assert.ok(fs.existsSync(dl.contentPath), "SKILL.md materializado en disco");
+  assert.ok(fs.readFileSync(dl.contentPath, "utf-8").length > 40, "cuerpo real no vacío");
+  fs.rmSync(baseDir, { recursive: true, force: true });
+});
+
+test("Task Resume: /wam task switch fija tarea activa; chat.message persiste bajo esa tarea", async () => {
+  const taskId = `resume-${Date.now()}`;
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+
+  const outSwitch = { parts: [] };
+  await hooks["command.execute.before"]({ command: "wam", arguments: `task switch ${taskId}` }, outSwitch);
+  assert.ok(outSwitch.parts[0].text.includes(`Tarea activa: ${taskId}`));
+  assert.ok(fs.existsSync(path.join(process.cwd(), ".wam", "active-task")), "active-task persistido");
+
+  await hooks["chat.message"]({ parts: [{ type: "text", text: "continuar implementación" }] }, { system: [] });
+  const st = getTaskState(taskId);
+  assert.ok(st, "estado persistido bajo la tarea activa, no default-task");
+
+  const outList = { parts: [] };
+  await hooks["command.execute.before"]({ command: "wam", arguments: "task list" }, outList);
+  assert.ok(outList.parts[0].text.includes(taskId), "task list muestra la tarea activa");
+  assert.ok(outList.parts[0].text.includes("*activa"), "task list marca la tarea activa");
+
+  try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "active-task"), { force: true });
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
+  } catch {}
+});
+
+test("Hard Block: claim de DONE con requisitos pendientes es reescrito a directiva de bloqueo", async () => {
+  const taskId = `hb-${Date.now()}`;
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+
+  await hooks["chat.message"](
+    { parts: [{ type: "text", text: "implementar migración postgres con tests" }], taskId },
+    { system: [] }
+  );
+
+  const inp = { parts: [{ type: "text", text: "terminé la tarea, está done" }], taskId };
+  await hooks["chat.message"](inp, { system: [] });
+  const rewritten = inp.parts[0].text;
+  assert.ok(rewritten.startsWith("⛔"), "el claim debe reescribirse a directiva de bloqueo");
+  assert.ok(rewritten.includes("COMPLETION GATE"), "directiva menciona el gate");
+  assert.ok(rewritten.includes("No declare DONE"), "directiva prohíbe DONE");
+
+  try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
+  } catch {}
 });
