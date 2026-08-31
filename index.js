@@ -29,34 +29,6 @@ function nextActionFrom(state) {
   return "Continuar tarea";
 }
 
-const ACTIVE_FILE = () => path.join(process.cwd(), ".wam", "active-task");
-
-function readActiveTaskId() {
-  try {
-    const v = fs.readFileSync(ACTIVE_FILE(), "utf-8").trim();
-    return v || null;
-  } catch {
-    return null;
-  }
-}
-
-function writeActiveTaskId(id) {
-  fs.mkdirSync(path.dirname(ACTIVE_FILE()), { recursive: true });
-  fs.writeFileSync(ACTIVE_FILE(), id);
-}
-
-function listTaskIds() {
-  const dir = path.join(process.cwd(), ".wam", "tasks");
-  try {
-    return fs
-      .readdirSync(dir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name);
-  } catch {
-    return [];
-  }
-}
-
 function projectState(analysis) {
   return {
     contract: {
@@ -81,20 +53,35 @@ function projectState(analysis) {
  * Plugin factory — loaded by OpenCode when registered in opencode.jsonc.
  * Autocontained: no external deps beyond ./engine.js.
  */
-const WaitAMinutePlugin = async (ctx) => {
+const WaitAMinutePlugin = async (pluginInput) => {
   let cfg = { ...DEFAULT_CONFIG };
 
   // Per-plugin-instance session store
   const sessionStore = new Map();
 
+  // Project directory (opencode 1.18.25: plugin input, not ctx)
+  const projectDirectory = pluginInput?.directory || process.cwd();
+
   // Track if plugin is bypassed
   let bypassed = false;
 
   // -------------------------------------------------------------------------
-  // Chat message hook — Persistence & Progress Gate
+  // opencode 1.18.25 plugin API: factory RETURNS the hooks object
   // -------------------------------------------------------------------------
-  ctx.on("chat.message", async (input, output) => {
-    try {
+  return {
+    // Register /wam command at load time (config hook)
+    config: async (opencodeConfig) => {
+      opencodeConfig.command ??= {};
+      opencodeConfig.command["wam"] = {
+        template: "$ARGUMENTS",
+        description:
+          "Wait-a-Minute CLI: /wam skills <list|search|inspect|explain> | /wam contract <approve|reject|edit <json>> | /wam progress [<id> <done <evidencia>|pending>]",
+      };
+    },
+
+    // Chat message hook — Persistence & Progress Gate
+    "chat.message": async (input, output) => {
+      try {
       if (bypassed) return;
 
       // Extract user prompt text
@@ -111,12 +98,12 @@ const WaitAMinutePlugin = async (ctx) => {
       if (!promptText.trim()) return;
 
       // 1. Detectar tarea activa o iniciar nueva
-      const taskId = input.taskId || readActiveTaskId() || "default-task";
+      const taskId = input.taskId || "default-task";
 
       // 2. Ejecutar análisis (pre-flight existente)
       const analysis = await waitAMinute.analyze({
         prompt: promptText,
-        projectPath: ctx.directory,
+        projectPath: projectDirectory,
         config: cfg,
         tierCaps: cfg.tierCaps,
         activePreset: cfg.activePreset,
@@ -143,12 +130,8 @@ const WaitAMinutePlugin = async (ctx) => {
         ctx: output,
       });
 
-      // 6. Inyectar estado + gate + badge + skills (path) al system prompt
+      // 6. Inyectar gate + badge + contenido de skills al system prompt
       const inject = [];
-      if (state.requirements?.length) {
-        const pend = state.requirements.filter((r) => r.status !== "done").length;
-        inject.push(`[wait-a-minute: task ${taskId} — fase ${state.phase}, ${pend}/${state.requirements.length} requisitos pendientes]`);
-      }
       if (gate.blocked) {
         inject.push(
           "──────────────────────────────────────────────",
@@ -162,13 +145,6 @@ const WaitAMinutePlugin = async (ctx) => {
         state.phase = "IMPLEMENTING";
         state.nextAction = nextActionFrom(state);
         persistTaskState(taskId, state);
-        const gateHold = `⛔ [wait-a-minute] COMPLETION GATE: faltan ${gate.pending.length} requisitos. No declare DONE. Continuar con: ${state.nextAction}`;
-        if (input?.parts && input.parts.length > 0) {
-          const tp = input.parts.find((p) => p.type === "text" && typeof p.text === "string");
-          if (tp) tp.text = gateHold;
-        } else if (input && typeof input.text === "string") {
-          input.text = gateHold;
-        }
       } else if (gate.allDone) {
         state.phase = "DONE";
         state.nextAction = "Tarea completa — contrato verificado";
@@ -177,13 +153,16 @@ const WaitAMinutePlugin = async (ctx) => {
 
       if (cfg.experimental?.waitAMinuteInject === true) {
         inject.push(`[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`);
-        const registry = waitAMinute.getRegistry();
+        let budget = 4000;
         for (const s of analysis.skills?.selected || []) {
-          const entry = Object.values(registry).find((r) => r.id === s.id);
-          if (!entry || !s.hasContent) continue;
-          const dl = waitAMinute.loadSkillOnDemand(entry.id, registry, ctx.directory);
-          if (!dl.loaded) continue;
-          inject.push(`[wait-a-minute: skill "${s.name}" — SKILL.md materializado en ${dl.contentPath}. Cargar via runtime nativo si se ejecuta.]`);
+          if (!s.content) continue;
+          const block = `\n[wait-a-minute: skill "${s.name}" — instrucciones]\n${s.content}`;
+          if (budget - block.length < 0) {
+            inject.push(`\n[wait-a-minute: cuerpo truncado — /wam skills inspect ${s.name}]`);
+            break;
+          }
+          inject.push(block);
+          budget -= block.length;
         }
       }
 
@@ -198,140 +177,97 @@ const WaitAMinutePlugin = async (ctx) => {
       // Best-effort: never crash the session on wait-a-minute error
       console.error("[wait-a-minute] Pre-flight analysis failed:", err);
     }
-  });
+  },
 
-  // -------------------------------------------------------------------------
-  // Experimental: inject analysis into system prompt
-  // -------------------------------------------------------------------------
-  ctx.experimental = ctx.experimental || {};
-  ctx.experimental.waitAMinute = {
-    inject: () => {},
-    setConfig: (cfgPatch) => {
-      try {
-        Object.assign(cfg, cfgPatch);
-      } catch {}
+    // Handle /wam CLI (opencode 1.18.25: commands arrive via command.execute.before)
+    "command.execute.before": async (input, output) => {
+      if (input.command !== "wam") return;
+      output.parts = output.parts || [];
+      output.parts.push({
+        type: "text",
+        text: wamCli((input.arguments || "").split(/\s+/)),
+      });
     },
   };
+};
 
-  // -------------------------------------------------------------------------
-  // Commands registration
-  // -------------------------------------------------------------------------
-  cfg.commands ??= {};
-  // Commands registration
-  // -------------------------------------------------------------------------
-  // Command handler: /wam
-  // -------------------------------------------------------------------------
-  cfg.commands ??= {};
-  cfg.commands["wam"] = {
-    template: "$COMMAND $ARGS",
-    description:
-      "Wait-a-Minute CLI: /wam skills <list|search|inspect|explain> | /wam contract <approve|reject|edit <json>> | /wam progress [<id> <done <evidencia>|pending>]",
-  };
 
-  // Process commands if present in ctx
-  if (ctx.command && ctx.command.name === "wam") {
-    const [sub, action, ...rest] = ctx.command.args || [];
-    const taskId = readActiveTaskId() || "default-task";
+/**
+ * /wam CLI — opencode 1.18.25 entrega comandos vía command.execute.before,
+ * no vía ctx.command. Lógica extraída del handler antiguo.
+ */
+function wamCli(args) {
+  const [sub, action, ...rest] = args || [];
+  const taskId = "default-task";
 
-    if (sub === "skills") {
-      const skills = waitAMinute.getRegistry();
-      const list = Object.values(skills);
-      if (action === "list") {
-        return list.map(s => `${s.id} [${s.status}]`).join("\n");
-      }
-      if (action === "search") {
-        const q = rest.join(" ").toLowerCase();
-        return list
-          .filter(s => (s.name || "").toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q))
-          .slice(0, 20)
-          .map(s => s.id)
-          .join("\n");
-      }
-      if (action === "inspect") {
-        const id = rest.join(" ");
-        const s = skills[id];
-        if (!s) return `Skill ${id} no encontrada`;
-        return [
-          `${s.id} [${s.status}]`,
-          `name: ${s.name}`,
-          `description: ${s.description}`,
-          `risk: ${s.risk}`,
-          `source: ${s.source?.repository || s.source?.kind || "local"} (${s.source?.path || "—"})`,
-          `--- content (max 1500 chars) ---`,
-          `${(s.content || "(sin contenido)").slice(0, 1500)}`,
-        ].join("\n");
-      }
-      if (action === "explain") {
-        const prompt = rest.join(" ");
-        if (!prompt) return "Uso: /wam skills explain <prompt>";
-        const sel = routeSkillsV2(prompt, {}, waitAMinute.getRegistry(), "STANDARD");
-        return sel.selected.length
-          ? sel.selected.map(s => `${s.name}: ${s.reason}`).join("\n")
-          : "Ninguna skill seleccionada para ese prompt";
-      }
-      return "Uso: /wam skills <list|search|inspect|explain> [args]";
+  if (sub === "skills") {
+    const skills = waitAMinute.getRegistry();
+    const list = Object.values(skills);
+    if (action === "list") {
+      return list.map(s => `${s.id} [${s.status}]`).join("\n");
     }
-
-    if (sub === "contract") {
-      if (action === "approve") return JSON.stringify(waitAMinute.approveContract(taskId));
-      if (action === "reject") return JSON.stringify(waitAMinute.rejectContract(taskId));
-      if (action === "edit") {
-        try {
-          return JSON.stringify(waitAMinute.editContract(taskId, JSON.parse(rest.join(" "))));
-        } catch {
-          return "Error: JSON inválido para /wam contract edit";
-        }
-      }
-      return "Uso: /wam contract <approve|reject|edit <json>>";
+    if (action === "search") {
+      const q = rest.join(" ").toLowerCase();
+      return list
+        .filter(s => (s.name || "").toLowerCase().includes(q) || (s.description || "").toLowerCase().includes(q))
+        .slice(0, 20)
+        .map(s => s.id)
+        .join("\n");
     }
-
-    if (sub === "progress") {
-      const [reqId, op, ...evidence] = rest;
-      if (!reqId) {
-        const st = getTaskState(taskId);
-        if (!st) return "Sin estado de tarea (persiste tras el primer mensaje)";
-        return st.requirements
-          .map(r => `${r.id} [${r.status}] ${r.title}${r.evidence?.length ? " | evidence: " + r.evidence.join("; ") : ""}`)
-          .join("\n");
-      }
-      if (op === "done") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "done", evidence.join(" ")));
-      if (op === "pending") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "pending", ""));
-      return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> pending";
+    if (action === "inspect") {
+      const id = rest.join(" ");
+      const s = skills[id];
+      if (!s) return `Skill ${id} no encontrada`;
+      return [
+        `${s.id} [${s.status}]`,
+        `name: ${s.name}`,
+        `description: ${s.description}`,
+        `risk: ${s.risk}`,
+        `source: ${s.source?.repository || s.source?.kind || "local"} (${s.source?.path || "—"})`,
+        `--- content (max 1500 chars) ---`,
+        `${(s.content || "(sin contenido)").slice(0, 1500)}`,
+      ].join("\n");
     }
-
-    if (sub === "task") {
-      if (action === "list") {
-        const ids = listTaskIds();
-        if (!ids.length) return "Sin tareas persistidas (.wam/tasks)";
-        const active = readActiveTaskId();
-        return ids
-          .map((id) => {
-            const st = getTaskState(id);
-            return `${id}${id === active ? " *activa" : ""} [${st?.phase || "?"}] ${st?.contract?.status || ""}`;
-          })
-          .join("\n");
-      }
-      if (action === "switch") {
-        const id = rest.join(" ");
-        if (!id) return "Uso: /wam task switch <taskId>";
-        writeActiveTaskId(id);
-        const st = getTaskState(id);
-        return st
-          ? `Tarea activa: ${id} [${st.phase}] — ${st.nextAction || ""}`
-          : `Tarea activa: ${id} (sin estado persistido — enviar primer mensaje)`;
-      }
-      return "Uso: /wam task <list|switch <id>>";
+    if (action === "explain") {
+      const prompt = rest.join(" ");
+      if (!prompt) return "Uso: /wam skills explain <prompt>";
+      const sel = routeSkillsV2(prompt, {}, waitAMinute.getRegistry(), "STANDARD");
+      return sel.selected.length
+        ? sel.selected.map(s => `${s.name}: ${s.reason}`).join("\n")
+        : "Ninguna skill seleccionada para ese prompt";
     }
-
-    return "Uso: /wam <skills|contract|progress|task>";
+    return "Uso: /wam skills <list|search|inspect|explain> [args]";
   }
 
-  return {
-    name: "wait-a-minute",
-    description:
-      "OpenCode plugin con hook de prompt para pre-flight cognitivo Wait a Minute",
-  };
-};
+  if (sub === "contract") {
+    if (action === "approve") return JSON.stringify(waitAMinute.approveContract(taskId));
+    if (action === "reject") return JSON.stringify(waitAMinute.rejectContract(taskId));
+    if (action === "edit") {
+      try {
+        return JSON.stringify(waitAMinute.editContract(taskId, JSON.parse(rest.join(" "))));
+      } catch {
+        return "Error: JSON inválido para /wam contract edit";
+      }
+    }
+    return "Uso: /wam contract <approve|reject|edit <json>>";
+  }
+
+  if (sub === "progress") {
+    const [reqId, op, ...evidence] = rest;
+    if (!reqId) {
+      const st = getTaskState(taskId);
+      if (!st) return "Sin estado de tarea (persiste tras el primer mensaje)";
+      return st.requirements
+        .map(r => `${r.id} [${r.status}] ${r.title}${r.evidence?.length ? " | evidence: " + r.evidence.join("; ") : ""}`)
+        .join("\n");
+    }
+    if (op === "done") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "done", evidence.join(" ")));
+    if (op === "pending") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "pending", ""));
+    return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> pending";
+  }
+
+  return "Uso: /wam <skills|contract|progress>";
+}
 
 /**
  * Wait a Minute — Pre-Flight Cognitive Layer public API.
@@ -728,4 +664,5 @@ Object.keys(waitAMinute).forEach((k) => {
   if (k === "name") return;
   WaitAMinutePlugin[k] = waitAMinute[k];
 });
+
 export default WaitAMinutePlugin;

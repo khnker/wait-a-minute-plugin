@@ -524,7 +524,7 @@ export function buildRegistry(availableSkills, baseDir) {
 }
 
 /**
- * Persiste el registry completo en skills.json (spec §2), incluido el contenido embebido.
+ * Persiste el registry en skills.json (spec §2). No incluye contenido, solo metadata.
  */
 function persistRegistry(registryFile, registry) {
   fs.writeFileSync(registryFile, JSON.stringify(registry, null, 2));
@@ -631,18 +631,20 @@ export function routeSkillsV2(prompt, projectInfo, registry, mode, options = {})
 
   return {
     candidates,
-    selected: selected.map((c) => ({
-      id: c.id,
-      name: c.name,
-      relevance: c.score,
-      reason: `score ${c.score} (${c.matchingCapabilities.join(",") || c.matchingKeywords.join(",")})`,
-      capabilities: c.matchingCapabilities,
-      keywords: c.matchingKeywords,
-      risk: c.risk,
-      source: c.source,
-      hasContent: !!c.content?.trim(),
-      loaded: !!c.content?.trim(),
-    })),
+    selected: selected.map((c) => {
+      const dl = loadSkillOnDemand(c.id, registry);
+      return {
+        name: c.name,
+        relevance: c.score,
+        reason: `score ${c.score} (${c.matchingCapabilities.join(",") || c.matchingKeywords.join(",")})`,
+        capabilities: c.matchingCapabilities,
+        keywords: c.matchingKeywords,
+        risk: c.risk,
+        source: c.source,
+        content: dl.loaded ? dl.content : null,
+        loaded: dl.loaded,
+      };
+    }),
     rejected: rejected.map((r) => r.name),
     exceeded: overflow.map((c) => c.name),
     counts: { selected: selected.length, limit, total: candidates.length },
@@ -726,7 +728,7 @@ function evaluateSkill(skillId, registry) {
  * Carga una skill bajo demanda (content-load, sólo tras selección).
  * El contenido real viaja embebido en el catálogo (build-time); sin red en runtime.
  */
-export function loadSkillOnDemand(skillId, registry, baseDir) {
+export function loadSkillOnDemand(skillId, registry) {
   const skill = registry[skillId];
   if (!skill) return { loaded: false, reason: "No registrada" };
   if (!APPROVED_STATUSES.includes(skill.status)) {
@@ -735,18 +737,12 @@ export function loadSkillOnDemand(skillId, registry, baseDir) {
   if (!skill.content || !skill.content.trim()) {
     return { loaded: false, skillId, reason: `Sin contenido embebido (${skillId}) — catálogo metadata-only` };
   }
-  const root = baseDir || process.cwd();
-  const dir = path.join(root, ".wam", "skills", "bundled", skillId);
-  const skillFile = path.join(dir, "SKILL.md");
-  if (!fileExists(skillFile)) {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(skillFile, skill.content);
-  }
   return {
     loaded: true,
     skillId,
-    contentPath: skillFile,
-    instructions: "Skill materializada para el runtime nativo de OpenCode. Cargar SKILL.md desde contentPath si el agente ejecuta esta skill.",
+    content: skill.content,
+    contentPath: skill.source?.path || null,
+    instructions: "Skill cargada bajo demanda: usar su SKILL.md como guía de ejecución si el agente la aplica.",
   };
 }
 

@@ -251,19 +251,17 @@ try {
   failed++;
 }
 
-// --- Escenario 17: contenido real materializado bajo demanda (no simulado) ---
-console.log('17. Skill bajo demanda materializa SKILL.md real (path local)');
+// --- Escenario 17: contenido real bajo demanda (no simulado) ---
+console.log('17. Skill bajo demanda carga contenido real embebido');
 try {
   const bundled = waitAMinute.loadBundledRegistry();
   const withContent = Object.values(bundled).find((s) => s.content && s.content.length > 0);
   assert(withContent, 'Debe existir al menos una skill con contenido embebido');
   const dl = await waitAMinute.loadSkillOnDemand(withContent.id, bundled, '/tmp/wam-test-bundle');
   assert(dl.loaded === true, `loadSkillOnDemand debe cargar (got loaded=${dl.loaded}, ${dl.reason || ""})`);
-  assert(dl.contentPath && dl.contentPath.endsWith('SKILL.md'), `contentPath local materializado (got ${dl.contentPath})`);
-  assert(fs.existsSync(dl.contentPath), `Archivo materializado debe existir (${dl.contentPath})`);
-  const materialized = fs.readFileSync(dl.contentPath, 'utf-8');
-  assert(materialized.length > 40, 'Archivo materializado no vacío (cuerpo real, no metadata)');
-  console.log(`   ✓ ${withContent.id}: SKILL.md materializado ${materialized.length} chars en ${dl.contentPath}`);
+  assert(typeof dl.content === 'string' && dl.content.length > 40, 'Contenido real no vacío (body de SKILL.md, no metadata)');
+  assert(dl.content === withContent.content, 'Contenido devuelto = contenido embebido del registry');
+  console.log(`   ✓ ${withContent.id}: contenido real ${dl.content.length} chars vía loadSkillOnDemand`);
   passed++;
 } catch (e) {
   console.log(`   ✗ Falló: ${e.message}`);
