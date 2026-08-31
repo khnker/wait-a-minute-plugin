@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import pluginDefault from "./index.js";
 import { getTaskState } from "./engine.js";
+import { routeSkillsV2 } from "./engine.js";
 
 test("default export es una función (Plugin factory)", () => {
   assert.equal(typeof pluginDefault, "function");
@@ -91,9 +92,21 @@ test("chat.message 1.18.25: extrae prompt de message.parts e inyecta validación
   const visible = res.output.parts.find((p) => p.type === "text" && typeof p.text === "string" && p.text.includes("¿Proceder con esta estrategia?"));
   assert.ok(visible, "debe inyectar el checkpoint como part visible en output.parts");
   assert.ok(visible.text.includes("/wam contract approve"), "confirmación seleccionable via /wam");
-  try {
-    fs.rmSync(path.dirname(res.p), { recursive: true, force: true });
+try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
   } catch {}
+});
+
+test("Routing: selección reporta hasContent/loaded real del catálogo (nunca fake)", () => {
+  const registry = pluginDefault.getRegistry();
+  const sel = routeSkillsV2("angular", {}, registry, "STANDARD").selected;
+  assert.ok(sel.length > 0, "debe seleccionar skills");
+  for (const s of sel) {
+    assert.equal(typeof s.hasContent, "boolean");
+    assert.equal(typeof s.loaded, "boolean");
+    assert.equal(s.loaded, s.hasContent, "loaded nunca fake: refleja hasContent");
+    assert.equal(s.hasContent, !!(registry[s.id]?.content || "").trim(), `hasContent = contenido real en registry para ${s.id}`);
+  }
 });
 
 test("chat.message compat legacy: shape {parts}/{system} sigue funcionando", async () => {
