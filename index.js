@@ -22,10 +22,19 @@ const DEFAULT_CONFIG = {
 };
 
 // opencode 1.18.25: chat.message output = { message, parts } (sin .system).
+// Cada part debe incluir un id único (formato prt_...) o el mensaje falla al guardar
+// (SchemaError: Missing key at ["part"]["id"]), bloqueando la sesión.
+function genPartId() {
+  let s = "prt_";
+  while (s.length < 16) s += Math.floor(Math.random() * 16).toString(16);
+  return s;
+}
+
 // Inyecta texto visible al frente del mensaje de usuario; fallback a .system (API vieja).
 function emitTextPart(output, text, meta = {}) {
   if (!output) return;
   const part = {
+    id: genPartId(),
     type: "text",
     text,
     synthetic: true,
@@ -320,6 +329,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       if (input.command !== "wam") return;
       output.parts = output.parts || [];
       output.parts.push({
+        id: genPartId(),
         type: "text",
         text: wamCli((input.arguments || "").split(/\s+/)),
       });
@@ -823,6 +833,7 @@ const waitAMinute = {
       const text = validationLines.filter((l) => l !== false).join("\n") + "\n";
       if (Array.isArray(ctx.parts)) {
         ctx.parts.unshift({
+          id: genPartId(),
           type: "text",
           text,
           synthetic: true,
@@ -831,7 +842,7 @@ const waitAMinute = {
         });
         console.error("[wait-a-minute DEBUG] presentValidation unshift a output.parts, count=" + ctx.parts.length);
       } else if (ctx.system) {
-        ctx.system.unshift({ type: "text", text });
+        ctx.system.unshift({ id: genPartId(), type: "text", text, synthetic: true });
       } else {
         console.error("[wait-a-minute DEBUG] presentValidation NO TARGET, outKeys=" + Object.keys(ctx));
       }
