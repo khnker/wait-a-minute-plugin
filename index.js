@@ -64,10 +64,8 @@ const WaitAMinutePlugin = async (ctx) => {
       // Store analysis results in session for access by agent
       sessionStore.set("waitAnalysis", analysis);
 
-      // Present strategic confirmation for non-trivial tasks
-      if (analysis.strategy !== "FAST") {
-        waitAMinute.presentValidation({ analysis, ctx: output });
-      }
+      // Present strategic confirmation for every message
+      waitAMinute.presentValidation({ analysis, ctx: output });
 
       // Inject analysis summary into the system prompt if configured
       if (cfg.experimental?.waitAMinuteInject === true) {
@@ -295,7 +293,8 @@ const waitAMinute = {
    * Presentar validación de pre-flight al agente/usuario.
    *
    * Checkpoint estratégico: muestra el resumen y solicita confirmación
-   * sobre la estrategia a seguir. En modo FAST se omita (proceder directo).
+   * sobre la estrategia a seguir. Se muestra para todo mensaje, incluido
+   * modo FAST — el análisis nunca se omite.
    *
    * @param {Object} opts
    * @param {Object} opts.analysis - Resultado de analyze()
@@ -308,12 +307,6 @@ const waitAMinute = {
 
     const summary = this.generateSummary(analysis);
     const mode = analysis.strategy || "NORMAL";
-
-    // FAST omite validación (basado en contenido, no origen)
-    const showValidation = mode !== "FAST";
-    if (!showValidation) {
-      return { mode: "continue", advice: "Tarea trivial - proceder directamente" };
-    }
 
     const validationLines = [
       "Wait a minute — Confirmación estratégica",
@@ -355,10 +348,13 @@ const waitAMinute = {
     }
 
     return {
-      mode: "validation-pending",
+      mode: mode === "FAST" ? "continue" : "validation-pending",
       summary,
       validationLines,
-      advice: "Esperando respuesta del agente/usuario",
+      advice:
+        mode === "FAST"
+          ? "Tarea trivial - análisis mostrado, proceder directamente"
+          : "Esperando respuesta del agente/usuario",
     };
   },
 };
