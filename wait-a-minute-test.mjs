@@ -326,6 +326,7 @@ try {
     r.status = 'done';
     r.evidence.push('verificado');
   });
+  state.contract.status = 'APPROVED';
   const g2 = waitAMinute.evaluateCompletionGate(state, 'task complete');
   assert(g2.blocked === false && g2.allDone === true, 'Gate permite DONE con todos los requisitos cumplidos');
   const g3 = waitAMinute.evaluateCompletionGate(state, 'hacer commit de los cambios');

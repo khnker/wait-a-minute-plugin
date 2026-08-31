@@ -596,9 +596,23 @@ const waitAMinute = {
     const doneClaims =
       /(^|\s)(done|finish|finished|complete|completed|terminate|terminated|listo|termin[eé]|complet[ao]|finalizad[oa])\b|(task|tarea)\s+(complete|complet(a|ada|o)|terminad(a|o))|declare.*done/i;
     if (!doneClaims.test(lower)) return { blocked: false };
-    const pending = (state?.requirements || []).filter((r) => r.status !== "done");
-    if (pending.length === 0) return { blocked: false, allDone: true };
-    return { blocked: true, pending: pending.map((r) => `${r.id} — ${r.title}`) };
+    const pending = (state?.requirements || []).filter((r) => r.status !== "done" || !(r.evidence || []).length);
+    if (pending.length === 0) {
+      if (state?.contract?.status !== "APPROVED") {
+        return {
+          blocked: true,
+          pending: [`contrato ${state.contract?.status || "PROPOSED"} — aprobar con /wam contract approve antes de DONE`],
+        };
+      }
+      return { blocked: false, allDone: true };
+    }
+    return {
+      blocked: true,
+      pending: pending.map((r) => {
+        const missingEvidence = r.status === "done" && !(r.evidence || []).length;
+        return `${r.id} — ${r.title}${missingEvidence ? " (sin evidencia)" : ""}`;
+      }),
+    };
   },
 
   /** Aprueba el contrato: PROPOSED → APPROVED, fase → IMPLEMENTING. */
@@ -647,14 +661,17 @@ const waitAMinute = {
     return { ok: true, status: "PROPOSED", requirements: contract.requirements.length };
   },
 
-  /** Marca requisito done/pending con evidencia. */
+  /** Marca requisito done/pending con evidencia. DONE exige evidencia (no "parece funcionar"). */
   markRequirement: function(taskId, reqId, status, evidence) {
     const state = getTaskState(taskId);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const req = (state.requirements || []).find((r) => r.id === reqId);
     if (!req) return { ok: false, reason: `Requisito ${reqId} no existe` };
+    if (status === "done" && !(evidence && evidence.trim())) {
+      return { ok: false, reason: `Requisito ${reqId}: evidencia requerida para marcar done` };
+    }
     req.status = status;
-    if (status === "done" && evidence) req.evidence.push(evidence);
+    if (status === "done") req.evidence.push(evidence.trim());
     if (status === "pending") req.evidence = [];
     state.nextAction = nextActionFrom(state);
     persistTaskState(taskId, state);
