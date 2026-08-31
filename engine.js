@@ -12,7 +12,21 @@ const os = await import("node:os");
 const tmpdir = os.tmpdir();
 
 
-// -- Project Analysis Helpers --
+// -- Task State Management --
+
+export function persistTaskState(taskId, state) {
+  const dir = path.join(process.cwd(), ".wam", "tasks", taskId);
+  if (!fileExists(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "state.yaml"), JSON.stringify(state, null, 2));
+}
+
+/**
+ * Recupera estado de tarea
+ */
+export function getTaskState(taskId) {
+  const file = path.join(process.cwd(), ".wam", "tasks", taskId, "state.yaml");
+  return fileExists(file) ? JSON.parse(readFileSafely(file)) : null;
+}
 
 /**
  * Lee un archivo si existe, retorna vacío en caso contrario

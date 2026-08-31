@@ -1,4 +1,4 @@
-import { analyze } from "./engine.js";
+import { analyze, getTaskState, persistTaskState } from "./engine.js";
 
 /**
  * Wait a Minute plugin for OpenCode — Pre-Flight Cognitive Layer.
@@ -32,7 +32,7 @@ const WaitAMinutePlugin = async (ctx) => {
   let bypassed = false;
 
   // -------------------------------------------------------------------------
-  // Chat message hook — fires before skill resolution and agent invocation
+  // Chat message hook — Persistence & Progress Gate
   // -------------------------------------------------------------------------
   ctx.on("chat.message", async (input, output) => {
     try {
@@ -51,7 +51,11 @@ const WaitAMinutePlugin = async (ctx) => {
 
       if (!promptText.trim()) return;
 
-    // Run wait-a-minute pre-flight analysis
+      // 1. Detectar tarea activa o iniciar nueva
+      const taskId = input.taskId || "default-task";
+      const currentState = getTaskState(taskId);
+      
+      // 2. Ejecutar análisis (pre-flight existente)
       const analysis = await waitAMinute.analyze({
         prompt: promptText,
         projectPath: ctx.directory,
@@ -68,7 +72,16 @@ const WaitAMinutePlugin = async (ctx) => {
       sessionStore.set("waitAnalysis", analysis);
       sessionStore.set("completionContract", analysis.completionContract);
 
-      // Present strategic confirmation for every message
+      // 3. Persistir progreso (Progress Gate)
+      const state = {
+        phase: "IMPLEMENTING",
+        progress: { completed: 0, total: analysis.completionContract.requirements.length },
+        nextAction: "Continuar tarea",
+        lastAction: promptText
+      };
+      persistTaskState(taskId, state);
+
+      // Present strategic confirmation for every message (ALWAYS)
       waitAMinute.presentValidation({ analysis, ctx: output });
 
       // Inject analysis summary into the system prompt if configured
