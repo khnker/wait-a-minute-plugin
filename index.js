@@ -1,4 +1,4 @@
-import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens } from "./engine.js";
+import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
 import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision } from "./memory.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -132,6 +132,9 @@ function projectState(analysis) {
       verification: analysis.completionContract?.verification || [],
       constraints: analysis.completionContract?.constraints || [],
       unknowns: analysis.completionContract?.unknowns || [],
+      assumptions: Array.isArray(analysis.assumptions)
+        ? analysis.assumptions
+        : buildAssumptions(analysis.assumed || []),
     },
     questions: [],
     requirements: (analysis.completionContract?.requirements || []).map((title, i) => ({
@@ -272,6 +275,15 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       const state = waitAMinute.buildPersistedState(taskId, analysis);
       state.lastAction = promptText;
+
+      // Assumption Gate (spec change 3): escalar asunciones con impacto material
+      // → DECISION_CRITICAL/blocking + mirror a unknowns → ASKING (sin ejecución).
+      try {
+        const { changed } = escalateAssumptions(state, promptText);
+        if (changed) persistTaskState(taskId, state);
+      } catch (err) {
+        console.error("[wait-a-minute] escalate assumptions failed:", err);
+      }
 
       sessionStore.set("waitAnalysis", analysis);
       sessionStore.set("completionContract", state.contract);
@@ -484,6 +496,23 @@ function wamCli(args, cfg = {}) {
     return JSON.stringify(waitAMinute.answerQuestion(taskId, qid, answer));
   }
 
+  if (sub === "assumptions") {
+    const st = getTaskState(taskId);
+    if (!st) return "Sin estado de tarea";
+    const list = st.contract?.assumptions || [];
+    if (!list.length) return "Sin asunciones registradas";
+    return list
+      .map((a) => `${a.id} [${a.classification}/${a.status}] ${a.statement}${a.resolvedBy ? ` (resuelta: ${a.resolvedBy})` : ""}`)
+      .join("\n");
+  }
+
+  if (sub === "resolve") {
+    const aid = action;
+    const evidence = rest.join(" ").trim();
+    if (!aid || !evidence) return "Uso: /wam resolve <assumptionId> <evidencia>";
+    return JSON.stringify(waitAMinute.resolveAssumption(taskId, aid, evidence));
+  }
+
   if (sub === "compress") {
     const id = rest.join(" ") || action || taskId;
     const st = getTaskState(id);
@@ -528,7 +557,7 @@ function wamCli(args, cfg = {}) {
     return "Uso: /wam task <list|switch <id>>";
   }
 
-  return "Uso: /wam <skills|contract|progress|task|compress|answer>";
+  return "Uso: /wam <skills|contract|progress|task|compress|answer|assumptions|resolve>";
 }
 
 /**
@@ -727,6 +756,15 @@ const waitAMinute = {
         pending: blockingUnknowns.map((u) => `${u.id} — ${u.question} (DECISION_CRITICAL sin responder)`),
       };
     }
+    const blockingAssumptions = (state?.contract?.assumptions || []).filter(
+      (a) => a.classification === "DECISION_CRITICAL" && a.status !== "resolved"
+    );
+    if (blockingAssumptions.length > 0) {
+      return {
+        blocked: true,
+        pending: blockingAssumptions.map((a) => `${a.id} — ${a.statement} (DECISION_CRITICAL sin resolver)`),
+      };
+    }
     const pending = (state?.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified");
     if (pending.length > 0) {
       return {
@@ -761,6 +799,15 @@ const waitAMinute = {
     const blocking = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
     if (blocking.length > 0) {
       return { ok: false, reason: `${blocking[0].id} DECISION_CRITICAL sin responder (bloquea aprobación): ${blocking[0].question}` };
+    }
+    const blockingAssumptions = (state.contract?.assumptions || []).filter(
+      (a) => a.classification === "DECISION_CRITICAL" && a.status !== "resolved"
+    );
+    if (blockingAssumptions.length > 0) {
+      return {
+        ok: false,
+        reason: `${blockingAssumptions[0].id} DECISION_CRITICAL sin resolver (bloquea aprobación): ${blockingAssumptions[0].statement} — /wam resolve ${blockingAssumptions[0].id} <evidencia>`,
+      };
     }
     state.contract = { ...(state.contract || {}), status: "APPROVED" };
     if (state.phase !== "DONE") state.phase = "IMPLEMENTING";
@@ -833,12 +880,45 @@ const waitAMinute = {
     if (!(answer && answer.trim())) return { ok: false, reason: `Respuesta requerida para ${qid}` };
     u.status = "answered";
     u.answer = answer.trim();
+    if (u.assumptionId) {
+      const a = (state.contract?.assumptions || []).find((x) => x.id === u.assumptionId);
+      if (a) {
+        a.status = "resolved";
+        a.classification = "RESOLVED";
+        a.resolvedBy = "answer";
+      }
+    }
     state.phase = "ANSWERED";
     persistTaskState(taskId, state);
     state.phase = "PROPOSED";
     state.nextAction = "Revisar contrato — /wam contract approve";
     persistTaskState(taskId, state);
     return { ok: true, phase: "PROPOSED", unknown: u };
+  },
+
+  /** Resuelve una asunción con evidencia del repo (spec change 3 R4): → RESOLVED sin preguntar al usuario. */
+  resolveAssumption: function(taskId, aid, evidence) {
+    const state = getTaskState(taskId);
+    if (!state) return { ok: false, reason: "Sin estado de tarea" };
+    const a = (state.contract?.assumptions || []).find((x) => x.id === aid);
+    if (!a) return { ok: false, reason: `Asunción ${aid} no existe` };
+    if (!(evidence && evidence.trim())) return { ok: false, reason: `Evidencia requerida para resolver ${aid}` };
+    a.status = "resolved";
+    a.classification = "RESOLVED";
+    a.resolvedBy = "evidence";
+    a.evidence = evidence.trim();
+    const u = (state.contract?.unknowns || []).find((x) => x.assumptionId === aid && x.status === "blocking");
+    if (u) {
+      u.status = "answered";
+      u.answer = evidence.trim();
+    }
+    const stillBlocking = (state.contract?.unknowns || []).some((x) => x.status === "blocking");
+    if (state.phase === "ASKING" && !stillBlocking) {
+      state.phase = "PROPOSED";
+      state.nextAction = "Revisar contrato — /wam contract approve";
+    }
+    persistTaskState(taskId, state);
+    return { ok: true, assumption: a };
   },
 
   /** Carga contenido real de una skill del catálogo bajo demanda. */
@@ -913,6 +993,9 @@ const waitAMinute = {
       ? analysis.skills.selected.map((s) => s.name).join(",")
       : "ninguna";
     const blockingUnknowns = (analysis.completionContract?.unknowns || []).filter((u) => u.status === "blocking");
+    const blockingAssumptions = (analysis.completionContract?.assumptions || []).filter(
+      (a) => a.classification === "DECISION_CRITICAL" && a.status !== "resolved"
+    );
     const validationLines = [
       `wait-a-minute: contrato ${contractStatus}${analysis.phase ? ` (fase ${analysis.phase})` : ""}`,
       `rigor ${analysis.completionContract?.rigor || "NORMAL"} | req: ${(analysis.completionContract?.requirements || []).join("; ") || "—"}`,
@@ -921,6 +1004,9 @@ const waitAMinute = {
       `skills: ${skillsLine}`,
       ...(blockingUnknowns.length
         ? [`blocking: ${blockingUnknowns.map((u) => `${u.id} ${u.question}`).join(" | ")}`]
+        : []),
+      ...(blockingAssumptions.length
+        ? [`assumptions blocking: ${blockingAssumptions.map((a) => `${a.id} ${a.statement}`).join(" | ")}`]
         : []),
       "",
       "continuar → ejecutar | /wam contract approve → aprobar | /wam compress → resumen terse",

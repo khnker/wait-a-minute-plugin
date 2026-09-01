@@ -102,6 +102,11 @@ PROPOSED
  │
  ├── reject ──► REJECTED
  │
+ ├── blocking question/assumption unresolved
+ │       │
+ │       ▼
+ │    ASKING ── answer/resolve ──► PROPOSED
+ │
  └── approve
      │
      ▼
@@ -185,9 +190,32 @@ WAM:
  Continue with R3.
 ```
 
-When all requirements are verified, the task can transition to "DONE".
+When all requirements are verified, the task can transition to "DONE". A requirement moves `done` → `verified` only with evidence (`/wam progress <id> verified <evidence>`); all-`done`-but-unverified claims are blocked and the task enters `VERIFYING`.
 
 This is an enforcement mechanism, not merely a prompt reminder.
+
+---
+
+## Assumption Gate
+
+WAM never lets the agent silently decide on an assumption that touches material impact.
+
+Every assumption from the pre-flight is persisted in task state as `{id, statement, classification, status}`. Assumptions relevant to data mutation, API behavior, architecture, security, compatibility, scope, destructive actions or acceptance criteria are classified `DECISION_CRITICAL` — including by relevance to the task itself (e.g. "delete accounts" escalates the generic "add functionality" assumption instead of silently picking hard/soft/anonymize).
+
+An escalated assumption mirrors into a blocking question and forces the task into `ASKING`:
+
+```
+⛔ [wait-a-minute] ASKING — U1: ¿El usuario asume...?
+   No implementar hasta responder. Responder: /wam answer U1 <respuesta>
+```
+
+Resolution paths:
+
+- `/wam answer <questionId> <respuesta>` — user decision.
+- `/wam resolve <A1> <evidencia>` — repository evidence converts the assumption into a known fact without asking the user.
+- `/wam assumptions` — inspect persisted assumptions.
+
+An unresolved `DECISION_CRITICAL` assumption blocks contract approval and `DONE`.
 
 ---
 
@@ -412,7 +440,16 @@ The default budget is 32,000 tokens and the estimate uses a lightweight characte
 ```
 /wam progress
 /wam progress <id> done <evidence>
+/wam progress <id> verified <evidence>
 /wam progress <id> pending
+```
+
+**Blocking questions & assumptions**
+
+```
+/wam answer <questionId> <respuesta>
+/wam assumptions
+/wam resolve <assumptionId> <evidencia>
 ```
 
 **Tasks**

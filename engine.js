@@ -1163,6 +1163,89 @@ export function extractPromptCriticalUncertainties(prompt = "") {
   return found;
 }
 
+const ASSUMPTION_IMPACT =
+  /elim|delet|borr|actualiz|update|schema|esquema|migraci|endpoint|api|arquitectur|estructura|m[oó]dulo|seguridad|auth|token|compatib|breaking|alcance|scope|destructiv|data.?loss|aceptaci[oó]n|criterios/i;
+
+/**
+ * Clasifica una asunción (rule-based): DECISION_CRITICAL si toca impacto
+ * material (data mutation, API, arquitectura, seguridad, compat, alcance,
+ * destructivo, aceptación); si no, NON_BLOCKING.
+ */
+export function classifyAssumption(statement = "") {
+  return ASSUMPTION_IMPACT.test(statement) ? "DECISION_CRITICAL" : "NON_BLOCKING";
+}
+
+/**
+ * Convierte asunciones textuales del análisis en objetos de estado
+ * {id, statement, classification, status} (spec assumption-gate R1).
+ */
+export function buildAssumptions(assumed = []) {
+  const seen = new Set();
+  const out = [];
+  for (const s of assumed || []) {
+    if (!s || typeof s !== "string") continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push({
+      id: `A${out.length + 1}`,
+      statement: s,
+      classification: classifyAssumption(s),
+      status: "active",
+    });
+  }
+  return out;
+}
+
+/**
+ * Escala asunciones activas NON_BLOCKING que tocan impacto material →
+ * DECISION_CRITICAL/blocking, y las mirroriza a contract.unknowns (blocking,
+ * con assumptionId) para reutilizar la fase ASKING (spec R2/R3).
+ */
+export function escalateAssumptions(state, taskText = "") {
+  const contract = state?.contract || {};
+  const escalated = [];
+  const assumptions = contract.assumptions || [];
+  let unknowns = contract.unknowns || [];
+  let changed = false;
+
+  for (const a of assumptions) {
+    if (a.status === "active" && a.classification === "NON_BLOCKING") {
+      const taskImpact = !!taskText && ASSUMPTION_IMPACT.test(taskText);
+      const genericAssumption = /funcionalidad|agregar nueva|nueva funcionalidad|add support|add.*support/i.test(a.statement);
+      const cls =
+        classifyAssumption(a.statement) === "DECISION_CRITICAL" ||
+        (taskImpact && genericAssumption)
+          ? "DECISION_CRITICAL"
+          : "NON_BLOCKING";
+      if (cls === "DECISION_CRITICAL") {
+        a.classification = cls;
+        a.status = "blocking";
+        if (!unknowns.some((u) => u.assumptionId === a.id)) {
+          unknowns = [
+            ...unknowns,
+            {
+              id: `U${unknowns.length + 1}`,
+              kind: "ASSUMED",
+              question: `¿${a.statement}?`,
+              status: "blocking",
+              assumptionId: a.id,
+            },
+          ];
+        }
+        escalated.push(a);
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    contract.assumptions = assumptions;
+    contract.unknowns = unknowns;
+    state.contract = contract;
+  }
+  return { escalated, changed };
+}
+
 /**
  * Synthesiza un Completion Contract específico a partir del prompt (rule-based,
  * sin LLM): descompone cláusulas accionables y deriva requisitos/verificación.
@@ -1309,6 +1392,7 @@ export async function analyze(options) {
     known: projectInfo.known,
     inferred: projectInfo.inferred,
     assumed: assumptions,
+    assumptions: buildAssumptions(assumptions),
     unknown: projectInfo.unknown,
     uncertainties,
 
