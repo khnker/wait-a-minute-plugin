@@ -60,6 +60,8 @@ function nextActionFrom(state) {
   return "Continuar tarea";
 }
 
+const BLOCKED_TOOLS = new Set(["write", "edit", "bash", "task", "todowrite", "pty_spawn", "pty_write", "pty_kill"]);
+
 const ACTIVE_FILE = () => path.join(process.cwd(), ".wam", "active-task");
 
 function readActiveTaskId() {
@@ -251,12 +253,60 @@ const WaitAMinutePlugin = async (pluginInput) => {
       const promptText = extractPrompt(input, output);
       if (!promptText.trim()) return;
 
-      const taskId = input.taskId || readActiveTaskId() || "default-task";
+      let taskId = input.taskId || readActiveTaskId() || "default-task";
+
+      // Clarification Gate (spec clarification-gate): en ASKING el mensaje se
+      // clasifica — respuesta natural, intento de implementación o cambio de tarea.
+      const askingState = getTaskState(taskId);
+      if (askingState?.phase === "ASKING") {
+        const trimmed = promptText.trim();
+        if (/^(answer|resolve|contract|progress|task|skills|assumptions|compress)\b/.test(trimmed)) return; // lo maneja command.execute.before
+        const kind = classifyAskingMessage(promptText);
+        if (kind === "blocked-message") {
+          // AC5 + AC11: un intento de implementar o un claim de DONE NO se consume
+          // como respuesta — se intercepta y se re-emite la pregunta bloqueante.
+          const u = (askingState.contract?.unknowns || []).find((x) => x.status === "blocking");
+          const directive = `⛔ [wait-a-minute] BLOQUEADO: Pregunta pendiente ${u?.id || "U1"}: ${u?.question || "decisión crítica sin resolver"}\nNo implementar. Responder: /wam answer ${u?.id || "U1"} <respuesta>`;
+          const srcParts = input?.message?.parts || input?.parts;
+          if (srcParts && srcParts.length > 0) {
+            const tp = srcParts.find((p) => p.type === "text" && typeof p.text === "string");
+            if (tp) tp.text = directive;
+          } else if (input && typeof input.text === "string") {
+            input.text = directive;
+          }
+          emitTextPart(output, directive, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+          return;
+        }
+        if (kind === "new-intent") {
+          // E2E-06: el usuario cambia de tarea → la anterior queda persistida sin
+          // contaminar; el mensaje corre como nuevo pre-flight (nueva tarea).
+          try { fs.rmSync(path.join(process.cwd(), ".wam", "active-task"), { force: true }); } catch {}
+          taskId = `task-${Date.now()}`;
+          input.taskId = taskId;
+        } else {
+          const resolved = waitAMinute.answerFromMessage(taskId, promptText);
+          if (resolved.ok) {
+            emitTextPart(
+              output,
+              `✓ [wait-a-minute] question answered — ${resolved.u.id}: "${resolved.u.answer}"\n✓ assumption resolved\n✓ contract updated — fase ${resolved.phase}\nReady → Proceed.`,
+              { sessionID: input.sessionID, messageID: output.message?.id || input.messageID }
+            );
+          } else {
+            const u = (askingState.contract?.unknowns || []).find((x) => x.status === "blocking");
+            emitTextPart(
+              output,
+              `⛔ [wait-a-minute] ASKING — ${u?.id || "U1"}: ${u?.question || "pregunta pendiente"}\nNo implementar hasta responder. Responder: /wam answer ${u?.id || "U1"} <respuesta>`,
+              { sessionID: input.sessionID, messageID: output.message?.id || input.messageID }
+            );
+          }
+          return;
+        }
+      }
 
       // Continuation fast-path: contrato aprobado + sin claim de DONE → no inyectar nada,
       // el agente fluye sin interrupción (ni contrato ni línea de progreso).
       const existingState = getTaskState(taskId);
-      if (existingState?.contract?.status === "APPROVED") {
+      if (existingState?.contract?.status === "APPROVED" && existingState?.phase !== "ASKING") {
         const claim = waitAMinute.evaluateCompletionGate(existingState, promptText);
         if (!claim.blocked && !claim.allDone) {
           input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
@@ -410,9 +460,45 @@ const WaitAMinutePlugin = async (pluginInput) => {
         text: wamCli((input.arguments || "").split(/\s+/), cfg),
       });
     },
+
+    // Enforce Clarification Gate (spec change 4): en ASKING se bloquean las
+    // herramientas mutantes — la investigación read-only sigue permitida.
+    "tool.execute.before": async (input) => {
+      try {
+        if (bypassed) return;
+        const taskId = readActiveTaskId() || "default-task";
+        const st = getTaskState(taskId);
+        if (st?.phase !== "ASKING") return;
+        const tool = input?.tool || "";
+        if (BLOCKED_TOOLS.has(tool)) {
+          const u = (st.contract?.unknowns || []).find((x) => x.status === "blocking");
+          const question = u ? `${u.id}: ${u.question}` : "pregunta bloqueante pendiente";
+          const directive = `[wait-a-minute] ENFORCED BLOCK — tarea en ASKING (${question}). Herramienta ${tool} bloqueada. Responder: /wam answer ${u?.id || "U1"} <respuesta>`;
+          input.output = directive;
+          throw new Error(directive);
+        }
+      } catch (err) {
+        if (typeof err?.message === "string" && err.message.includes("ENFORCED BLOCK")) throw err;
+      }
+    },
   };
 };
 
+
+/**
+ * Clasifica un mensaje recibido durante ASKING (spec clarification-gate):
+ * "answer" (respuesta natural), "implementation" (intento de implementar →
+ * interceptar, no consumir) o "new-intent" (cambio de tarea → nuevo pre-flight).
+ */
+function classifyAskingMessage(text = "") {
+  const lower = (text || "").toLowerCase().trim();
+  const doneClaims =
+    /(^|\s)(done|finish|finished|complete|completed|terminate|terminated|listo|termin[eé]|complet[ao]|finalizad[oa])\b|(task|tarea)\s+(complete|complet(a|ada|o)|terminad(a|o))|declare.*done/i;
+  if (doneClaims.test(lower)) return "blocked-message";
+  if (/\b(olvida|olvídate|no quiero|mejor no|en realidad|nada que ver|cambia.*idea|descartar)\b/.test(lower)) return "new-intent";
+  if (/\b(implementa|implementar|agrega|agregar|haz|hacer|refactoriza|refactorizar|migra|migrar|crea|crear|elimina|eliminar|arregla|arreglar|fix|configura|configurar|escribe|instala|instalar|construye|build)\b/.test(lower)) return "blocked-message";
+  return "answer";
+}
 
 /**
  * /wam CLI — opencode 1.18.25 entrega comandos vía command.execute.before,
@@ -896,6 +982,35 @@ const waitAMinute = {
     return { ok: true, phase: "PROPOSED", unknown: u };
   },
 
+  /** Reconocimiento de respuesta natural (spec enforce-clarification-gate): en ASKING,
+   *  un mensaje normal resuelve TODAS las preguntas bloqueantes con ese texto y
+   *  re-evalúa el estado (assumption asociada → resolved). */
+  answerFromMessage: function(taskId, text) {
+    const state = getTaskState(taskId);
+    if (!state) return { ok: false, reason: "Sin estado de tarea" };
+    const blocking = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
+    if (!blocking.length) return { ok: false, reason: "Sin preguntas bloqueantes" };
+    const answer = (text || "").trim();
+    if (!answer) return { ok: false, reason: "Respuesta vacía" };
+    let first = null;
+    for (const u of blocking) {
+      u.status = "answered";
+      u.answer = answer;
+      if (u.assumptionId) {
+        const a = (state.contract?.assumptions || []).find((x) => x.id === u.assumptionId);
+        if (a) {
+          a.status = "resolved";
+          a.classification = "RESOLVED";
+          a.resolvedBy = "answer";
+        }
+      }
+      first = first || u;
+    }
+    state.phase = "PROPOSED";
+    state.nextAction = "Revisar contrato — /wam contract approve";
+    persistTaskState(taskId, state);
+    return { ok: true, u: first, phase: state.phase, nextAction: state.nextAction };
+  },
   /** Resuelve una asunción con evidencia del repo (spec change 3 R4): → RESOLVED sin preguntar al usuario. */
   resolveAssumption: function(taskId, aid, evidence) {
     const state = getTaskState(taskId);

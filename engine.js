@@ -1156,9 +1156,17 @@ export function extractPromptCriticalUncertainties(prompt = "") {
   const lower = text.toLowerCase();
 
   if (/(migra|migrate|migr)[\s\S]*(o|or)[\s\S]*(elim|borr|dele|descart|discard)/i.test(lower)) {
-    found.push({ question: "¿Deben migrarse o eliminarse los datos existentes?", source: text.slice(0, 140) });
-  } else if (/elim|borr[ao]|delete/i.test(lower)) {
-    found.push({ question: "¿Alcance de la eliminación (hard delete / soft delete / anonymizar)?", source: text.slice(0, 140) });
+    found.push({
+      question: "¿Deben migrarse o eliminarse los datos existentes?",
+      source: text.slice(0, 140),
+      options: ["Migrar", "Eliminar"],
+    });
+  } else if (/elim|borr[ao]|delet/i.test(lower)) {
+    found.push({
+      question: "¿Alcance de la eliminación (hard delete / soft delete / anonymizar)?",
+      source: text.slice(0, 140),
+      options: ["hard delete", "soft delete", "anonymizar"],
+    });
   }
   return found;
 }
@@ -1220,7 +1228,10 @@ export function escalateAssumptions(state, taskText = "") {
       if (cls === "DECISION_CRITICAL") {
         a.classification = cls;
         a.status = "blocking";
-        if (!unknowns.some((u) => u.assumptionId === a.id)) {
+        const existing = unknowns.find((u) => u.status === "blocking" && !u.assumptionId);
+        if (existing) {
+          existing.assumptionId = a.id; // reuso: la pregunta existente cubre esta asunción (sin duplicar)
+        } else if (!unknowns.some((u) => u.assumptionId === a.id)) {
           unknowns = [
             ...unknowns,
             {
@@ -1302,7 +1313,7 @@ export function synthesizeContract(prompt = "", mode = "NORMAL", uncertainties =
   }
   const unknowns = (uncertainties || [])
     .filter((u) => u.classification === "DECISION_CRITICAL")
-    .map((u) => ({ id: u.id, question: u.question, classification: u.classification, status: "blocking" }));
+    .map((u) => ({ id: u.id, question: u.question, classification: u.classification, status: "blocking", options: u.options || [] }));
   return { requirements, constraints: [], verification, unknowns, status: "PROPOSED", rigor: mode };
 }
 
@@ -1334,6 +1345,7 @@ export async function analyze(options) {
         kind: "UNKNOWN",
         classification: "DECISION_CRITICAL",
         status: "active",
+        options: pc.options || [],
       });
     }
   }

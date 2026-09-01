@@ -129,7 +129,7 @@ test("R5: asunción crítica sin resolver bloquea aprobación y claim de DONE", 
   const out = { message: {}, parts: [] };
   await hooks["chat.message"]({ sessionID: "ag5", messageID: "ag5-1", message: { parts: [{ type: "text", text: "terminé, done" }] }, taskId }, out);
   const emitted = out.parts.filter((p) => p.type === "text").map((p) => p.text).join("\n");
-  assert.ok(emitted.includes("ASKING"), "DONE interceptado por ASKING");
+  assert.ok(emitted.includes("BLOQUEADO") || emitted.includes("ASKING"), "DONE interceptado por el clarification gate");
   assert.equal(getTaskState(taskId).phase, "ASKING", "fase no avanza");
   cleanup(taskId);
 });
