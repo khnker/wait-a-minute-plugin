@@ -319,6 +319,9 @@ test("Memory on DONE: tarea completada deriva summary.md + recent-changes.md (sp
   for (const r of st.requirements) {
     pluginDefault.markRequirement(taskId, r.id, "done", "evidencia de test");
   }
+  for (const r of getTaskState(taskId).requirements) {
+    pluginDefault.markRequirement(taskId, r.id, "verified", "npm test pasa");
+  }
 
   const output = { message: {}, parts: [] };
   await hooks["chat.message"](
