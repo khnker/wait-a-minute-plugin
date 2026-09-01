@@ -131,6 +131,7 @@ function projectState(analysis) {
       requirements: analysis.completionContract?.requirements || [],
       verification: analysis.completionContract?.verification || [],
       constraints: analysis.completionContract?.constraints || [],
+      unknowns: analysis.completionContract?.unknowns || [],
     },
     requirements: (analysis.completionContract?.requirements || []).map((title, i) => ({
       id: `req-${i + 1}`,
@@ -697,6 +698,13 @@ const waitAMinute = {
     const doneClaims =
       /(^|\s)(done|finish|finished|complete|completed|terminate|terminated|listo|termin[eé]|complet[ao]|finalizad[oa])\b|(task|tarea)\s+(complete|complet(a|ada|o)|terminad(a|o))|declare.*done/i;
     if (!doneClaims.test(lower)) return { blocked: false };
+    const blockingUnknowns = (state?.contract?.unknowns || []).filter((u) => u.status === "blocking");
+    if (blockingUnknowns.length > 0) {
+      return {
+        blocked: true,
+        pending: blockingUnknowns.map((u) => `${u.id} — ${u.question} (DECISION_CRITICAL sin responder)`),
+      };
+    }
     const pending = (state?.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified");
     if (pending.length > 0) {
       return {
@@ -728,6 +736,10 @@ const waitAMinute = {
   approveContract: function(taskId) {
     const state = getTaskState(taskId);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
+    const blocking = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
+    if (blocking.length > 0) {
+      return { ok: false, reason: `${blocking[0].id} DECISION_CRITICAL sin responder (bloquea aprobación): ${blocking[0].question}` };
+    }
     state.contract = { ...(state.contract || {}), status: "APPROVED" };
     if (state.phase !== "DONE") state.phase = "IMPLEMENTING";
     state.nextAction = nextActionFrom(state);
@@ -861,12 +873,16 @@ const waitAMinute = {
     const skillsLine = analysis.skills?.selected?.length
       ? analysis.skills.selected.map((s) => s.name).join(",")
       : "ninguna";
+    const blockingUnknowns = (analysis.completionContract?.unknowns || []).filter((u) => u.status === "blocking");
     const validationLines = [
       `wait-a-minute: contrato ${contractStatus}${analysis.phase ? ` (fase ${analysis.phase})` : ""}`,
       `rigor ${analysis.completionContract?.rigor || "NORMAL"} | req: ${(analysis.completionContract?.requirements || []).join("; ") || "—"}`,
       `ver: ${(analysis.completionContract?.verification || []).join("; ") || "—"}`,
       `riesgo ${analysis.risk} | compl ${analysis.complexity} | amb ${analysis.ambiguity}`,
       `skills: ${skillsLine}`,
+      ...(blockingUnknowns.length
+        ? [`blocking: ${blockingUnknowns.map((u) => `${u.id} ${u.question}`).join(" | ")}`]
+        : []),
       "",
       "continuar → ejecutar | /wam contract approve → aprobar | /wam compress → resumen terse",
     ];

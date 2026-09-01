@@ -1102,11 +1102,73 @@ function determineMode(classification, projectInfo, riskLevel) {
  * Main analysis function - entry point for the plugin
  */
 /**
+ * Clasifica una incertidumbre/supuesto en DECISION_CRITICAL | RESOLVABLE | NON_BLOCKING.
+ * Rule-based, determinista (sin LLM). Prioridad de seguridad: critical > resolvable > non-blocking.
+ */
+export function classifyUncertainty(item = "") {
+  const text = String(item);
+  const CRITICAL = [
+    /migra|migrate|migraci[oó]n|refresh.?token|rotar|dele|destructiv|borr|elim|data loss|p[ée]rdida de datos/i,
+    /seguridad|security|auth|oauth|token|api.?key|secret|password/i,
+    /schema|esquema|api contract|formato de respuesta|response shape|compatibil/i,
+    /arquitectura|architecture|scope|alcance|comportamiento|behavior|user.?visible|aceptaci[oó]n/i,
+  ];
+  const RESOLVABLE = [
+    /c[oó]mo se maneja|c[oó]mo funciona|c[oó]mo est[áa]|existe|hay |d[oó]nde est|qu[ée] herramienta|formato de|qu[ée] framework|qu[ée] versi[oó]n|config|tests?|documentaci[oó]n|endpoint existente|api existente/i,
+  ];
+  if (CRITICAL.some((p) => p.test(text))) return "DECISION_CRITICAL";
+  if (RESOLVABLE.some((p) => p.test(text))) return "RESOLVABLE";
+  return "NON_BLOCKING";
+}
+
+/** Convierte assumed/unknown del pre-flight en uncertainties clasificadas. */
+export function buildUncertainties(assumed = [], unknown = []) {
+  const seen = new Set();
+  const uncertainties = [];
+  const entries = [
+    ...(assumed || []).map((a) => ({ kind: "ASSUMED", text: String(a) })),
+    ...(unknown || []).map((u) => ({ kind: "UNKNOWN", text: String(u) })),
+  ];
+  for (const { kind, text } of entries) {
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    uncertainties.push({
+      id: `U${uncertainties.length + 1}`,
+      question: text,
+      kind,
+      classification: classifyUncertainty(text),
+      status: "active",
+    });
+  }
+  return uncertainties;
+}
+
+/**
+ * Detecta incertidumbres DECISION_CRITICAL expresadas en el prompt mismo,
+ * SOLO cuando hay una decisión explícita de material (migrar-o-eliminar,
+ * alcance de eliminación). Una migración normal es la tarea misma, no una
+ * incertidumbre bloqueante. Rule-based, determinista.
+ */
+export function extractPromptCriticalUncertainties(prompt = "") {
+  const text = (prompt || "").trim();
+  if (!text) return [];
+  const found = [];
+  const lower = text.toLowerCase();
+
+  if (/(migra|migrate|migr)[\s\S]*(o|or)[\s\S]*(elim|borr|dele|descart|discard)/i.test(lower)) {
+    found.push({ question: "¿Deben migrarse o eliminarse los datos existentes?", source: text.slice(0, 140) });
+  } else if (/elim|borr[ao]|delete/i.test(lower)) {
+    found.push({ question: "¿Alcance de la eliminación (hard delete / soft delete / anonymizar)?", source: text.slice(0, 140) });
+  }
+  return found;
+}
+
+/**
  * Synthesiza un Completion Contract específico a partir del prompt (rule-based,
  * sin LLM): descompone cláusulas accionables y deriva requisitos/verificación.
  * Fallback: genéricos si no se puede extraer nada.
  */
-export function synthesizeContract(prompt = "", mode = "NORMAL") {
+export function synthesizeContract(prompt = "", mode = "NORMAL", uncertainties = []) {
   const requirements = [];
   const verification = [];
   const clauses = (prompt || "")
@@ -1155,7 +1217,10 @@ export function synthesizeContract(prompt = "", mode = "NORMAL") {
   if (!requirements.length) {
     requirements.push("Tarea completada según intención", "Resultados verificables");
   }
-  return { requirements, constraints: [], verification, status: "PROPOSED", rigor: mode };
+  const unknowns = (uncertainties || [])
+    .filter((u) => u.classification === "DECISION_CRITICAL")
+    .map((u) => ({ id: u.id, question: u.question, classification: u.classification, status: "blocking" }));
+  return { requirements, constraints: [], verification, unknowns, status: "PROPOSED", rigor: mode };
 }
 
 export async function analyze(options) {
@@ -1174,8 +1239,21 @@ export async function analyze(options) {
   // Step 2: Inspect the project
   const projectInfo = await inspectProject(projectPath || process.cwd());
 
-  // Step 3: Audit assumptions
+  // Step 3: Audit assumptions + clasificar incertidumbre (decision-critical)
   const assumptions = auditAssumptions(prompt, projectInfo);
+  const uncertainties = buildUncertainties(assumptions, projectInfo.unknown);
+  const promptCriticals = extractPromptCriticalUncertainties(prompt);
+  for (const pc of promptCriticals) {
+    if (!uncertainties.some((u) => u.question === pc.question)) {
+      uncertainties.push({
+        id: `U${uncertainties.length + 1}`,
+        question: pc.question,
+        kind: "UNKNOWN",
+        classification: "DECISION_CRITICAL",
+        status: "active",
+      });
+    }
+  }
 
   // Step 5: Select skills (registry unificado: local APPROVED + catálogo embebido)
   const availableSkills = discoverSkills();
@@ -1210,7 +1288,7 @@ export async function analyze(options) {
   } catch {}
 
   // Completion Contract proposal — específico del prompt (rule-based)
-  const completionContract = synthesizeContract(prompt, modeInfo.mode);
+  const completionContract = synthesizeContract(prompt, modeInfo.mode, uncertainties);
 
   // Step 7: Build the output
   const result = {
@@ -1232,6 +1310,7 @@ export async function analyze(options) {
     inferred: projectInfo.inferred,
     assumed: assumptions,
     unknown: projectInfo.unknown,
+    uncertainties,
 
     questions: [],
 
