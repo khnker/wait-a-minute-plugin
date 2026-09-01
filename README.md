@@ -1,80 +1,101 @@
 # Wait a Minute
 
-Cognitive governance layer for [OpenCode](https://opencode.ai/).
+Cognitive pre-flight and execution-control layer for OpenCode.
 
-Wait a Minute (WAM) adds a pre-flight and completion-control layer to OpenCode. It makes the agent stop before acting on ambiguous work, establish what "done" means, track progress against explicit requirements, and provide evidence before completion is accepted.
+Wait a Minute (WAM) makes OpenCode agents understand before they act.
 
-WAM is designed around a simple principle:
+Before an agent starts executing a task, WAM performs a lightweight cognitive pre-flight: it analyzes the request, separates known facts from assumptions, identifies uncertainty, determines scope and task type, and selects relevant skills.
 
-> «Don't let the agent confuse activity with completion.»
+For tasks that require sustained implementation, WAM can establish a Completion Contract, track verified progress, and prevent premature completion.
+
+> «Wait a minute. Understand first. Then act.»
 
 ## What WAM does
 
-WAM operates around the OpenCode agent loop:
+WAM operates as an OpenCode prompt hook before skill resolution and agent execution.
 
 ```
- User request
- │
- ▼
- ┌─────────────────┐
- │  WAM Pre-flight │
- └────────┬────────┘
+ USER PROMPT
+    │
+    ▼
+ ┌──────────────────┐
+ │  WAM PRE-FLIGHT  │
+ └────────┬─────────┘
           │
- Intent / scope / risk
-          │
-          ▼
- ┌─────────────────┐
- │   Completion    │
- │    Contract     │
- └────────┬────────┘
-          │
-   User approval
-          │
-          ▼
- ┌─────────────────┐
- │   Implementing  │
- └────────┬────────┘
-          │
-          ▼
- ┌─────────────────┐
- │    Verifying    │
- └────────┬────────┘
-          │
- Evidence required
-          │
-          ▼
- ┌──────────┐
- │   DONE   │
- └──────────┘
+ ┌─────────────┼─────────────┐
+ ▼             ▼             ▼
+ FACTS     ASSUMPTIONS     UNKNOWN
+ │             │             │
+ └─────────────┼─────────────┘
+               ▼
+      TASK CLASSIFICATION
+               │
+               ▼
+         SKILL ROUTING
+               │
+               ▼
+       EXECUTION / AGENT
+               │
+               ▼
+ ┌─────────────────────┐
+ │ COMPLETION CONTROL  │
+ └──────────┬──────────┘
+            │
+    Evidence required
+            │
+            ▼
+           DONE
 ```
 
-The important part is the completion gate: an agent cannot declare a task finished while WAM still has unresolved requirements.
+WAM does not replace OpenCode's agent runtime. It controls the pre-flight and execution context around it.
 
-## Core capabilities
+---
 
-### Cognitive pre-flight
+## Cognitive Pre-flight
 
-Before execution, WAM analyzes the incoming task for:
+The central WAM mechanism is a prompt hook that runs before OpenCode resolves skills, selects the model/tier, or invokes the agent.
 
-- intent
-- project context
-- scope
-- risk
-- required capabilities
-- verification strategy
+The pre-flight asks:
 
-It then routes relevant skills and establishes the initial task state.
+- What is the user actually asking for?
+- What is already known?
+- What is inferred from available evidence?
+- What is merely assumed?
+- What remains unknown?
+- Does the repository need to be inspected first?
+- What type of task is this?
+- Which capabilities are relevant?
+- Should the agent proceed or ask for clarification?
 
-### Completion Contracts
+### Four-category reasoning
 
-WAM turns a task into an explicit contract containing:
+WAM explicitly separates information into four categories:
 
-- requirements
-- constraints
-- verification steps
-- completion state
+| Category | Meaning |
+|----------|---------|
+| KNOWN | Directly supported by the user, repository, tools, configuration or documentation |
+| INFERRED | Reasonable conclusion derived from evidence |
+| ASSUMED | Plausible but unverified assumption |
+| UNKNOWN | Information that is currently unavailable |
 
-The contract lifecycle is:
+This distinction is important because coding agents routinely turn assumptions into facts during execution.
+
+WAM's job is to surface that boundary before the work starts.
+
+---
+
+## Completion Contracts
+
+For implementation work, WAM can create a Completion Contract describing what must be true for the task to be considered complete.
+
+A contract can contain:
+
+- requirements;
+- constraints;
+- verification criteria;
+- completion conditions.
+
+The lifecycle is:
 
 ```
 PROPOSED
@@ -89,36 +110,25 @@ PROPOSED
      ▼
  VERIFYING
      │
- All requirements
- Satisfied
-     │
      ▼
    DONE
 ```
 
-A contract remains "PROPOSED" until the user approves, edits, or rejects it.
+A contract remains "PROPOSED" until the user explicitly approves, edits, or rejects it.
 
-### Completion Gate
+This creates a boundary between:
 
-WAM intercepts completion claims such as:
+> «"I understood what you want."»
 
-```
-Done
-Finished
-Listo
-Terminé
-Completed
-```
+And:
 
-If requirements are still pending, WAM blocks the completion transition and redirects the agent toward the next unresolved requirement.
+> «"I am authorized to proceed with this definition of done."»
 
-This is deliberately stronger than a prompt saying "remember to verify your work".
+---
 
-The agent's completion claim is enforced against persisted task state.
+## Evidence-Based Progress
 
-### Evidence-based progress
-
-Requirements are tracked individually:
+WAM tracks requirements individually.
 
 ```
 Requirements:
@@ -133,38 +143,145 @@ Requirements:
    Evidence: null
 ```
 
+Each requirement has:
+
+- an identifier;
+- a status;
+- optional evidence.
+
 `nextAction` is derived from the first pending requirement.
 
-WAM therefore tracks verified progress, not merely agent narration.
+This makes progress represent verified requirements, rather than the agent's narrative about what it has accomplished.
 
-### Persistent engineering policies
+---
 
-WAM ships with transversal policies that apply across tasks:
+## Completion Gate
 
-- **Scope** — detect unnecessary surface expansion and scope creep.
-- **Verify** — require evidence before completion.
-- **Simplify / Ponytail** — prefer the smallest solution that satisfies the requirement; avoid unnecessary abstractions and refactors.
+WAM actively guards completion.
 
-These policies are part of WAM's behavioral layer rather than individual task prompts.
+It detects completion claims such as:
 
-### Skills
+```
+Done
+Finished
+Completed
+Listo
+Terminé
+```
 
-WAM also includes a self-contained skill registry containing approximately 2,097 skills.
+If the persisted task still contains pending requirements, WAM blocks the completion transition.
 
-The registry is bundled with WAM and contains the actual `SKILL.md` content, not merely metadata.
+The incoming completion claim is rewritten into a directive to continue with the next unresolved requirement.
 
-Skills are:
+```
+Agent: "Done. Everything is implemented."
 
-1. Selected through a single weighted router;
-2. Loaded on demand;
-3. Materialized locally when selected;
-4. Available to OpenCode through the normal skill mechanism.
+WAM:
+ R1 ✓
+ R2 ✓
+ R3 ✗
 
-No network access or external repository lookup is required at runtime.
+ DO NOT DECLARE DONE.
+ Continue with R3.
+```
 
-### Skill routing
+When all requirements are verified, the task can transition to "DONE".
 
-The router scores candidates using:
+This is an enforcement mechanism, not merely a prompt reminder.
+
+---
+
+## Scope, Verify, Simplify
+
+WAM includes persistent engineering policies that apply across tasks.
+
+**Scope**
+
+Detect unnecessary expansion of the requested change.
+
+The goal is to prevent:
+
+```
+Requested change
+    ↓
+"while I'm here."
+    ↓
+Unrelated refactor
+    ↓
+Larger change surface
+    ↓
+New failure modes
+```
+
+**Verify**
+
+Require evidence before accepting completion.
+
+**Simplify**
+
+Prefer the smallest solution that satisfies the requirement.
+
+This includes:
+
+- reuse existing mechanisms;
+- avoid unnecessary abstractions;
+- avoid speculative extensibility;
+- avoid refactoring unrelated code.
+
+These policies are part of WAM's persistent behavioral layer.
+
+---
+
+## Skill Intelligence
+
+WAM also provides a self-contained skill catalog and routing system.
+
+The bundled registry contains approximately 2,097 skills, including the complete `SKILL.md` content for each bundled skill.
+
+External repositories are used only during registry generation. They are not accessed at runtime.
+
+```
+Skills/
+└── registry.json
+    ├── metadata
+    ├── provenance
+    └── SKILL.md content
+```
+
+Each skill retains provenance information including:
+
+```
+Source.id
+Source.repository
+Source.path
+Source.ref
+```
+
+This makes the generated catalog reproducible and auditable.
+
+### On-demand skill loading
+
+WAM does not inject every skill into the agent context.
+
+When routing selects a skill, its embedded `SKILL.md` is materialized locally:
+
+```
+.wam/
+└── skills/
+    └── bundled/
+        └── <skill-id>/
+            └── SKILL.md
+```
+
+OpenCode can then load the skill through its normal mechanism.
+
+This keeps the large catalog out of the active context.
+
+---
+
+## Skill Routing
+
+WAM uses a single weighted scoring algorithm:
 
 ```
 Name × 5
@@ -174,68 +291,25 @@ Description × 2
 Domain × 1
 ```
 
-WAM exposes the routing decision through:
+Routing can be inspected rather than treated as a black box:
 
 ```
 /wam skills explain <prompt>
 ```
 
-This makes skill selection inspectable instead of opaque.
-
-### Fast path
-
-WAM does not continuously interfere with an active task.
-
-Once a Completion Contract is approved, ordinary continuation messages bypass the expensive pre-flight path.
-
-For normal continuation:
+Other useful commands:
 
 ```
-User message
-    │
-    ▼
-Approved task?
-    │
-   Yes
-    │
-    ▼
-Continue OpenCode
+/wam skills list
+/wam skills search <query>
+/wam skills inspect <id>
 ```
 
-WAM only re-enters the control path when it needs to handle:
+---
 
-- a new task;
-- a completion claim;
-- an explicit WAM operation.
+## Task Memory
 
-This is important because governance should not become interaction latency.
-
-### Context efficiency
-
-WAM treats context as a constrained resource.
-
-Injected instructions are compressed using WAM's "caveman" compression:
-
-```
-Understand task.
-Check scope.
-Verify evidence.
-Do not declare DONE while requirements pending.
-```
-
-Instead of spending tokens on prose that does not change agent behavior.
-
-The `/wam compress` command also generates a compact task summary and reports estimated context headroom.
-
-```
-Default budget: 32,000 tokens
-```
-
-The estimate uses a lightweight character-based approximation rather than a model tokenizer.
-
-### Persistent task state
-
-Task state is stored locally under:
+WAM persists task state locally.
 
 ```
 .wam/
@@ -246,19 +320,75 @@ Task state is stored locally under:
         └── caveman-summary.md
 ```
 
-State includes:
+The persisted state contains:
 
-- completion contract
-- phase
-- requirements
-- evidence
-- next action
+- completion contract;
+- requirements;
+- evidence;
+- current phase;
+- next action.
 
-Tasks can therefore be resumed without relying exclusively on the current conversation context.
+This allows a task to be resumed:
 
-## CLI
+```
+/wam task list
+/wam task switch <id>
+```
 
-WAM exposes an `/wam` command namespace inside OpenCode.
+The selected task's state is re-injected on the next relevant prompt.
+
+---
+
+## Continuation Fast Path
+
+WAM is deliberately not in the way on every message.
+
+Once a contract is approved, ordinary continuation messages that do not contain a completion claim bypass the expensive pre-flight path.
+
+```
+Approved task
+    │
+    ▼
+Normal continuation
+    │
+    ▼
+OpenCode executes normally
+```
+
+WAM re-enters the control path when it needs to handle:
+
+- a new task;
+- a completion claim;
+- explicit `/wam` operations.
+
+This avoids repeatedly routing the large skill registry during normal execution.
+
+---
+
+## Context Efficiency
+
+WAM treats injected context as a constrained resource.
+
+WAM instructions use a compact "caveman" representation:
+
+```
+Understand task.
+Check scope.
+Verify evidence.
+Do not declare DONE while requirements pending.
+```
+
+`/wam compress` produces a compact task summary and reports estimated context headroom.
+
+```
+Tokens N | headroom H / BUDGET
+```
+
+The default budget is 32,000 tokens and the estimate uses a lightweight character-based approximation rather than a model tokenizer.
+
+---
+
+## `/wam` CLI
 
 **Skills**
 
@@ -269,7 +399,7 @@ WAM exposes an `/wam` command namespace inside OpenCode.
 /wam skills explain <prompt>
 ```
 
-**Contracts**
+**Contract**
 
 ```
 /wam contract approve
@@ -299,122 +429,111 @@ WAM exposes an `/wam` command namespace inside OpenCode.
 /wam compress <taskId>
 ```
 
+---
+
 ## Architecture
 
-WAM is intentionally an OpenCode plugin, not a replacement runtime.
+WAM is intentionally an OpenCode plugin.
 
 ```
-┌─────────────────────────────────────┐
-│               OpenCode               │
-│                                     │
-│  Agent · Models · Tools · Runtime   │
-│                                     │
-│            │                        │
-│            ▼                        │
-│  ┌───────────────┐                  │
-│  │      WAM       │                  │
-│  │               │                  │
-│  │ Pre-flight    │                  │
-│  │ Contracts     │                  │
-│  │ Policies      │                  │
-│  │ Skill Router  │                  │
-│  │ Progress      │                  │
-│  │ Completion    │                  │
-│  │ Gate          │                  │
-│  └───────────────┘                  │
-│                                     │
-└─────────────────────────────────────┘
+┌────────────────────────────────────────────┐
+│                OpenCode                    │
+│                                            │
+│  Models · Agents · Tools · Runtime         │
+│              │       │                     │
+│              ▼       │                     │
+│  ┌─────────────────────┐                   │
+│  │        WAM          │                   │
+│  │                     │                   │
+│  │ Cognitive Pre-flight│                   │
+│  │ Task Classification │                   │
+│  │ Skill Routing       │                   │
+│  │ Contracts           │                   │
+│  │ Progress            │                   │
+│  │ Evidence            │                   │
+│  │ Completion Gate     │                   │
+│  │ Task Memory         │                   │
+│  └─────────────────────┘                   │
+│                                            │
+└────────────────────────────────────────────┘
 ```
 
-The plugin is implemented around three main responsibilities:
+The implementation is centered around:
 
-| File        | Responsibility                               |
-|-------------|----------------------------------------------|
-| `engine.js` | Analysis · Skill routing · Scoring · On-demand skill loading |
-| `index.js`  | OpenCode plugin integration · Contract lifecycle · Completion gate · `/wam` CLI |
-| `memory.js` | Persistent task state                        |
+| File        | Responsibility                                        |
+|-------------|-------------------------------------------------------|
+| `SKILL.md`  | WAM behavioral specification                         |
+| `engine.js` | Pre-flight analysis · Task classification · Skill routing · Scoring · On-demand skill loading |
+| `index.js`  | OpenCode plugin integration · Prompt hook · Contract lifecycle · Completion gate · `/wam` CLI |
+| `memory.js` | Persistent task state · Summaries · Task resume      |
 
-### Self-contained runtime
+---
 
-External skill repositories are **build-time sources only**.
+## Self-Contained Runtime
 
-They are used by the maintainer to:
+WAM's runtime does not depend on external skill repositories.
 
-- select skills;
-- validate them;
-- deduplicate them;
-- pin their source revision;
-- generate the bundled registry.
-
-The generated registry is committed to WAM.
-
-Users installing WAM do not need to clone, query, or trust those repositories at runtime.
-
-Each bundled skill retains provenance:
+The maintainer pipeline:
 
 ```
-Source.id
-Source.repository
-Source.path
-Source.ref
+External skill repositories
+        │
+        ▼
+   Build-registry.cjs
+        │
+        ├── validate
+        ├── deduplicate
+        ├── pin revisions
+        └── embed SKILL.md content
+        │
+        ▼
+   Skills/registry.json
+        │
+        ▼
+    WAM runtime
 ```
 
-Along with its actual `SKILL.md` content.
+Users install WAM as a self-contained OpenCode plugin.
 
-This makes the distributed skill catalog reproducible and auditable.
+No network access to the upstream skill repositories is required at runtime.
 
-## What WAM is — and isn't
+---
 
-**WAM is**
+## What WAM Is
 
-- an OpenCode plugin;
-- a cognitive pre-flight layer;
+WAM is:
+
+- a pre-flight cognitive layer for OpenCode;
+- a task understanding and classification mechanism;
+- a skill intelligence layer;
 - a completion-control mechanism;
-- an evidence-driven task tracker;
-- a behavioral governance layer;
-- a skill routing and loading system.
+- an evidence-based progress tracker;
+- a persistent engineering-policy layer;
+- a task memory and resume mechanism.
 
-**WAM is not**
+WAM is deliberately focused on OpenCode.
 
-- a new LLM;
-- an autonomous coding runtime;
-- a replacement for OpenCode;
-- a generic agent framework;
-- a prompt collection pretending to be enforcement.
+It does not attempt to replace OpenCode's agent runtime, model execution, or tool system.
 
-WAM deliberately delegates execution to OpenCode and focuses on controlling the conditions under which the agent proceeds and declares success.
+---
 
-## Why "Wait a Minute"?
+## The Principle
 
-Coding agents are good at producing plausible progress.
+Coding agents can execute very quickly while still operating on a wrong interpretation of the task.
 
-The dangerous failure mode is not necessarily:
+The most expensive mistake is often not a failed command.
 
-> «"The agent did nothing."»
+It is starting the wrong work confidently.
 
-It is:
+WAM introduces a deliberate pause:
 
-> «"The agent did something, reported success, and nobody verified whether the actual requirement was satisfied."»
+```
+Don't assume.
+Understand.
+Define.
+Execute.
+Verify.
+Then finish.
+```
 
-WAM introduces a deliberate pause between "I think this is done" and "this is demonstrably done."
-
-**Wait a Minute. Verify first.**
-
-## Status
-
-WAM is actively evolving around the following core:
-
-- cognitive pre-flight;
-- completion contracts;
-- evidence-based completion;
-- scope control;
-- verification enforcement;
-- persistent task state;
-- skill routing;
-- context-efficient execution.
-
-The project is designed specifically for OpenCode.
-
-## License
-
-MIT © khnker
+Wait a Minute.
