@@ -349,7 +349,12 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       if (updatedState.contract.status !== "APPROVED") {
         waitAMinute.presentValidation({
-          analysis: { ...analysis, contractStatus: updatedState.contract.status, phase: updatedState.phase },
+          analysis: {
+            ...analysis,
+            contractStatus: updatedState.contract.status,
+            phase: updatedState.phase,
+            completionContract: updatedState.contract,
+          },
           ctx: output,
           meta: { sessionID: input.sessionID, messageID: output.message?.id || input.messageID },
         });
@@ -659,7 +664,10 @@ const waitAMinute = {
    */
   buildPersistedState: function(taskId, analysis) {
     const existing = getTaskState(taskId);
-    if (existing && existing.requirements && existing.contract?.status === "APPROVED") {
+    if (existing && existing.requirements && existing.requirements.length) {
+      // Preservar contrato/requisitos existentes (PROPOSED/APPROVED/REJECTED):
+      // el contrato se sintetiza UNA vez (primer mensaje); los mensajes
+      // siguientes no re-sintetizan del texto actual (claims incluidos).
       const merged = {
         ...existing,
         lastAction: existing.lastAction,

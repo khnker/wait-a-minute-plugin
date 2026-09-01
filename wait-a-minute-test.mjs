@@ -276,6 +276,7 @@ try {
 console.log('18. Ciclo de vida del contrato (PROPOSED → APPROVED → IMPLEMENTING)');
 try {
   const taskId = 'test-contract-task';
+  try { fs.rmSync(process.cwd() + '/.wam/tasks/' + taskId, { recursive: true, force: true }); } catch (e) {}
   const analysis = await waitAMinute.analyze({ prompt: 'implementar migración a postgres con tests' });
   assert(analysis.completionContract?.status === 'PROPOSED', 'Contrato inicia PROPOSED');
   const state = waitAMinute.buildPersistedState(taskId, analysis);
@@ -297,6 +298,7 @@ try {
 console.log('19. Progreso por requisito con evidencia');
 try {
   const taskId = 'test-progress-task';
+  try { fs.rmSync(process.cwd() + '/.wam/tasks/' + taskId, { recursive: true, force: true }); } catch (e) {}
   const analysis = await waitAMinute.analyze({ prompt: 'auditar seguridad del API y redactar informe' });
   const state = waitAMinute.buildPersistedState(taskId, analysis);
   assert(state.requirements.length === analysis.completionContract.requirements.length, 'Requisitos derivados del contrato');
@@ -317,6 +319,7 @@ try {
 console.log('20. Completion Gate bloquea DONE prematuro');
 try {
   const taskId = 'test-gate-task';
+  try { fs.rmSync(process.cwd() + '/.wam/tasks/' + taskId, { recursive: true, force: true }); } catch (e) {}
   const analysis = await waitAMinute.analyze({ prompt: 'refactorizar módulo de pagos con tests' });
   const state = waitAMinute.buildPersistedState(taskId, analysis);
   const g1 = waitAMinute.evaluateCompletionGate(state, 'terminé la tarea, está done');
