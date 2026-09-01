@@ -133,6 +133,7 @@ function projectState(analysis) {
       constraints: analysis.completionContract?.constraints || [],
       unknowns: analysis.completionContract?.unknowns || [],
     },
+    questions: [],
     requirements: (analysis.completionContract?.requirements || []).map((title, i) => ({
       id: `req-${i + 1}`,
       title,
@@ -235,7 +236,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       opencodeConfig.command["wam"] = {
         template: "$ARGUMENTS",
         description:
-          "Wait-a-Minute CLI: /wam skills <list|search|inspect|explain> | /wam contract <approve|reject|edit <json>> | /wam progress [<id> <done <evidencia>|pending>] | /wam task <list|switch <id>> | /wam compress [<taskId>]",
+          "Wait-a-Minute CLI: /wam skills <list|search|inspect|explain> | /wam contract <approve|reject|edit <json>> | /wam progress [<id> <done|verified <evidencia>|pending>] | /wam task <list|switch <id>> | /wam compress [<taskId>] | /wam answer <id> <respuesta>",
       };
     },
 
@@ -277,6 +278,20 @@ const WaitAMinutePlugin = async (pluginInput) => {
       sessionStore.set("persistentPolicies", analysis.persistentPolicies || []);
       sessionStore.set("skillRegistry", analysis.skillRegistry || {});
       persistTaskState(taskId, state);
+
+      // Blocking Questions: DECISION_CRITICAL sin responder → ASKING, preguntar, no ejecutar.
+      const blockingUnknowns = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
+      if (blockingUnknowns.length > 0 && state.phase !== "ANSWERED") {
+        state.phase = "ASKING";
+        state.nextAction = "Responder pregunta bloqueante antes de ejecutar";
+        persistTaskState(taskId, state);
+        const questions = [];
+        for (const u of blockingUnknowns) {
+          questions.push(`⛔ [wait-a-minute] ASKING — ${u.id}: ${u.question}\nNo implementar hasta responder. Responder: /wam answer ${u.id} <respuesta>`);
+        }
+        emitTextPart(output, questions.join("\n\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+        return;
+      }
 
       const gate = applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom);
       const updatedState = getTaskState(taskId);
@@ -462,6 +477,13 @@ function wamCli(args, cfg = {}) {
     return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> verified <evidencia> | /wam progress <id> pending";
   }
 
+  if (sub === "answer") {
+    const qid = action;
+    const answer = rest.join(" ").trim();
+    if (!qid || !answer) return "Uso: /wam answer <questionId> <respuesta>";
+    return JSON.stringify(waitAMinute.answerQuestion(taskId, qid, answer));
+  }
+
   if (sub === "compress") {
     const id = rest.join(" ") || action || taskId;
     const st = getTaskState(id);
@@ -506,7 +528,7 @@ function wamCli(args, cfg = {}) {
     return "Uso: /wam task <list|switch <id>>";
   }
 
-  return "Uso: /wam <skills|contract|progress|task|compress>";
+  return "Uso: /wam <skills|contract|progress|task|compress|answer>";
 }
 
 /**
@@ -800,6 +822,23 @@ const waitAMinute = {
     state.nextAction = nextActionFrom(state);
     persistTaskState(taskId, state);
     return { ok: true, phase: state.phase, nextAction: state.nextAction };
+  },
+
+  /** Responde una pregunta bloqueante: unknown → answered, fase ASKING → ANSWERED → PROPOSED. */
+  answerQuestion: function(taskId, qid, answer) {
+    const state = getTaskState(taskId);
+    if (!state) return { ok: false, reason: "Sin estado de tarea" };
+    const u = (state.contract?.unknowns || []).find((x) => x.id === qid);
+    if (!u) return { ok: false, reason: `Pregunta ${qid} no existe` };
+    if (!(answer && answer.trim())) return { ok: false, reason: `Respuesta requerida para ${qid}` };
+    u.status = "answered";
+    u.answer = answer.trim();
+    state.phase = "ANSWERED";
+    persistTaskState(taskId, state);
+    state.phase = "PROPOSED";
+    state.nextAction = "Revisar contrato — /wam contract approve";
+    persistTaskState(taskId, state);
+    return { ok: true, phase: "PROPOSED", unknown: u };
   },
 
   /** Carga contenido real de una skill del catálogo bajo demanda. */
