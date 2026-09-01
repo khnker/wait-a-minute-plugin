@@ -17,7 +17,7 @@ import path from "node:path";
 const DEFAULT_CONFIG = {
   tierCaps: { fast: 8, medium: 5, heavy: 3 },
   activePreset: "omni",
-  activeMode: "normal",
+  silent: false,
   tierPrompts: {},
 };
 
@@ -43,11 +43,8 @@ function emitTextPart(output, text, meta = {}) {
   };
   if (Array.isArray(output.parts)) {
     output.parts.unshift(part);
-    console.error("[wait-a-minute DEBUG] emitTextPart pushed to output.parts, count=" + output.parts.length);
   } else if (output.system) {
     output.system.unshift(part);
-  } else {
-    console.error("[wait-a-minute DEBUG] emitTextPart NO TARGET, outKeys=" + Object.keys(output));
   }
 }
 
@@ -243,8 +240,6 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       const promptText = extractPrompt(input, output);
       if (!promptText.trim()) return;
-
-      console.error("[wait-a-minute DEBUG] hook fired", { promptText, inKeys: Object.keys(input || {}), outKeys: Object.keys(output || {}) });
 
       const taskId = input.taskId || readActiveTaskId() || "default-task";
 
@@ -871,12 +866,8 @@ const waitAMinute = {
           text: `\n[Wait-a-minute: Ejecución en fase ${analysis.phase || "IMPLEMENTING"} — Siguiente acción: ${analysis.nextAction || "continuar"}]`,
           synthetic: true
         });
-
-        console.error("[wait-a-minute DEBUG] presentValidation unshift a output.parts, count=" + ctx.parts.length);
       } else if (ctx.system) {
         ctx.system.unshift({ id: genPartId(), type: "text", text, synthetic: true });
-      } else {
-        console.error("[wait-a-minute DEBUG] presentValidation NO TARGET, outKeys=" + Object.keys(ctx));
       }
     }
 
