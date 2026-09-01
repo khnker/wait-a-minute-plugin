@@ -4,9 +4,10 @@ Pre-flight cognitive layer for OpenCode that intercepts prompts for strategic an
 
 ## Features
 - **Cognitive Pre-flight**: Analyzes intent, project context, and risk before agent action.
+- **Contract Synthesizer**: Derives task-specific requirements from the prompt (rule-based, no LLM) — no more generic "complete the task" contracts. Tests, migrations, auth/token and cache prompts get dedicated requirements + verification steps.
 - **Completion Contract**: Proposes clear requirements, constraints, and verification steps for every task.
-- **Contract Approval Workflow**: `PROPOSED → APPROVED → IMPLEMENTING → VERIFYING → DONE` (+ REJECTED). A contract stays PROPOSED until the user approves, edits, or rejects it (`/wam contract ...`).
-- **Completion Gate (ENFORCE)**: Blocks premature "DONE" claims. If the agent declares the task finished while requirements are still pending, WAM injects a blocking instruction listing the outstanding requirements.
+- **Contract Approval Workflow**: `PROPOSED → APPROVED → IMPLEMENTING → VERIFYING → DONE` (+ REJECTED). Auto-approved on explicit "continuar"/"aprobar contrato" continuation (`/wam contract ...`).
+- **Completion Gate (ENFORCE)**: Blocks premature "DONE" claims. Pending requirements or unverified `done` requirements block and rewrite the incoming claim into a blocking directive; `DONE` requires every requirement `verified` (done + evidence + verification).
 - **Real Progress Tracking**: Per-requirement `{id, title, status, evidence}` state; `nextAction` is derived from the first pending requirement (`/wam progress`).
 - **Persistent Policies**: Transversal principles (Scope, Verify, Simplify/YAGNI) enforced by default.
 - **Self-Contained Skill Registry with Real Content**: Ships a curated, versioned catalog (~2,097 skills) with the actual SKILL.md body of each skill embedded. `loadSkillOnDemand` materializes the real SKILL.md to disk — no network, no external repos at runtime.
@@ -14,8 +15,9 @@ Pre-flight cognitive layer for OpenCode that intercepts prompts for strategic an
 - **Task Resume**: State persists per task; `/wam task switch <id>` sets the active task and the hook re-injects its phase and pending requirements on the next message.
 - **Continuation Fast-Path**: With an APPROVED contract, follow-up messages (no DONE claim) are NOT intercepted — no contract block, no progress line, no re-analysis. The agent flows uninterrupted; the expensive registry routing is skipped.
 - **Caveman Compression & Headroom**: All WAM injections are terse (caveman style — no articles, no filler) to preserve context headroom. `/wam compress` emits a one-line task summary with a token/headroom report and persists `caveman-summary.md`.
+- **Operational Memory**: Persistent `.wam/context/` (project, architecture, decisions, constraints, recent-changes) with provenance, confidence, staleness and secret redaction. Auto-populated from `analysis.project` and user approvals.
 - **Single Router**: One weighted scoring algorithm (name:5, capability:4, keyword:3, description:2, domain:1).
-- **CLI (`/wam`)**: Inspect the bundled catalog, audit strategies, approve contracts, track progress, resume tasks and compress summaries.
+- **CLI (`/wam`)**: Inspect the bundled catalog, audit strategies, approve contracts, track progress, verify evidence, resume tasks and compress summaries.
 
 ## Self-Contained Architecture
 
@@ -23,9 +25,9 @@ Pre-flight cognitive layer for OpenCode that intercepts prompts for strategic an
 wait-a-minute-plugin/
 ├── skills/
 │   └── registry.json   ← curated catalog: metadata + REAL skill content (bodies), ~2,097 skills
-├── policies/           ← persistent policies (simplify, scope, verify)
-├── engine.js           ← analysis, routing, scoring, on-demand content loading (no network I/O)
-└── index.js            ← plugin factory, Completion Gate, contract lifecycle, /wam CLI
+├── engine.js           ← analysis, contract synthesizer, routing, scoring, on-demand content loading
+├── memory.js           ← operational memory (.wam/context, tasks, redaction, decisions, constraints)
+└── index.js            ← plugin factory, Completion Gate, VERIFYING lifecycle, /wam CLI
 ```
 
 External repos are **build-time sources only** — used by the maintainer to select, validate, deduplicate, and generate `registry.json` (including each skill's body), then commit it into WAM before release. Users who install WAM never clone or query them.
@@ -55,7 +57,23 @@ When routing selects a skill, `loadSkillOnDemand` materializes the skill's embed
 
 ## Completion Gate
 
-The hook detects task-completion claims (`done`, `finished`, `listo`, `terminé`, `completa`, …). If the persisted task state still has pending requirements, a blocking instruction is injected as the first system entry **and the incoming claim is rewritten** into a "do not declare DONE — continue with the next pending requirement" directive: the agent may not see a premature completion. When every requirement is `done`, DONE is permitted and the phase transitions to `DONE`.
+The hook detects task-completion claims (`done`, `finished`, `listo`, `terminé`, `completa`, …) and enforces the full verification chain:
+
+1. Pending requirements → the claim is blocked **and the incoming message itself is rewritten** into a "do not declare DONE — continue with the next pending requirement" directive.
+2. All requirements `done` but not `verified` → phase transitions to **VERIFYING** and the claim is blocked until every requirement carries `verified` evidence (`/wam progress <id> verified <evidence>`).
+3. All requirements `verified` → `DONE` is permitted and the phase transitions to `DONE`.
+
+`markRequirement` rejects `done`/`verified` without evidence, and `verified` without a prior `done`.
+
+## Contract Synthesizer
+
+`completionContract` is derived from the prompt (`synthesizeContract`, rule-based, no LLM):
+
+- Clauses split on `; , y + and` become `Implementar:/Configurar:/Migrar:/Eliminar:` requirements.
+- Prompts mentioning tests add "Agregar tests para el cambio" + "Ejecutar suite de tests relevante".
+- Migrations add "Invalidar/rotar credenciales anteriores" + post-migration integrity verification.
+- Security/auth/token prompts add "Auditar seguridad del cambio" + auth-surface review.
+- Fallback to generic requirements only when nothing actionable is extractable.
 
 ## Continuation Fast-Path
 
@@ -70,7 +88,15 @@ Once a contract is APPROVED, subsequent messages that are **not** DONE claims re
 
 ## Task State & Contract Lifecycle
 
-Task state persists per task in `.wam/tasks/<id>/state.yaml`: `contract`, per-requirement `requirements` (with evidence), `phase`, and a derived `nextAction`. Lifecycle: `PROPOSED → APPROVED → IMPLEMENTING → VERIFYING → DONE` (+ `REJECTED`).
+Task state persists per task in `.wam/tasks/<id>/state.yaml`: `contract`, per-requirement `requirements` (with evidence), `phase`, and a derived `nextAction`. Lifecycle: `PROPOSED → APPROVED → IMPLEMENTING → VERIFYING → DONE` (+ `REJECTED` → `WAITING`).
+
+## Operational Memory
+
+`.wam/context/` persists cross-task knowledge (memory.js):
+
+- `project.md`, `architecture.md`, `decisions.md`, `constraints.md`, `recent-changes.md` — with provenance (user-decided > observed > inferred), confidence, staleness marking and **secret redaction** (`api_key`, `token`, `secret`, `password`, `ghp_…`, `sk_…`, …).
+- Auto-populated: `updateProjectMemo` maps `analysis.project` (stack, architecture, relevant files) into `project.md`; approving a strategy records a `user-decided` decision (`recordDecision`); completing a task writes `summary.md` + `caveman-summary.md` and a `recent-changes` entry.
+- `initMemory` scaffolds the tree on first use; everything under `.wam/` is gitignored by default (versionable candidates documented in `WAM_GITIGNORE`).
 
 ## CLI Usage
 - `/wam skills list`: Show skills in the bundled catalog.
@@ -82,6 +108,7 @@ Task state persists per task in `.wam/tasks/<id>/state.yaml`: `contract`, per-re
 - `/wam contract edit <json>`: Edit requirements/verification/constraints (back to PROPOSED).
 - `/wam progress`: List per-requirement status + evidence.
 - `/wam progress <id> done <evidence>`: Mark a requirement done with evidence.
+- `/wam progress <id> verified <evidence>`: Mark a requirement verified (requires prior done).
 - `/wam progress <id> pending`: Undo a requirement.
 - `/wam task list`: List persisted tasks with phase/contract status (active marked).
 - `/wam task switch <id>`: Set the active task to resume; the hook re-injects its state on the next message.
