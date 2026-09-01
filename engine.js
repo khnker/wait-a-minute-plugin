@@ -11,6 +11,28 @@ const os = await import("node:os");
 const tmpdir = os.tmpdir();
 
 
+// -- Caveman compression (terse, para headroom de contexto) ----------------
+
+const FILLERS = /\b(a|an|the|just|really|basically|actually|simply|please|por favor)\b/gi;
+
+/**
+ * Comprime texto a estilo caveman: sin artículos, sin relleno, frases cortas.
+ * Sirve para inyecciones y resúmenes que deben ocupar el menor contexto posible.
+ */
+export function cavemanify(text = "") {
+  return (text || "")
+    .replace(FILLERS, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Estimación de tokens (chars/4 — proxy barato, sin tokenizer). */
+export function estimateTokens(text = "") {
+  return Math.ceil((text || "").length / 4);
+}
+
+
 // -- Task State Management --
 
 export function persistTaskState(taskId, state, root) {

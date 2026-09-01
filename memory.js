@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { cavemanify } from "./engine.js";
 
 const StorageProvider = {
   read: (p) => fs.readFileSync(p, "utf-8"),
@@ -283,7 +284,10 @@ export function updateTaskMemory(taskId, { evidence = "", summary = "" } = {}, r
   const dir = path.join(rootDir(root), ".wam", "tasks", taskId);
   StorageProvider.write(path.join(dir, ".gitkeep"), "");
   if (evidence) StorageProvider.write(path.join(dir, "evidence.md"), redact(evidence).trim() + "\n");
-  if (summary) StorageProvider.write(path.join(dir, "summary.md"), redact(summary).trim() + "\n");
+  if (summary) {
+    StorageProvider.write(path.join(dir, "summary.md"), redact(summary).trim() + "\n");
+    StorageProvider.write(path.join(dir, "caveman-summary.md"), cavemanify(redact(summary)).trim() + "\n");
+  }
   return { ok: true, dir };
 }
 

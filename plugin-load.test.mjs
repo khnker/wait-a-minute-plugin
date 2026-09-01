@@ -89,7 +89,7 @@ test("chat.message 1.18.25: extrae prompt de message.parts e inyecta validación
     res = await attempt(process.cwd());
   }
   assert.ok(res.ok, `debe persistir estado en ${res.p}`);
-  const visible = res.output.parts.find((p) => p.type === "text" && typeof p.text === "string" && p.text.includes("¿Proceder con esta estrategia?"));
+  const visible = res.output.parts.find((p) => p.type === "text" && typeof p.text === "string" && p.text.includes("wait-a-minute: contrato"));
   assert.ok(visible, "debe inyectar el checkpoint como part visible en output.parts");
   assert.ok(visible.text.includes("/wam contract approve"), "confirmación seleccionable via /wam");
 try {
@@ -118,7 +118,7 @@ test("chat.message compat legacy: shape {parts}/{system} sigue funcionando", asy
     output
   );
   assert.ok(output.system.length > 0, "debe inyectar en output.system (API vieja)");
-  assert.ok(output.system.some((p) => p.text.includes("¿Proceder con esta estrategia?")), "legacy: checkpoint presente");
+  assert.ok(output.system.some((p) => p.text.includes("wait-a-minute: contrato")), "legacy: checkpoint presente");
   try {
     fs.rmSync(tmp, { recursive: true, force: true });
   } catch {}
@@ -166,6 +166,29 @@ test("Task Resume: /wam task switch fija tarea activa; chat.message persiste baj
 
   try {
     fs.rmSync(path.join(process.cwd(), ".wam", "active-task"), { force: true });
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
+  } catch {}
+});
+
+test("cavemanify + /wam compress: resumen terse y headroom reportado", async () => {
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+  const taskId = `cav-${Date.now()}`;
+  await hooks["chat.message"](
+    { parts: [{ type: "text", text: "implementar migración postgres con tests" }], taskId },
+    { parts: [], system: [] }
+  );
+
+  const out = { parts: [] };
+  await hooks["command.execute.before"]({ command: "wam", arguments: `compress ${taskId}` }, out);
+  const text = out.parts[0].text;
+  assert.ok(text.includes(taskId), "resumen incluye taskId");
+  assert.ok(/headroom \d+\/32000/.test(text), "headroom reportado con presupuesto");
+  assert.ok(!text.includes(" the "), "estilo caveman: sin artículos");
+
+  const file = path.join(process.cwd(), ".wam", "tasks", taskId, "caveman-summary.md");
+  assert.ok(fs.existsSync(file), "caveman-summary.md persistido");
+
+  try {
     fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
   } catch {}
 });

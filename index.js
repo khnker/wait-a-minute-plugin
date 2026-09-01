@@ -1,4 +1,4 @@
-import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand } from "./engine.js";
+import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens } from "./engine.js";
 import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange } from "./memory.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -18,6 +18,7 @@ const DEFAULT_CONFIG = {
   tierCaps: { fast: 8, medium: 5, heavy: 3 },
   activePreset: "omni",
   silent: false,
+  budgetTokens: 32000,
   tierPrompts: {},
 };
 
@@ -229,7 +230,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       opencodeConfig.command["wam"] = {
         template: "$ARGUMENTS",
         description:
-          "Wait-a-Minute CLI: /wam skills <list|search|inspect|explain> | /wam contract <approve|reject|edit <json>> | /wam progress [<id> <done <evidencia>|pending>] | /wam task <list|switch <id>>",
+          "Wait-a-Minute CLI: /wam skills <list|search|inspect|explain> | /wam contract <approve|reject|edit <json>> | /wam progress [<id> <done <evidencia>|pending>] | /wam task <list|switch <id>> | /wam compress [<taskId>]",
       };
     },
 
@@ -358,7 +359,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       output.parts.push({
         id: genPartId(),
         type: "text",
-        text: wamCli((input.arguments || "").split(/\s+/)),
+        text: wamCli((input.arguments || "").split(/\s+/), cfg),
       });
     },
   };
@@ -369,7 +370,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
  * /wam CLI — opencode 1.18.25 entrega comandos vía command.execute.before,
  * no vía ctx.command. Lógica extraída del handler antiguo.
  */
-function wamCli(args) {
+function wamCli(args, cfg = {}) {
   const [sub, action, ...rest] = args || [];
   const taskId = readActiveTaskId() || "default-task";
 
@@ -439,6 +440,26 @@ function wamCli(args) {
     return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> pending";
   }
 
+  if (sub === "compress") {
+    const id = rest.join(" ") || action || taskId;
+    const st = getTaskState(id);
+    if (!st) return "Sin estado de tarea";
+    const pend = (st.requirements || []).filter((r) => r.status !== "done").length;
+    const budget = cfg.budgetTokens || DEFAULT_CONFIG.budgetTokens;
+    const cav = cavemanify([
+      `task ${id} — ${st.phase} / ${st.contract?.status || "?"}`,
+      `req: ${pend}/${(st.requirements || []).length} pend | next: ${st.nextAction || "—"}`,
+    ].join("\n"));
+    const tokens = estimateTokens(cav);
+    const headroom = Math.max(0, budget - tokens);
+    try {
+      const dir = path.join(process.cwd(), ".wam", "tasks", id);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "caveman-summary.md"), cav + "\n");
+    } catch {}
+    return `${cav}\n[tokens ${tokens} | headroom ${headroom}/${budget}]`;
+  }
+
   if (sub === "task") {
     if (action === "list") {
       const ids = listTaskIds();
@@ -463,7 +484,7 @@ function wamCli(args) {
     return "Uso: /wam task <list|switch <id>>";
   }
 
-  return "Uso: /wam <skills|contract|progress|task>";
+  return "Uso: /wam <skills|contract|progress|task|compress>";
 }
 
 /**
@@ -801,62 +822,18 @@ const waitAMinute = {
     const mode = analysis.strategy || "NORMAL";
 
     const contractStatus = analysis.contractStatus || analysis.completionContract?.status || "PROPOSED";
-    const statusLine =
-      contractStatus === "APPROVED"
-        ? `✅ Contrato aprobado (fase: ${analysis.phase || "IMPLEMENTING"})`
-        : `⚠ Contrato ${contractStatus} NO aprobado — /wam contract approve`;
 
+    const skillsLine = analysis.skills?.selected?.length
+      ? analysis.skills.selected.map((s) => s.name).join(",")
+      : "ninguna";
     const validationLines = [
-      "Wait a minute — Completion Contract",
+      `wait-a-minute: contrato ${contractStatus}${analysis.phase ? ` (fase ${analysis.phase})` : ""}`,
+      `rigor ${analysis.completionContract?.rigor || "NORMAL"} | req: ${(analysis.completionContract?.requirements || []).join("; ") || "—"}`,
+      `ver: ${(analysis.completionContract?.verification || []).join("; ") || "—"}`,
+      `riesgo ${analysis.risk} | compl ${analysis.complexity} | amb ${analysis.ambiguity}`,
+      `skills: ${skillsLine}`,
       "",
-      statusLine,
-      `Contract Status: ${contractStatus} | Rigor: ${analysis.completionContract?.rigor || "NORMAL"}`,
-      `Requirements: ${(analysis.completionContract?.requirements || []).join(", ")}`,
-      `Verification: ${(analysis.completionContract?.verification || []).join(", ")}`,
-      "",
-      `Intención: ${analysis.intent.classification} (confianza: ${analysis.intent.confidence}%) | Modo: ${mode}`,
-      `Stack: ${analysis.project.detected_stack}`,
-      analysis.project.architecture !== "unknown" &&
-        `Arquitectura: ${analysis.project.architecture}`,
-      "",
-      "Conocido(s): " +
-        (analysis.known.length > 0 ? analysis.known.slice(0, 3).join(", ") : "ninguno"),
-      "Inferido(s): " +
-        (analysis.inferred.length > 0 ? analysis.inferred.slice(0, 3).join(", ") : "ninguno"),
-      "Asumido(s): " +
-        (analysis.assumed.length > 0 ? analysis.assumed.slice(0, 3).join(", ") : "ninguno"),
-      "Desconocido(s): " +
-        (analysis.unknown.length > 0 ? analysis.unknown.slice(0, 3).join(", ") : "ninguno"),
-      "",
-      "Skills seleccionadas: " +
-        (analysis.skills?.selected?.length > 0
-          ? analysis.skills.selected.map((s) => s.name).join(", ")
-          : "ninguna (bajo demanda)"),
-      analysis.skills?.rejected?.length > 0 &&
-        `Skills rechazadas: ${analysis.skills.rejected.join(", ")}`,
-      analysis.skillRegistry &&
-        `Skill Registry: ${analysis.skillRegistry.total} total | ${analysis.skillRegistry.approved} aprobadas | límite routing: ${analysis.skills.limit}`,
-      analysis.skillRegistry?.sources?.length > 0 &&
-        `Fuentes: ${analysis.skillRegistry.sources.join(", ")}`,
-      "",
-      "Políticas persistentes: " +
-        (analysis.persistentPolicies?.length > 0
-          ? analysis.persistentPolicies.map((p) => `${p.policy}(${p.status})`).join(", ")
-          : "ninguna"),
-      // Gates activos de políticas persistentes
-      analysis.persistentPolicies?.length > 0 &&
-        `Gates activos: ${analysis.persistentPolicies.flatMap((p) => p.gates).join(", ")}`,
-      "",
-      `Riesgo: ${analysis.risk} | Complejidad: ${analysis.complexity} | Ambigüedad: ${analysis.ambiguity}`,
-      `Estrategia recomendada: ${analysis.strategy}`,
-      "",
-      "¿Proceder con esta estrategia?",
-      "  [continuar]   → Ejecutar implementación con estrategia " + mode,
-      "  [corregir]    → Ver detalles y hacer ajustes",
-      "  [más información] → Expandir análisis completo",
-      "",
-      "Respuesta esperada: continuar / corregir / más información",
-      "Confirmación seleccionable: /wam contract approve (aprobar contrato)",
+      "continuar → ejecutar | /wam contract approve → aprobar | /wam compress → resumen terse",
     ];
 
     if (ctx) {
@@ -874,7 +851,7 @@ const waitAMinute = {
         // Agregar directiva clara de ejecución
         ctx.parts.push({
           type: "text",
-          text: `\n[Wait-a-minute: Ejecución en fase ${analysis.phase || "IMPLEMENTING"} — Siguiente acción: ${analysis.nextAction || "continuar"}]`,
+          text: `\n[wam: fase ${analysis.phase || "IMPLEMENTING"} → ${analysis.nextAction || "continuar"}]`,
           synthetic: true
         });
       } else if (ctx.system) {
