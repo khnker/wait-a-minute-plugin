@@ -141,6 +141,71 @@ function projectState(analysis) {
   };
 }
 
+function extractPrompt(input, output) {
+  const srcParts = output?.parts?.length
+    ? output.parts
+    : input?.message?.parts || output?.message?.parts || input?.parts;
+  if (srcParts && srcParts.length > 0) {
+    const textPart = srcParts.find(
+      (p) => p.type === "text" && typeof p.text === "string"
+    );
+    return textPart?.text || "";
+  }
+  if (input?.text && typeof input.text === "string") return input.text;
+  return "";
+}
+
+function applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom) {
+  const gate = waitAMinute.evaluateCompletionGate(state, promptText);
+  if (gate.blocked) {
+    state.phase = "IMPLEMENTING";
+    state.nextAction = nextActionFrom(state);
+    persistTaskState(taskId, state);
+  } else if (gate.allDone) {
+    state.phase = "DONE";
+    state.nextAction = "Tarea completa — contrato verificado";
+    persistTaskState(taskId, state);
+  }
+  return gate;
+}
+
+function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute, taskId) {
+  const inject = [];
+  injectOperationalMemory(inject);
+
+  if (state.phase === "PROPOSED") {
+    inject.push(
+      "──────────────────────────────────────────────",
+      "📋 CONTRATO DE TAREA (PROPOSED)",
+      `Objetivo: ${state.contract.objective || "Pendiente definir"}`,
+      "Etapas:",
+      ...state.requirements.map((r, i) => `  ${i+1}. ${r.title}`),
+      "Verificación:",
+      ...state.contract.verification.map((v) => `  - ${v}`),
+      "──────────────────────────────────────────────"
+    );
+  }
+
+  if (state.requirements?.length) {
+    const pend = state.requirements.filter((r) => r.status !== "done").length;
+    inject.push(`[wait-a-minute: task ${taskId} — fase ${state.phase}, ${pend}/${state.requirements.length} requisitos pendientes]`);
+  }
+
+  if (cfg.experimental?.waitAMinuteInject === true) {
+    inject.push(`[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`);
+    const registry = waitAMinute.getRegistry();
+    for (const s of analysis.skills?.selected || []) {
+      const entry = Object.values(registry).find((r) => r.id === s.id);
+      if (!entry || !s.hasContent) continue;
+      const dl = waitAMinute.loadSkillOnDemand(entry.id, registry, projectDirectory);
+      if (!dl.loaded) continue;
+      inject.push(`[wait-a-minute: skill "${s.name}" — SKILL.md materializado en ${dl.contentPath}. Cargar via runtime nativo si se ejecuta.]`);
+    }
+  }
+
+  return inject;
+}
+
 /**
  * Plugin factory — loaded by OpenCode when registered in opencode.jsonc.
  * Autocontained: no external deps beyond ./engine.js.
@@ -176,29 +241,13 @@ const WaitAMinutePlugin = async (pluginInput) => {
       try {
       if (bypassed) return;
 
-      // Extract user prompt text (1.18.25: texto vive en output.parts = resolvedParts;
-      // input NO trae message/parts y output.message.parts no está poblado al trigger)
-      let promptText = "";
-      const srcParts = output?.parts?.length
-        ? output.parts
-        : input?.message?.parts || output?.message?.parts || input?.parts;
-      if (srcParts && srcParts.length > 0) {
-        const textPart = srcParts.find(
-          (p) => p.type === "text" && typeof p.text === "string"
-        );
-        promptText = textPart?.text || "";
-      } else if (input?.text && typeof input.text === "string") {
-        promptText = input.text;
-      }
-
+      const promptText = extractPrompt(input, output);
       if (!promptText.trim()) return;
 
       console.error("[wait-a-minute DEBUG] hook fired", { promptText, inKeys: Object.keys(input || {}), outKeys: Object.keys(output || {}) });
 
-      // 1. Detectar tarea activa o iniciar nueva
       const taskId = input.taskId || readActiveTaskId() || "default-task";
 
-      // 2. Ejecutar análisis (pre-flight existente)
       const analysis = await waitAMinute.analyze({
         prompt: promptText,
         projectPath: projectDirectory,
@@ -208,65 +257,31 @@ const WaitAMinutePlugin = async (pluginInput) => {
         activeMode: cfg.activeMode,
       });
 
-      // 3. Estado durable: contrato PROPOSED (primera vez) o preservar APPROVED
       const state = waitAMinute.buildPersistedState(taskId, analysis);
       state.lastAction = promptText;
 
-      // Store analysis results + persistent policies + skill registry in session
       sessionStore.set("waitAnalysis", analysis);
       sessionStore.set("completionContract", state.contract);
       sessionStore.set("persistentPolicies", analysis.persistentPolicies || []);
       sessionStore.set("skillRegistry", analysis.skillRegistry || {});
       persistTaskState(taskId, state);
 
-      // 4. Completion Gate: bloquea DONE prematuro (ENFORCE)
-      const gate = waitAMinute.evaluateCompletionGate(state, promptText);
+      const gate = applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom);
+      const updatedState = getTaskState(taskId);
 
-      // 6. Inyectar estado + gate + badge + skills (path) al system prompt
-      const inject = [];
-      injectOperationalMemory(inject);
-      
-      // EXPLICIT CONTRACT EXPOSURE
-      if (state.phase === "PROPOSED") {
-        inject.push(
-          "──────────────────────────────────────────────",
-          "📋 CONTRATO DE TAREA (PROPOSED)",
-          `Objetivo: ${state.contract.objective || "Pendiente definir"}`,
-          "Etapas:",
-          ...state.requirements.map((r, i) => `  ${i+1}. ${r.title}`),
-          "Verificación:",
-          ...state.contract.verification.map((v) => `  - ${v}`),
-          "──────────────────────────────────────────────"
-        );
-      }
+      const inject = prepareSystemInject(analysis, updatedState, cfg, projectDirectory, waitAMinute, taskId, emitTextPart, input, output);
 
-      if (state.requirements?.length) {
-        const pend = state.requirements.filter((r) => r.status !== "done").length;
-        inject.push(`[wait-a-minute: task ${taskId} — fase ${state.phase}, ${pend}/${state.requirements.length} requisitos pendientes]`);
-      }
       if (gate.blocked) {
-        inject.push(
-          "──────────────────────────────────────────────",
-          "⛔ WAIT A MINUTE — COMPLETION GATE BLOQUEADO",
-          "La tarea NO está completa. No declares DONE ni fin de tarea.",
-          "Requisitos pendientes:",
-          ...gate.pending.map((p) => `  - ${p}`),
-          `Fase actual: ${state.phase}. Continúa con el próximo requisito.`,
-          "──────────────────────────────────────────────"
-        );
-        state.phase = "IMPLEMENTING";
-        state.nextAction = nextActionFrom(state);
-        persistTaskState(taskId, state);
-        const gateHold = `⛔ [wait-a-minute] COMPLETION GATE: faltan ${gate.pending.length} requisitos. No declare DONE. Continuar con: ${state.nextAction}`;
+        const pendingList = gate.pending.length > 0
+          ? "\n  Requisitos pendientes:\n    " + gate.pending.map((p) => `- ${p}`).join("\n    ") + "\n"
+          : "";
+        const gateHold = `⛔ [wait-a-minute] COMPLETION GATE: faltan ${gate.pending.length} requisito(s). No declare DONE.${pendingList} Continuar con: ${updatedState.nextAction}`;
         emitTextPart(output, gateHold, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
         if (input?.parts && input.parts.length > 0) {
           const tp = input.parts.find((p) => p.type === "text" && typeof p.text === "string");
           if (tp) tp.text = gateHold;
         }
       } else if (gate.allDone) {
-        state.phase = "DONE";
-        state.nextAction = "Tarea completa — contrato verificado";
-        persistTaskState(taskId, state);
         updateTaskMemory(taskId, {
           summary: [
             "# Task Summary",
@@ -275,10 +290,10 @@ const WaitAMinutePlugin = async (pluginInput) => {
             `- ${taskId} (${analysis.intent?.classification || "task"})`,
             "",
             "## Completed",
-            ...(state.contract?.requirements || []).map((r) => `- ${r}`),
+            ...(updatedState.contract?.requirements || []).map((r) => `- ${r}`),
             "",
             "## Verification",
-            ...(state.requirements || []).map((r) => `- ${r.id}: ${r.status}`),
+            ...(updatedState.requirements || []).map((r) => `- ${r.id}: ${r.status}`),
             "",
             "## Status",
             "COMPLETED",
@@ -287,39 +302,45 @@ const WaitAMinutePlugin = async (pluginInput) => {
         addRecentChange({
           date: new Date().toISOString().slice(0, 10),
           scope: taskId,
-          changes: state.contract?.requirements || [],
-          verification: `requisitos completos: ${(state.requirements || []).length}`,
+          changes: updatedState.contract?.requirements || [],
+          verification: `requisitos completos: ${(updatedState.requirements || []).length}`,
         });
-      }
-
-      if (cfg.experimental?.waitAMinuteInject === true) {
-        inject.push(`[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`);
-        const registry = waitAMinute.getRegistry();
-        for (const s of analysis.skills?.selected || []) {
-          const entry = Object.values(registry).find((r) => r.id === s.id);
-          if (!entry || !s.hasContent) continue;
-          const dl = waitAMinute.loadSkillOnDemand(entry.id, registry, projectDirectory);
-          if (!dl.loaded) continue;
-          inject.push(`[wait-a-minute: skill "${s.name}" — SKILL.md materializado en ${dl.contentPath}. Cargar via runtime nativo si se ejecuta.]`);
-        }
       }
 
       if (inject.length > 0) {
         emitTextPart(output, inject.join("\n") + "\n", { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
       }
 
-      // 5. Presentar validación con estado de contrato real (GUIDE)
-      // (unshift último => queda al tope del mensaje, primero visible)
-      waitAMinute.presentValidation({
-        analysis: { ...analysis, contractStatus: state.contract.status, phase: state.phase },
-        ctx: output,
-        meta: { sessionID: input.sessionID, messageID: output.message?.id || input.messageID },
-      });
+      // Detectar confirmación implícita de continuación
+      const lower = (input.message?.parts?.[0]?.text || "").toLowerCase();
+      
+      // Auto-aprobación para tareas que no requieren contrato explícito o son triviale
+      const isApproved = updatedState.contract?.status === "APPROVED";
+      const needsApproval = updatedState.phase === "PROPOSED" && !isApproved;
 
-      // Store for later access by the orchestrator
+      if (!needsApproval || lower.includes("continuar") || lower.includes("aprobar contrato")) {
+        if (needsApproval) waitAMinute.approveContract(taskId);
+      } else {
+        // Bloquear ejecución si no está aprobado
+        updatedState.phase = "PROPOSED";
+      }
+
+      if (updatedState.contract.status !== "APPROVED") {
+        waitAMinute.presentValidation({
+          analysis: { ...analysis, contractStatus: updatedState.contract.status, phase: updatedState.phase },
+          ctx: output,
+          meta: { sessionID: input.sessionID, messageID: output.message?.id || input.messageID },
+        });
+      } else {
+        // En IMPLEMENTING o APPROVED, inyectar solo progreso corto
+        const pend = (updatedState.requirements || []).filter((r) => r.status !== "done").length;
+        if (pend > 0) {
+          emitTextPart(output, `[wait-a-minute: fase ${updatedState.phase}, ${pend}/${updatedState.requirements.length} requisitos pendientes]\n`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+        }
+      }
+
       input.waitAnalysis = analysis;
     } catch (err) {
-      // Best-effort: never crash the session on wait-a-minute error
       console.error("[wait-a-minute] Pre-flight analysis failed:", err);
     }
   },
@@ -619,6 +640,9 @@ const waitAMinute = {
    */
   evaluateCompletionGate: function(state, prompt) {
     const lower = (prompt || "").toLowerCase().trim();
+    if (lower.includes("aprobar contrato") || lower.includes("continuar")) {
+      return { blocked: false, allDone: false, autoApprove: true };
+    }
     const doneClaims =
       /(^|\s)(done|finish|finished|complete|completed|terminate|terminated|listo|termin[eé]|complet[ao]|finalizad[oa])\b|(task|tarea)\s+(complete|complet(a|ada|o)|terminad(a|o))|declare.*done/i;
     if (!doneClaims.test(lower)) return { blocked: false };
@@ -840,6 +864,14 @@ const waitAMinute = {
           ...(meta.sessionID ? { sessionID: meta.sessionID } : {}),
           ...(meta.messageID ? { messageID: meta.messageID } : {}),
         });
+        
+        // Agregar directiva clara de ejecución
+        ctx.parts.push({
+          type: "text",
+          text: `\n[Wait-a-minute: Ejecución en fase ${analysis.phase || "IMPLEMENTING"} — Siguiente acción: ${analysis.nextAction || "continuar"}]`,
+          synthetic: true
+        });
+
         console.error("[wait-a-minute DEBUG] presentValidation unshift a output.parts, count=" + ctx.parts.length);
       } else if (ctx.system) {
         ctx.system.unshift({ id: genPartId(), type: "text", text, synthetic: true });

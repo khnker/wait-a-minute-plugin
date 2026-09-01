@@ -1,6 +1,14 @@
 import fs from "fs";
 import path from "path";
 
+const StorageProvider = {
+  read: (p) => fs.readFileSync(p, "utf-8"),
+  write: (p, data) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, data, "utf-8"); },
+  exists: (p) => fs.existsSync(p),
+  readdir: (p) => fs.readdirSync(p),
+  rm: (p, opts) => fs.rmSync(p, opts)
+};
+
 // -- Operational Memory for Wait a Minute (WAM) ----------------------------
 // Memoria operacional persistente, legible por humanos, en .wam/.
 // Conocimiento DERIVADO: no es fuente de verdad (spec operational-memory).
@@ -106,8 +114,8 @@ function resolveDoc(doc) {
 
 function readDoc(doc, root) {
   const file = path.join(contextDir(root), resolveDoc(doc));
-  if (!fs.existsSync(file)) return { file, meta: {}, body: "" };
-  return { file, ...splitFrontmatter(fs.readFileSync(file, "utf-8")) };
+  if (!StorageProvider.exists(file)) return { file, meta: {}, body: "" };
+  return { file, ...splitFrontmatter(StorageProvider.read(file)) };
 }
 
 function sectionsOf(body) {
@@ -126,12 +134,18 @@ function firstLine(s) {
 
 export function initMemory(root) {
   const wam = path.join(rootDir(root), ".wam");
-  const created = !fs.existsSync(wam);
-  for (const d of WAM_DIRS) {
-    fs.mkdirSync(path.join(wam, d), { recursive: true });
+  const created = !StorageProvider.exists(wam);
+  if (created) {
+    for (const d of WAM_DIRS) {
+      if (d !== "context") {
+        StorageProvider.write(path.join(wam, d, ".gitkeep"), "");
+      } else {
+        fs.mkdirSync(path.join(wam, d), { recursive: true });
+      }
+    }
+    const gi = path.join(wam, ".gitignore");
+    if (!StorageProvider.exists(gi)) StorageProvider.write(gi, WAM_GITIGNORE);
   }
-  const gi = path.join(wam, ".gitignore");
-  if (!fs.existsSync(gi)) fs.writeFileSync(gi, WAM_GITIGNORE);
   return created;
 }
 
@@ -145,17 +159,16 @@ export function updateContext(doc, body, metadata = {}, root) {
     status: metadata.status || "current",
   };
   const file = path.join(contextDir(root), resolveDoc(doc));
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, frontmatter(meta) + "\n" + redact(String(body)).trim() + "\n");
+  StorageProvider.write(file, frontmatter(meta) + "\n" + redact(String(body)).trim() + "\n");
   return { ok: true, file };
 }
 
 export function markStale(doc, { lastVerified } = {}, root) {
   const { file, meta, body } = readDoc(doc, root);
-  if (!fs.existsSync(file)) return { ok: false, reason: "doc no existe" };
+  if (!StorageProvider.exists(file)) return { ok: false, reason: "doc no existe" };
   meta.status = "stale";
   meta.last_verified = lastVerified || new Date(Date.now() - 30 * 86400000).toISOString();
-  fs.writeFileSync(file, frontmatter(meta) + "\n" + body.trim() + "\n");
+  StorageProvider.write(file, frontmatter(meta) + "\n" + body.trim() + "\n");
   return { ok: true, file, status: "stale" };
 }
 
@@ -268,9 +281,9 @@ export function addConstraint(text, { source = "inferred", confidence = "medium"
 export function updateTaskMemory(taskId, { evidence = "", summary = "" } = {}, root) {
   if (!taskId) return { ok: false, reason: "taskId requerido" };
   const dir = path.join(rootDir(root), ".wam", "tasks", taskId);
-  fs.mkdirSync(dir, { recursive: true });
-  if (evidence) fs.writeFileSync(path.join(dir, "evidence.md"), redact(evidence).trim() + "\n");
-  if (summary) fs.writeFileSync(path.join(dir, "summary.md"), redact(summary).trim() + "\n");
+  StorageProvider.write(path.join(dir, ".gitkeep"), "");
+  if (evidence) StorageProvider.write(path.join(dir, "evidence.md"), redact(evidence).trim() + "\n");
+  if (summary) StorageProvider.write(path.join(dir, "summary.md"), redact(summary).trim() + "\n");
   return { ok: true, dir };
 }
 

@@ -13,7 +13,7 @@ const tmpdir = os.tmpdir();
 
 // -- Task State Management --
 
-export function persistTaskState(taskId, state) {
+export function persistTaskState(taskId, state, root) {
   // Migrate legacy progress to requirements if needed
   if (state.progress && !state.requirements) {
     const total = state.progress.total || 0;
@@ -26,7 +26,7 @@ export function persistTaskState(taskId, state) {
     delete state.progress;
   }
 
-  const dir = path.join(process.cwd(), ".wam", "tasks", taskId);
+  const dir = path.join(root || process.cwd(), ".wam", "tasks", taskId);
   if (!fileExists(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "state.yaml"), JSON.stringify(state, null, 2));
 }
@@ -34,8 +34,8 @@ export function persistTaskState(taskId, state) {
 /**
  * Recupera estado de tarea
  */
-export function getTaskState(taskId) {
-  const file = path.join(process.cwd(), ".wam", "tasks", taskId, "state.yaml");
+export function getTaskState(taskId, root) {
+  const file = path.join(root || process.cwd(), ".wam", "tasks", taskId, "state.yaml");
   return fileExists(file) ? JSON.parse(readFileSafely(file)) : null;
 }
 
