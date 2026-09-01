@@ -243,6 +243,17 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       const taskId = input.taskId || readActiveTaskId() || "default-task";
 
+      // Continuation fast-path: contrato aprobado + sin claim de DONE → no inyectar nada,
+      // el agente fluye sin interrupción (ni contrato ni línea de progreso).
+      const existingState = getTaskState(taskId);
+      if (existingState?.contract?.status === "APPROVED") {
+        const claim = waitAMinute.evaluateCompletionGate(existingState, promptText);
+        if (!claim.blocked && !claim.allDone) {
+          input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
+          return;
+        }
+      }
+
       const analysis = await waitAMinute.analyze({
         prompt: promptText,
         projectPath: projectDirectory,

@@ -170,6 +170,32 @@ test("Task Resume: /wam task switch fija tarea activa; chat.message persiste baj
   } catch {}
 });
 
+test("Continuation fast-path: contrato aprobado + continuación NO inyecta nada y el gate de DONE sigue activo", async () => {
+  const taskId = `flow-${Date.now()}`;
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+
+  await hooks["chat.message"](
+    { parts: [{ type: "text", text: "implementar migración postgres con tests" }], taskId },
+    { parts: [], system: [] }
+  );
+  const approved = pluginDefault.approveContract(taskId);
+  assert.equal(approved.ok, true, "contrato aprobado");
+
+  const inp = { parts: [{ type: "text", text: "sigue con el paso 2" }], taskId };
+  const out = { parts: [], system: [] };
+  await hooks["chat.message"](inp, out);
+  assert.equal(out.parts.length, 0, "no emite parts de validación/progreso en continuación");
+  assert.equal(inp.parts[0].text, "sigue con el paso 2", "no reescribe el prompt de continuación");
+
+  const inp2 = { parts: [{ type: "text", text: "listo, terminé la tarea" }], taskId };
+  await hooks["chat.message"](inp2, { parts: [], system: [] });
+  assert.ok(inp2.parts[0].text.startsWith("⛔"), "hard block sigue activo en claims de DONE con pendientes");
+
+  try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
+  } catch {}
+});
+
 test("Hard Block: claim de DONE con requisitos pendientes inyecta directiva de bloqueo en output.parts", async () => {
   const taskId = `hb-${Date.now()}`;
   const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
