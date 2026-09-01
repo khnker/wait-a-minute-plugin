@@ -12,8 +12,10 @@ Pre-flight cognitive layer for OpenCode that intercepts prompts for strategic an
 - **Self-Contained Skill Registry with Real Content**: Ships a curated, versioned catalog (~2,097 skills) with the actual SKILL.md body of each skill embedded. `loadSkillOnDemand` materializes the real SKILL.md to disk — no network, no external repos at runtime.
 - **Hard Block on DONE**: A premature completion claim is not just flagged — the incoming claim itself is rewritten into a blocking directive, so the agent never sees a "finished" instruction with pending requirements.
 - **Task Resume**: State persists per task; `/wam task switch <id>` sets the active task and the hook re-injects its phase and pending requirements on the next message.
+- **Continuation Fast-Path**: With an APPROVED contract, follow-up messages (no DONE claim) are NOT intercepted — no contract block, no progress line, no re-analysis. The agent flows uninterrupted; the expensive registry routing is skipped.
+- **Caveman Compression & Headroom**: All WAM injections are terse (caveman style — no articles, no filler) to preserve context headroom. `/wam compress` emits a one-line task summary with a token/headroom report and persists `caveman-summary.md`.
 - **Single Router**: One weighted scoring algorithm (name:5, capability:4, keyword:3, description:2, domain:1).
-- **CLI (`/wam`)**: Inspect the bundled catalog, audit strategies, approve contracts and track progress.
+- **CLI (`/wam`)**: Inspect the bundled catalog, audit strategies, approve contracts, track progress, resume tasks and compress summaries.
 
 ## Self-Contained Architecture
 
@@ -55,6 +57,17 @@ When routing selects a skill, `loadSkillOnDemand` materializes the skill's embed
 
 The hook detects task-completion claims (`done`, `finished`, `listo`, `terminé`, `completa`, …). If the persisted task state still has pending requirements, a blocking instruction is injected as the first system entry **and the incoming claim is rewritten** into a "do not declare DONE — continue with the next pending requirement" directive: the agent may not see a premature completion. When every requirement is `done`, DONE is permitted and the phase transitions to `DONE`.
 
+## Continuation Fast-Path
+
+Once a contract is APPROVED, subsequent messages that are **not** DONE claims return immediately from the hook: no validation block, no progress line, no skill routing, no state churn. The agent keeps executing without interruption. Only DONE claims (gate) and new tasks (no state) trigger the full pre-flight. This also skips the expensive 21 MB registry routing on every continuation.
+
+## Caveman Compression & Headroom
+
+- Every WAM injection is compressed with `cavemanify()` (strips `a/an/the/just/really/basically/actually/simply` and fillers) to minimize context usage.
+- `/wam compress [<taskId>]` prints a terse task summary plus a headroom report: `[tokens N | headroom H/BUDGET]`, and persists `caveman-summary.md` next to `summary.md` under `.wam/tasks/<id>/`.
+- Headroom budget is configurable via `budgetTokens` (default `32000`, `cfg.budgetTokens`); estimate is a chars/4 proxy (no tokenizer).
+- `updateTaskMemory` always derives the caveman variant alongside the full summary.
+
 ## Task State & Contract Lifecycle
 
 Task state persists per task in `.wam/tasks/<id>/state.yaml`: `contract`, per-requirement `requirements` (with evidence), `phase`, and a derived `nextAction`. Lifecycle: `PROPOSED → APPROVED → IMPLEMENTING → VERIFYING → DONE` (+ `REJECTED`).
@@ -72,6 +85,11 @@ Task state persists per task in `.wam/tasks/<id>/state.yaml`: `contract`, per-re
 - `/wam progress <id> pending`: Undo a requirement.
 - `/wam task list`: List persisted tasks with phase/contract status (active marked).
 - `/wam task switch <id>`: Set the active task to resume; the hook re-injects its state on the next message.
+- `/wam compress [<taskId>]`: Terse caveman summary + token/headroom report; persists `caveman-summary.md`.
+
+## Configuration
+
+Plugin-level flags (in `DEFAULT_CONFIG`, overridable via `setConfig`): `silent` (default `false` — skip injections entirely when `true`), `budgetTokens` (default `32000` — headroom budget for `/wam compress`).
 
 ## License
 MIT © khnker
