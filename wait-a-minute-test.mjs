@@ -328,10 +328,15 @@ try {
   });
   state.contract.status = 'APPROVED';
   const g2 = waitAMinute.evaluateCompletionGate(state, 'task complete');
-  assert(g2.blocked === false && g2.allDone === true, 'Gate permite DONE con todos los requisitos cumplidos');
+  assert(g2.blocked === true && g2.verifying === true, `Gate exige verificación con reqs done (got ${JSON.stringify(g2)})`);
+  state.requirements.forEach((r) => {
+    r.status = 'verified';
+  });
+  const g2b = waitAMinute.evaluateCompletionGate(state, 'task complete');
+  assert(g2b.blocked === false && g2b.allDone === true, 'Gate permite DONE con todos los requisitos verified');
   const g3 = waitAMinute.evaluateCompletionGate(state, 'hacer commit de los cambios');
   assert(g3.blocked === false, 'Prompt sin claim de fin no bloquea');
-  console.log('   ✓ bloquea DONE con pendientes, permite cuando todo done');
+  console.log('   ✓ bloquea DONE con pendientes, exige verified, permite cuando todo verified');
   passed++;
 } catch (e) {
   console.log(`   ✗ Falló: ${e.message}`);

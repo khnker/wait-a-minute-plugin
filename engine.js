@@ -1101,6 +1101,63 @@ function determineMode(classification, projectInfo, riskLevel) {
 /**
  * Main analysis function - entry point for the plugin
  */
+/**
+ * Synthesiza un Completion Contract específico a partir del prompt (rule-based,
+ * sin LLM): descompone cláusulas accionables y deriva requisitos/verificación.
+ * Fallback: genéricos si no se puede extraer nada.
+ */
+export function synthesizeContract(prompt = "", mode = "NORMAL") {
+  const requirements = [];
+  const verification = [];
+  const clauses = (prompt || "")
+    .split(/[;,]|\by\b|\b\+\b|\band\b|\bplus\b/i)
+    .map((c) => c.trim())
+    .filter((c) => c.length > 4);
+  const clean = (c) =>
+    c
+      .replace(/^(agrega|agregar|implementa|implementar|crea|crear|haz|hacer|refactoriza|refactorizar|migra|migrar|configura|configurar|habilita|habilitar|elimina|eliminar|arregla|arreglar|fix|fixear)\s+/i, "")
+      .replace(/[.!¿?]$/, "")
+      .trim();
+  const verbFor = (clause) =>
+    /^(elimina|eliminar|quita|quitar)/i.test(clause)
+      ? "Eliminar"
+      : /^(configura|configurar|habilita|habilitar)/i.test(clause)
+        ? "Configurar"
+        : /^(migra|migrar)/i.test(clause)
+          ? "Migrar"
+          : "Implementar";
+
+  for (const clause of clauses) {
+    const cleaned = clean(clause);
+    if (!cleaned || cleaned.length < 3) continue;
+    const cap = cleaned[0].toUpperCase() + cleaned.slice(1);
+    requirements.push(`${verbFor(clause)}: ${cap}`);
+  }
+
+  const lower = (prompt || "").toLowerCase();
+  if (/test|prueba|suite/i.test(lower)) {
+    requirements.push("Agregar tests para el cambio");
+    verification.push("Ejecutar suite de tests relevante");
+  }
+  if (/migra|migrate|migración|refresh.?token/i.test(lower)) {
+    requirements.push("Invalidar/rotar credenciales anteriores");
+    verification.push("Verificar integridad de datos post-migración");
+  }
+  if (/security|seguridad|auth|oauth|token/i.test(lower)) {
+    requirements.push("Auditar seguridad del cambio");
+    verification.push("Revisar superficie de autenticación/secretos");
+  }
+  if (/cache|redis|rendimiento|performance/i.test(lower)) {
+    verification.push("Medir impacto de rendimiento");
+  }
+  if (!verification.length) verification.push("Evidencia de satisfacción del contrato");
+
+  if (!requirements.length) {
+    requirements.push("Tarea completada según intención", "Resultados verificables");
+  }
+  return { requirements, constraints: [], verification, status: "PROPOSED", rigor: mode };
+}
+
 export async function analyze(options) {
   const {
     prompt,
@@ -1152,17 +1209,8 @@ export async function analyze(options) {
     }
   } catch {}
 
-  // Completion Contract proposal
-  const completionContract = {
-    requirements: [
-        "Tarea completada según intención",
-        "Resultados verificables"
-    ],
-    constraints: [],
-    verification: ["Evidencia de satisfacción del contrato"],
-    status: "PROPOSED",
-    rigor: modeInfo.mode
-  };
+  // Completion Contract proposal — específico del prompt (rule-based)
+  const completionContract = synthesizeContract(prompt, modeInfo.mode);
 
   // Step 7: Build the output
   const result = {

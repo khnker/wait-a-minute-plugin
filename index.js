@@ -1,5 +1,5 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens } from "./engine.js";
-import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange } from "./memory.js";
+import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision } from "./memory.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -54,7 +54,8 @@ function emitTextPart(output, text, meta = {}) {
 function nextActionFrom(state) {
   const pending = (state?.requirements || []).find((r) => !["done", "verified"].includes(r.status));
   if (pending) return `Implementar ${pending.title} (${pending.id} ${pending.status})`;
-  if (state?.requirements?.length && state.requirements.some(r => r.status === "implemented")) return "Verificar requisitos antes de DONE";
+  const unverified = (state?.requirements || []).find((r) => r.status === "done");
+  if (unverified) return `Verificar ${unverified.title} — /wam progress ${unverified.id} verified <evidencia>`;
   if (state?.requirements?.length) return "Verificar requisitos completos antes de DONE";
   return "Continuar tarea";
 }
@@ -90,9 +91,12 @@ function listTaskIds() {
 // -- operational memory (memory.js): contexto inicial acelerador (spec §13) --
 
 function updateProjectMemo(analysis) {
-  const pi = analysis?.projectInfo;
+  const pi = analysis?.project || analysis?.projectInfo;
   if (!pi) return;
-  const known = (pi.known || []).filter((k) => /package\.json|Dependencias|framework|AGENTS\.md|openspec/i.test(k));
+  const known = [];
+  if (pi.detected_stack && pi.detected_stack !== "unknown") known.push(`Stack: ${pi.detected_stack}`);
+  if (pi.architecture && pi.architecture !== "unknown") known.push(`Arquitectura: ${pi.architecture}`);
+  for (const f of pi.relevant_files || []) known.push(`Artefacto: ${f}`);
   const inferred = pi.inferred || [];
   const assumed = pi.assumed || [];
   if (!known.length && !inferred.length && !assumed.length) return;
@@ -156,7 +160,7 @@ function extractPrompt(input, output) {
 function applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom) {
   const gate = waitAMinute.evaluateCompletionGate(state, promptText);
   if (gate.blocked) {
-    state.phase = "IMPLEMENTING";
+    state.phase = gate.verifying ? "VERIFYING" : "IMPLEMENTING";
     state.nextAction = nextActionFrom(state);
     persistTaskState(taskId, state);
   } else if (gate.allDone) {
@@ -326,7 +330,18 @@ const WaitAMinutePlugin = async (pluginInput) => {
       const needsApproval = updatedState.phase === "PROPOSED" && !isApproved;
 
       if (!needsApproval || lower.includes("continuar") || lower.includes("aprobar contrato")) {
-        if (needsApproval) waitAMinute.approveContract(taskId);
+        if (needsApproval) {
+          waitAMinute.approveContract(taskId);
+          try {
+            recordDecision({
+              id: `strategy-${taskId}-${Date.now()}`,
+              decision: `Aprobar estrategia ${analysis.strategy || "NORMAL"} para ${taskId}`,
+              reason: promptText.slice(0, 120),
+              source: "user-decided",
+              confidence: "high",
+            });
+          } catch {}
+        }
       } else {
         // Bloquear ejecución si no está aprobado
         updatedState.phase = "PROPOSED";
@@ -436,8 +451,9 @@ function wamCli(args, cfg = {}) {
         .join("\n");
     }
     if (op === "done") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "done", evidence.join(" ")));
+    if (op === "verified") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "verified", evidence.join(" ")));
     if (op === "pending") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "pending", ""));
-    return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> pending";
+    return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> verified <evidencia> | /wam progress <id> pending";
   }
 
   if (sub === "compress") {
@@ -673,23 +689,31 @@ const waitAMinute = {
     const doneClaims =
       /(^|\s)(done|finish|finished|complete|completed|terminate|terminated|listo|termin[eé]|complet[ao]|finalizad[oa])\b|(task|tarea)\s+(complete|complet(a|ada|o)|terminad(a|o))|declare.*done/i;
     if (!doneClaims.test(lower)) return { blocked: false };
-    const pending = (state?.requirements || []).filter((r) => r.status !== "done" || !(r.evidence || []).length);
-    if (pending.length === 0) {
-      if (state?.contract?.status !== "APPROVED") {
-        return {
-          blocked: true,
-          pending: [`contrato ${state.contract?.status || "PROPOSED"} — aprobar con /wam contract approve antes de DONE`],
-        };
-      }
-      return { blocked: false, allDone: true };
+    const pending = (state?.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified");
+    if (pending.length > 0) {
+      return {
+        blocked: true,
+        pending: pending.map((r) => {
+          const missingEvidence = r.status === "done" && !(r.evidence || []).length;
+          return `${r.id} — ${r.title}${missingEvidence ? " (sin evidencia)" : ""}`;
+        }),
+      };
     }
-    return {
-      blocked: true,
-      pending: pending.map((r) => {
-        const missingEvidence = r.status === "done" && !(r.evidence || []).length;
-        return `${r.id} — ${r.title}${missingEvidence ? " (sin evidencia)" : ""}`;
-      }),
-    };
+    if (state?.contract?.status !== "APPROVED") {
+      return {
+        blocked: true,
+        pending: [`contrato ${state.contract?.status || "PROPOSED"} — aprobar con /wam contract approve antes de DONE`],
+      };
+    }
+    const unverified = (state?.requirements || []).filter((r) => r.status !== "verified");
+    if (unverified.length > 0) {
+      return {
+        blocked: true,
+        verifying: true,
+        pending: unverified.map((r) => `${r.id} — ${r.title} (verificar: /wam progress ${r.id} verified <evidencia>)`),
+      };
+    }
+    return { blocked: false, allDone: true };
   },
 
   /** Aprueba el contrato: PROPOSED → APPROVED, fase → IMPLEMENTING. */
@@ -744,11 +768,14 @@ const waitAMinute = {
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const req = (state.requirements || []).find((r) => r.id === reqId);
     if (!req) return { ok: false, reason: `Requisito ${reqId} no existe` };
-    if (status === "done" && !(evidence && evidence.trim())) {
-      return { ok: false, reason: `Requisito ${reqId}: evidencia requerida para marcar done` };
+    if ((status === "done" || status === "verified") && !(evidence && evidence.trim())) {
+      return { ok: false, reason: `Requisito ${reqId}: evidencia requerida para marcar ${status}` };
+    }
+    if (status === "verified" && req.status !== "done") {
+      return { ok: false, reason: `Requisito ${reqId}: marcar done antes de verified` };
     }
     req.status = status;
-    if (status === "done") req.evidence.push(evidence.trim());
+    if (status === "done" || status === "verified") req.evidence.push(evidence.trim());
     if (status === "pending") req.evidence = [];
     state.nextAction = nextActionFrom(state);
     persistTaskState(taskId, state);
@@ -877,3 +904,4 @@ Object.keys(waitAMinute).forEach((k) => {
 });
 
 export default WaitAMinutePlugin;
+export { updateProjectMemo };

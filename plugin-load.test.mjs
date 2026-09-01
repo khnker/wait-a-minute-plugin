@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import pluginDefault from "./index.js";
+import pluginDefault, { updateProjectMemo } from "./index.js";
 import { getTaskState } from "./engine.js";
 import { routeSkillsV2 } from "./engine.js";
 
@@ -168,6 +168,66 @@ test("Task Resume: /wam task switch fija tarea activa; chat.message persiste baj
     fs.rmSync(path.join(process.cwd(), ".wam", "active-task"), { force: true });
     fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
   } catch {}
+});
+
+test("Contract Synthesizer: requisitos específicos del prompt, no genéricos", async () => {
+  const r = await pluginDefault.analyze({
+    prompt: "implementa refresh-token rotation y agrega tests de integración",
+  });
+  const reqs = r.completionContract?.requirements || [];
+  assert.ok(reqs.length >= 3, `requisitos específicos (got ${reqs.length}: ${reqs.join(" | ")})`);
+  assert.ok(!reqs.includes("Tarea completada según intención"), "no genéricos");
+  assert.ok(reqs.some((x) => /refresh.?token/i.test(x)), "requisito de rotation");
+  assert.ok(reqs.some((x) => /tests/i.test(x)), "requisito de tests");
+});
+
+test("VERIFYING: done sin verificar bloquea DONE → fase VERIFYING; verified permite DONE", async () => {
+  const taskId = `ver-${Date.now()}`;
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+
+  await hooks["chat.message"](
+    { parts: [{ type: "text", text: "implementa refresh-token rotation y agrega tests de integración" }], taskId },
+    { parts: [], system: [] }
+  );
+  assert.equal(pluginDefault.approveContract(taskId).ok, true);
+
+  const st1 = getTaskState(taskId);
+  const reqs = st1.requirements;
+  assert.ok(reqs.length >= 3, "contrato específico");
+  for (const req of reqs) {
+    const done = pluginDefault.markRequirement(taskId, req.id, "done", `implementado ${req.title}`);
+    assert.equal(done.ok, true);
+  }
+
+  const inp = { parts: [{ type: "text", text: "terminé, done" }], taskId };
+  await hooks["chat.message"](inp, { parts: [], system: [] });
+  assert.ok(inp.parts[0].text.includes("COMPLETION GATE"), "DONE bloqueado con reqs sin verificar");
+  const st2 = getTaskState(taskId);
+  assert.equal(st2.phase, "VERIFYING", "fase pasa a VERIFYING");
+
+  for (const req of getTaskState(taskId).requirements) {
+    const ver = pluginDefault.markRequirement(taskId, req.id, "verified", "npm test pasa");
+    assert.equal(ver.ok, true);
+  }
+  const inp2 = { parts: [{ type: "text", text: "listo, done" }], taskId };
+  await hooks["chat.message"](inp2, { parts: [], system: [] });
+  const st3 = getTaskState(taskId);
+  assert.equal(st3.phase, "DONE", "DONE permitido tras verificar todos");
+
+  try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
+  } catch {}
+});
+
+test("Operational Memory: updateProjectMemo mapea analysis.project → project.md", async () => {
+  updateProjectMemo({
+    project: { detected_stack: "nodejs", architecture: "unknown", relevant_files: ["package.json"] },
+  });
+  const projectMd = path.join(process.cwd(), ".wam", "context", "project.md");
+  assert.ok(fs.existsSync(projectMd), "project.md generado desde analysis.project");
+  const body = fs.readFileSync(projectMd, "utf-8");
+  assert.ok(/nodejs|package\.json/.test(body), `project.md poblado (${body.slice(0, 80)})`);
+  fs.rmSync(projectMd, { force: true });
 });
 
 test("cavemanify + /wam compress: resumen terse y headroom reportado", async () => {
