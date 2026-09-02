@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getOperationalContext, summarizeOperationalContext } from "./memory.js";
-import { selectContext, estimateCapsuleTokens } from "./context.js";
+import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
 
 const POLICIES = ["scope(ACTIVE)", "verify(ACTIVE)", "simplify(ACTIVE)"];
 
@@ -129,9 +129,14 @@ export function assembleContext({
 
     // -- N3 Session (capsules por utility) ----------------------------------
     if (!isTrivial) {
-      const pkg = selectContext(prompt, { budget: budget - used, root: projectPath });
+      const pkg = selectContext(prompt, { budget: budget - used, root: projectPath, sessionId: getSessionId(projectPath) });
       for (const c of pkg.capsules) {
-        const line = `[wam N3 ${c.level} ${c.provenance}] ${c.context_id} — ${(c.purpose || c.content || "").slice(0, 100)}`;
+        const head = `[wam N3 ${c.level} ${c.provenance}] ${c.context_id} — ${(c.purpose || "").slice(0, 100)}`;
+        const contentMax = 800;
+        const truncated = (c.content || "").length > contentMax
+          ? c.content.slice(0, contentMax) + `...[truncado: ver /wam ctx get ${c.context_id}]`
+          : (c.content || "");
+        const line = truncated ? `${head}\n  content: ${truncated.replace(/\n+/g, " ").slice(0, contentMax)}` : head;
         spend("N3", line);
       }
       if (pkg.sufficiency === "insufficient") {
