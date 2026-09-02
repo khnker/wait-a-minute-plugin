@@ -296,17 +296,18 @@ export function selectContext(task, { budget = 8000, root, sessionId, log = true
     .filter((u) => u.relevance > 0)
     .sort((a, b) => b.value - a.value);
 
-  const seenScopes = new Set();
+  const seenContent = new Set();
   for (const u of candidates) {
     const c = u.c;
     if (c.superseded_by) {
       rationale.push(`${c.context_id}: superseded por ${c.superseded_by} (omitido)`);
       continue;
     }
-    // redundancia: mismo scope normalizado ya incluido
-    const scopeKey = (c.scope || c.purpose).toLowerCase().trim().slice(0, 60);
-    if (seenScopes.has(scopeKey)) {
-      rationale.push(`${c.context_id}: duplica scope de ${[...seenScopes].pop()} (omitido)`);
+    // redundancia: mismo contenido normalizado ya incluido (scope NO es
+    // identidad — dos capsules del mismo módulo son conocimiento distinto)
+    const contentKey = (c.content || c.purpose || "").toLowerCase().trim().slice(0, 120);
+    if (seenContent.has(contentKey)) {
+      rationale.push(`${c.context_id}: duplica contenido de capsule ya incluida (omitido)`);
       continue;
     }
     const t = estimateCapsuleTokens(c);
@@ -316,7 +317,7 @@ export function selectContext(task, { budget = 8000, root, sessionId, log = true
     }
     selected.push(c);
     used += t;
-    seenScopes.add(scopeKey);
+    seenContent.add(contentKey);
     rationale.push(`${c.context_id}: utility ${u.value.toFixed(4)} (rel ${u.relevance.toFixed(2)} × imp ${u.importance.toFixed(2)} × fresh ${u.fresh.toFixed(2)} × conf ${u.confidence.toFixed(2)})`);
   }
 
