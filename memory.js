@@ -317,6 +317,28 @@ export function updateLiveContext(taskId, state = {}, root) {
 
 // -- recuperación de contexto (espec §13) -----------------------------------
 
+export function updateProjectMemo(analysis, root) {
+  const pi = analysis?.project || analysis?.projectInfo;
+  if (!pi) return;
+  const known = [];
+  if (pi.detected_stack && pi.detected_stack !== "unknown") known.push(`Stack: ${pi.detected_stack}`);
+  if (pi.architecture && pi.architecture !== "unknown") known.push(`Arquitectura: ${pi.architecture}`);
+  for (const f of pi.relevant_files || []) known.push(`Artefacto: ${f}`);
+  const inferred = pi.inferred || [];
+  const assumed = pi.assumed || [];
+  if (!known.length && !inferred.length && !assumed.length) return;
+  const body = [
+    "# Project Context",
+    "",
+    ...(known.length ? ["## Stack (observed)", ...known.map((k) => `- ${k}`)] : []),
+    ...(inferred.length ? ["", "## Inferred", ...inferred.map((i) => `- ${i}`)] : []),
+    ...(assumed.length ? ["", "## Assumed", ...assumed.map((a) => `- ${a}`)] : []),
+  ].join("\n");
+  const { project } = getOperationalContext(root);
+  if (project.body.trim() === body.trim()) return;
+  updateContext("project", body, { source: "observed", confidence: inferred.length ? "medium" : "high" }, root);
+}
+
 export function getOperationalContext(root) {
   const ctx = {};
   for (const [key, name] of Object.entries(CONTEXT_FILES)) {

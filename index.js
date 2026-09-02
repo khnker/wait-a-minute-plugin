@@ -1,5 +1,5 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
-import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, updateLiveContext } from "./memory.js";
+import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, updateLiveContext } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession } from "./context.js";
 import { assembleContext } from "./assembly.js";
 import fs from "node:fs";
@@ -94,28 +94,6 @@ function listTaskIds() {
 }
 
 // -- operational memory (memory.js): contexto inicial acelerador (spec §13) --
-
-function updateProjectMemo(analysis) {
-  const pi = analysis?.project || analysis?.projectInfo;
-  if (!pi) return;
-  const known = [];
-  if (pi.detected_stack && pi.detected_stack !== "unknown") known.push(`Stack: ${pi.detected_stack}`);
-  if (pi.architecture && pi.architecture !== "unknown") known.push(`Arquitectura: ${pi.architecture}`);
-  for (const f of pi.relevant_files || []) known.push(`Artefacto: ${f}`);
-  const inferred = pi.inferred || [];
-  const assumed = pi.assumed || [];
-  if (!known.length && !inferred.length && !assumed.length) return;
-  const body = [
-    "# Project Context",
-    "",
-    ...(known.length ? ["## Stack (observed)", ...known.map((k) => `- ${k}`)] : []),
-    ...(inferred.length ? ["", "## Inferred", ...inferred.map((i) => `- ${i}`)] : []),
-    ...(assumed.length ? ["", "## Assumed", ...assumed.map((a) => `- ${a}`)] : []),
-  ].join("\n");
-  const { project } = getOperationalContext();
-  if (project.body.trim() === body.trim()) return;
-  updateContext("project", body, { source: "observed", confidence: inferred.length ? "medium" : "high" });
-}
 
 function projectState(analysis) {
   return {
@@ -1266,5 +1244,3 @@ Object.keys(waitAMinute).forEach((k) => {
 });
 
 export default WaitAMinutePlugin;
-export { updateProjectMemo };
-

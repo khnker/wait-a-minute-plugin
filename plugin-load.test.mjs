@@ -16,7 +16,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import pluginDefault, { updateProjectMemo } from "./index.js";
+import pluginDefault from "./index.js";
+import { updateProjectMemo } from "./memory.js";
 import { getTaskState } from "./engine.js";
 import { routeSkillsV2 } from "./engine.js";
 
