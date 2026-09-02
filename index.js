@@ -1241,9 +1241,12 @@ const waitAMinute = {
         
         // Agregar directiva clara de ejecución
         ctx.parts.push({
+          id: genPartId(),
           type: "text",
           text: `\n[wam: fase ${analysis.phase || "IMPLEMENTING"} → ${analysis.nextAction || "continuar"}]`,
-          synthetic: true
+          synthetic: true,
+          ...(meta.sessionID ? { sessionID: meta.sessionID } : {}),
+          ...(meta.messageID ? { messageID: meta.messageID } : {}),
         });
       } else if (ctx.system) {
         ctx.system.unshift({ id: genPartId(), type: "text", text, synthetic: true });
