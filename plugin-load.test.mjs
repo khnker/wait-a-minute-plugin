@@ -436,3 +436,43 @@ test("task_isolation live: A→B→A — el live context alterna sin contaminaci
     fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskB), { recursive: true, force: true });
   } catch {}
 });
+
+test("session root real: client.session.get resuelve el directorio de la sesión (server multi-proyecto)", async () => {
+  const realDir = fs.mkdtempSync(path.join(os.tmpdir(), "wam-real-"));
+  const hooks = await pluginDefault({
+    directory: process.cwd(), // cwd del server (proyecto A)
+    client: {
+      session: { get: async () => ({ location: { directory: realDir } }) }, // sesión en proyecto B
+    },
+    project: {},
+    $: {},
+  });
+  const taskId = `real-${Date.now()}`;
+  const out = { parts: [], system: [] };
+  await hooks["chat.message"](
+    { sessionID: "s-multi", parts: [{ type: "text", text: "implementa el fix en scraper" }], taskId },
+    out
+  );
+  assert.ok(
+    fs.existsSync(path.join(realDir, ".wam", "tasks", taskId, "state.yaml")),
+    ".wam creado en el directorio real de la sesión (initMemory al iniciar sesión)"
+  );
+  assert.ok(
+    !fs.existsSync(path.join(process.cwd(), ".wam", "tasks", taskId)),
+    "NO contamina el cwd del server"
+  );
+  try {
+    fs.rmSync(realDir, { recursive: true, force: true });
+  } catch {}
+});
+
+test("client.session.get ausente → fallback al directory del plugin (compat)", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wam-fb-"));
+  const hooks = await pluginDefault({ directory: tmp, client: {}, project: {}, $: {} });
+  const taskId = `fb-${Date.now()}`;
+  await hooks["chat.message"]({ parts: [{ type: "text", text: "tarea de compat" }], taskId }, { parts: [], system: [] });
+  assert.ok(fs.existsSync(path.join(tmp, ".wam", "tasks", taskId, "state.yaml")), "fallback usa pluginInput.directory");
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  } catch {}
+});

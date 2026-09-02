@@ -200,13 +200,41 @@ const WaitAMinutePlugin = async (pluginInput) => {
   // Track if plugin is bypassed
   let bypassed = false;
 
-  // Multi-repo: root real de cada sesión (capturado del cwd de los tools),
-  // NO el cwd del proceso server. Un server web multi-proyecto usa esto.
+  // Multi-repo: root real de cada sesión. La factory del plugin V1 es GLOBAL
+  // al server (pluginInput.directory = cwd donde se lanzó opencode), pero cada
+  // sesión tiene su propio directorio de trabajo (location.directory) — lo
+  // consultamos vía client.session.get para no depender del cwd del proceso.
   const sessionRoots = new Map();
+  const client = pluginInput?.client;
 
-  // .wam root para esta sesión+mensaje: repo git objetivo, no el cwd del proceso.
-  const wamRootFor = (sessionID, promptText) =>
-    resolveWamRoot(promptText, sessionRoots.get(sessionID) || projectDirectory);
+  async function resolveSessionBase(sessionID) {
+    if (sessionRoots.has(sessionID)) return sessionRoots.get(sessionID);
+    let base = projectDirectory;
+    try {
+      const info = client?.session?.get && sessionID ? await client.session.get({ sessionID }) : null;
+      if (info?.location?.directory) base = info.location.directory;
+    } catch {
+      // fallback: cwd del server
+    }
+    sessionRoots.set(sessionID, base);
+    return base;
+  }
+
+  // .wam root para esta sesión+mensaje: repo git objetivo de la sesión real.
+  const wamRootFor = async (sessionID, promptText) => {
+    const base = await resolveSessionBase(sessionID);
+    return resolveWamRoot(promptText, base);
+  };
+
+  // Al iniciar/retomar cualquier sesión la memoria .wam debe existir.
+  // initMemory es idempotente: crea .wam/context si falta, no fabrica nada.
+  const ensureWamMemory = async (sessionID, promptText) => {
+    const root = await wamRootFor(sessionID, promptText);
+    try {
+      initMemory(root);
+    } catch {}
+    return root;
+  };
 
   // -------------------------------------------------------------------------
   // opencode 1.18.25 plugin API: factory RETURNS the hooks object
@@ -224,8 +252,9 @@ const WaitAMinutePlugin = async (pluginInput) => {
       const promptText = extractPrompt(input, output);
       if (!promptText.trim()) return;
 
-      // Multi-repo: root de .wam del repo git objetivo de ESTE mensaje
-      const wamRoot = wamRootFor(input.sessionID, promptText);
+      // Al iniciar/retomar sesión: memoria .wam garantizada en el repo git de
+      // la sesión real (no el cwd del server). initMemory idempotente.
+      const wamRoot = await ensureWamMemory(input.sessionID, promptText);
 
       // No-task-assumption: intención de resume sin tarea activa → preguntar, no asumir
       const RESUME_RE = /\b(en qué estábamos|en que estabamos|dónde íbamos|donde íbamos|sigamos|continuemos|retomar la tarea)\b/i;
@@ -484,7 +513,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       output.parts.push({
         id: genPartId(),
         type: "text",
-        text: wamCli((input.arguments || "").split(/\s+/), cfg, sessionRoots.get(input.sessionID) || projectDirectory),
+        text: wamCli((input.arguments || "").split(/\s+/), cfg, await resolveSessionBase(input.sessionID)),
       });
     },
 
@@ -496,16 +525,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
     "tool.execute.before": async (input, output) => {
       try {
         if (bypassed) return;
-        const sid = input?.sessionID;
-        if (sid && output?.args) {
-          const cwd = output.args.path?.cwd || output.args.workdir || output.args.cwd;
-          if (cwd && !sessionRoots.has(sid)) {
-            try {
-              sessionRoots.set(sid, path.resolve(projectDirectory, cwd));
-            } catch {}
-          }
-        }
-        const taskRoot = sessionRoots.get(sid) || projectDirectory;
+        const taskRoot = await resolveSessionBase(input?.sessionID);
         const taskId = readActiveTaskId(taskRoot) || "default-task";
         const st = getTaskState(taskId, taskRoot);
         if (st?.phase !== "ASKING") return;
