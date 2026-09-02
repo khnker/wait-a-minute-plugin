@@ -558,3 +558,26 @@ test("incertidumbre: prompt ambiguo pide aprobación; confirmación natural 'sí
   assert.equal(st.contract?.status, "APPROVED", "confirmación 'si' aprueba el contrato");
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
 });
+
+test("multi-sesión: 2 sesiones sobre la MISMA carpeta tienen tareas aisladas (namespace ses-<id>)", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wam-2sess-"));
+  const hooks = await pluginDefault({ directory: tmp, client: {}, project: {}, $: {} });
+
+  // sesión A (taskId genérico → namespace ses-A)
+  await hooks["chat.message"]({ sessionID: "sesA-aaaaaaaaaa", parts: [{ type: "text", text: "refactoriza el scraper con tests" }] }, { parts: [], system: [] });
+  // sesión B (misma carpeta, taskId genérico → namespace ses-B)
+  await hooks["chat.message"]({ sessionID: "sesB-bbbbbbbbbb", parts: [{ type: "text", text: "arregla el bug del frontend" }] }, { parts: [], system: [] });
+
+  const taskA = getTaskState("ses-" + "sesA-aaaaaaaaaa".slice(-10), tmp);
+  const taskB = getTaskState("ses-" + "sesB-bbbbbbbbbb".slice(-10), tmp);
+  assert.ok(taskA, "sesión A con su propia tarea");
+  assert.ok(taskB, "sesión B con su propia tarea");
+  assert.notEqual(taskA.taskId ?? JSON.stringify(taskA.contract?.requirements), JSON.stringify(taskB.contract?.requirements), "contratos distintos");
+  assert.ok(taskA.contract?.requirements?.some((r) => /scrap/i.test(r)), "A conserva su dominio (scraper)");
+  assert.ok(taskB.contract?.requirements?.some((r) => /front/i.test(r)), "B conserva su dominio (frontend)");
+
+  // live context aislado por sesión
+  const liveA = fs.existsSync(path.join(tmp, ".wam", "context", "task-context-ses-" + "sesA-aaaaaaaaaa".slice(-10) + ".md"));
+  assert.ok(liveA, "live context aislado para sesión A");
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+});

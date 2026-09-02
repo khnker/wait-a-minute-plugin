@@ -93,6 +93,63 @@ function listTaskIds(root) {
   }
 }
 
+// -- Persistencia por sesión: N sesiones pueden trabajar la MISMA carpeta sin
+// colisionar en default-task / task-context.md / active-task. ----------------
+
+const GENERIC_TASK = /^(default-task|task|general|)$/;
+
+/**
+ * taskId efectivo de WAM para un mensaje:
+ * - input.taskId explícito y específico (conversación de opencode) → se usa tal cual
+ * - taskId genérico (default-task) → namespace por sesión: ses-<sessionID>
+ * - sin taskId ni sesión conocida → active-task global de la carpeta
+ */
+function effectiveTaskId(input, sessionTasks, wamRoot) {
+  if (input?.taskId && !GENERIC_TASK.test(input.taskId)) return input.taskId;
+  const cached = sessionTasks?.get?.(input?.sessionID);
+  if (cached) return cached;
+  // active global de la carpeta (fijado explícito via /wam task switch o resume)
+  const active = readActiveTaskId(wamRoot);
+  if (active) return active;
+  // sesión nueva en carpeta sin active → namespace por sesión (N sesiones aisladas)
+  if (input?.sessionID) return `ses-${input.sessionID.slice(-10)}`;
+  return "default-task";
+}
+
+function liveFileFor(root, taskId) {
+  const perSession = path.join(root || process.cwd(), ".wam", "context", `task-context-${taskId}.md`);
+  return perSession;
+}
+
+function readLiveContext(root, taskId) {
+  const perSession = liveFileFor(root, taskId);
+  try {
+    if (fs.existsSync(perSession)) return fs.readFileSync(perSession, "utf-8").trim();
+  } catch {}
+  try {
+    const global = path.join(root || process.cwd(), ".wam", "context", "task-context.md");
+    if (fs.existsSync(global)) return fs.readFileSync(global, "utf-8").trim();
+  } catch {}
+  return "";
+}
+
+/**
+ * Live context por sesión: escribe el global (última actividad de la carpeta)
+ * y además una copia task-context-<taskId>.md aislada por sesión — dos sesiones
+ * sobre la misma carpeta NO se pisan el N2.
+ */
+function persistLiveContext(taskId, state, root) {
+  updateLiveContext(taskId, state, root);
+  try {
+    const g = path.join(root || process.cwd(), ".wam", "context", "task-context.md");
+    const s = liveFileFor(root, taskId);
+    if (fs.existsSync(g)) {
+      fs.mkdirSync(path.dirname(s), { recursive: true });
+      fs.copyFileSync(g, s);
+    }
+  } catch {}
+}
+
 // -- operational memory (memory.js): contexto inicial acelerador (spec §13) --
 
 function projectState(analysis) {
@@ -314,7 +371,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       // No-task-assumption: intención de resume sin tarea activa → preguntar, no asumir
       const RESUME_RE = /\b(en qué estábamos|en que estabamos|dónde íbamos|donde íbamos|sigamos|continuemos|retomar la tarea)\b/i;
       if (!input.taskId && RESUME_RE.test(promptText)) {
-        const active = readActiveTaskId(wamRoot);
+        const active = sessionTasks.get(input.sessionID) || readActiveTaskId(wamRoot);
         const st = active ? getTaskState(active, wamRoot) : null;
         if (st && st.phase !== "DONE") {
           emitTextPart(output, `[wait-a-minute] Hay una tarea pendiente: ${active} (fase ${st.phase}). ¿Quieres continuarla? Responde /wam resume ${active} o define una tarea nueva — no asumo intención.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
@@ -324,7 +381,9 @@ const WaitAMinutePlugin = async (pluginInput) => {
         return;
       }
 
-      let taskId = input.taskId || readActiveTaskId(wamRoot) || "default-task";
+      // Persistencia por sesión: N sesiones sobre la misma carpeta → cada una
+      // con su propia tarea (namespace ses-<sessionID> si el taskId es genérico).
+      let taskId = effectiveTaskId(input, sessionTasks, wamRoot);
       if (input.sessionID) sessionTasks.set(input.sessionID, taskId);
 
       // Clarification Gate (spec clarification-gate): en ASKING el mensaje se
@@ -390,13 +449,12 @@ const WaitAMinutePlugin = async (pluginInput) => {
             updateProjectMemo({}, wamRoot);
           } catch {}
           try {
-            updateLiveContext(taskId, existingState, wamRoot);
-            const liveFile = path.join(wamRoot, ".wam", "context", "task-context.md");
-            if (fs.existsSync(liveFile)) {
-              const live = fs.readFileSync(liveFile, "utf-8").trim();
+            persistLiveContext(taskId, existingState, wamRoot);
+            const live = readLiveContext(wamRoot, taskId);
+            if (live) {
               const parts = [`[wam N2 task]\n${live}\n`];
               parts.push(...delegationLines(existingState).map((l) => l + "\n"));
-              if (parts.length) emitTextPart(output, parts.join("\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+              emitTextPart(output, parts.join("\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
             }
           } catch {}
           return;
@@ -483,9 +541,9 @@ const WaitAMinutePlugin = async (pluginInput) => {
       const gate = applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom, wamRoot);
       const updatedState = getTaskState(taskId, wamRoot);
 
-      // Contexto vivo: snapshot de la tarea activa, actualizado en cada mensaje
+      // Contexto vivo: snapshot de la tarea activa (global + copia por sesión)
       try {
-        updateLiveContext(taskId, updatedState, wamRoot);
+        persistLiveContext(taskId, updatedState, wamRoot);
       } catch {}
 
       const inject = prepareSystemInject(analysis, updatedState, cfg, wamRoot, waitAMinute, taskId, emitTextPart, input, output);
@@ -594,10 +652,13 @@ const WaitAMinutePlugin = async (pluginInput) => {
     "command.execute.before": async (input, output) => {
       if (input.command !== "wam") return;
       output.parts = output.parts || [];
+      const sid = input.sessionID;
+      const root = await resolveSessionBase(sid);
+      const taskKey = sessionTasks.get(sid) || readActiveTaskId(root) || "default-task";
       output.parts.push({
         id: genPartId(),
         type: "text",
-        text: wamCli((input.arguments || "").split(/\s+/), cfg, await resolveSessionBase(input.sessionID)),
+        text: wamCli((input.arguments || "").split(/\s+/), cfg, root, taskKey),
       });
     },
 
@@ -663,9 +724,9 @@ function classifyAskingMessage(text = "") {
  * /wam CLI — opencode 1.18.25 entrega comandos vía command.execute.before,
  * no vía ctx.command. Lógica extraída del handler antiguo.
  */
-function wamCli(args, cfg = {}, root = process.cwd()) {
+function wamCli(args, cfg = {}, root = process.cwd(), taskId = readActiveTaskId(root) || "default-task") {
   const [sub, action, ...rest] = args || [];
-  const taskId = readActiveTaskId(root) || "default-task";
+  // taskId de la sesión del comando (namespaced ses-<id> si genérico)
 
   if (sub === "skills") {
     const skills = waitAMinute.getRegistry();
@@ -1079,7 +1140,7 @@ const waitAMinute = {
     const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea para: " + taskId };
     if (state.phase === "DONE") return { ok: false, reason: "Tarea DONE — no se reabre automáticamente. Crea una nueva." };
-    writeActiveTaskId(taskId, root);
+    if (!String(taskId).startsWith("ses-")) writeActiveTaskId(taskId, root);
     try {
       updateLiveContext(taskId, state, root);
     } catch {}
