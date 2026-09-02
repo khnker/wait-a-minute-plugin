@@ -32,22 +32,21 @@ test("factory retorna objeto de hooks (no usa ctx.on / ctx.system / ctx.command)
     $: {},
   });
   assert.equal(typeof hooks, "object");
-  for (const key of ["config", "chat.message", "command.execute.before"]) {
+  for (const key of ["chat.message", "command.execute.before"]) {
     assert.equal(typeof hooks[key], "function", `hook ${key} debe ser función`);
   }
+  assert.equal(typeof hooks.config, "undefined", "config hook removido (rompe opencode 1.18.26+)");
   const src = fs.readFileSync(new URL("./index.js", import.meta.url), "utf-8");
   assert.ok(!src.includes("ctx.on("), "no debe usar ctx.on (API vieja)");
   assert.ok(!src.includes("ctx.command &&"), "no debe usar ctx.command (API vieja)");
   assert.ok(!src.includes("ctx.experimental"), "no debe usar ctx.experimental (API vieja)");
 });
 
-test("config hook registra el comando /wam", async () => {
+test("plugin NO expone config hook (comando /wam registrado vía opencode.jsonc)", async () => {
   const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
-  const opencodeConfig = {};
-  await hooks.config(opencodeConfig);
-  assert.ok(opencodeConfig.command?.wam, "debe registrar comando 'wam'");
-  assert.ok(opencodeConfig.command.wam.template === "$ARGUMENTS");
-  assert.ok(opencodeConfig.command.wam.description.startsWith("Wait-a-Minute CLI"));
+  assert.equal(typeof hooks.config, "undefined", "config hook removido — mutaba config y rompe opencode 1.18.26+ (N.config TypeError)");
+  const src = fs.readFileSync(path.join(import.meta.dirname, "index.js"), "utf-8");
+  assert.ok(!/opencodeConfig\.command\["wam"\]/.test(src), "el plugin no registra el comando en runtime");
 });
 
 test("command.execute.before atiende /wam y hace push a output.parts", async () => {

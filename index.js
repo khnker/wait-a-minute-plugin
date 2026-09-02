@@ -226,15 +226,9 @@ const WaitAMinutePlugin = async (pluginInput) => {
   // opencode 1.18.25 plugin API: factory RETURNS the hooks object
   // -------------------------------------------------------------------------
   return {
-    // Register /wam command at load time (config hook)
-    config: async (opencodeConfig) => {
-      opencodeConfig.command ??= {};
-      opencodeConfig.command["wam"] = {
-        template: "$ARGUMENTS",
-        description:
-          "Wait-a-Minute CLI: /wam skills <list|search|inspect|explain> | /wam contract <approve|reject|edit <json>> | /wam progress [<id> <done|verified <evidencia>|pending>] | /wam task <list|switch <id>> | /wam compress [<taskId>] | /wam answer <id> <respuesta>",
-      };
-    },
+    // /wam commands are registered via opencode.jsonc "command" entries on startup,
+    // NOT via a plugin config hook (removed: plugin config hook mutated config and
+    // is incompatible with opencode 1.18.26+, causing `N.config` TypeError).
 
     // Chat message hook — Persistence & Progress Gate
     "chat.message": async (input, output) => {
@@ -1273,3 +1267,4 @@ Object.keys(waitAMinute).forEach((k) => {
 
 export default WaitAMinutePlugin;
 export { updateProjectMemo };
+
