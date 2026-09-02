@@ -24,6 +24,9 @@ import {
   retrieveContext,
   closeSession,
   getSessionLog,
+  resolveWamRoot,
+  extractPaths,
+  clearRepoCache,
 } from "./context.js";
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "wam-ctx-"));
@@ -156,6 +159,32 @@ test("cross-session retrieval: cápsula de otra sesión elegible por relevancia"
   const pkg = selectContext("cómo manejamos refresh token rotation", { budget: 2000, root: ROOT });
   const auth = pkg.capsules.find((c) => /auth/i.test(c.purpose));
   assert.ok(auth, "L2 de sesión previa recuperable por relevancia");
+});
+
+// -- Change 4: multi-repo root resolution -----------------------------------
+
+test("resolveWamRoot: proyecto multi-repo → repo git objetivo del mensaje", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "wam-multi-"));
+  const repoA = path.join(proj, "scraper");
+  const repoB = path.join(proj, "frontend");
+  for (const r of [repoA, repoB]) {
+    fs.mkdirSync(path.join(r, "src"), { recursive: true });
+    fs.writeFileSync(path.join(r, ".git"), "");
+    fs.writeFileSync(path.join(r, "package.json"), JSON.stringify({ name: path.basename(r) }));
+  }
+  clearRepoCache();
+  // term-match: prompt menciona frontend → root frontend
+  assert.equal(resolveWamRoot("arregla el bug del frontend", proj), repoB);
+  // path explícito → repo contenedor
+  assert.equal(resolveWamRoot("revisa /frontend/src/app.tsx", proj), repoB);
+  // sin match → fallback al root del proyecto
+  assert.equal(resolveWamRoot("hola, ¿cómo estás?", proj), proj);
+  fs.rmSync(proj, { recursive: true, force: true });
+});
+
+test("extractPaths: rutas absolutas con extensión de código", () => {
+  const paths = extractPaths('mira /home/user/app/src/index.ts y también /app/config.json:42');
+  assert.deepEqual(paths, ["/home/user/app/src/index.ts", "/app/config.json"]);
 });
 
 cleanup();

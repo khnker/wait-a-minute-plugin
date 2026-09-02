@@ -420,3 +420,99 @@ export function getSessionLog(root) {
     return [];
   }
 }
+
+// -- Change 4: multi-repo root resolution -----------------------------------
+// opencode se abre en un proyecto multi-repo (ej. comparador-precios con
+// scraper/api/frontend internos). El .wam debe vivir en el repo git objetivo
+// del mensaje, NO en el cwd del proceso ni en la raíz del proyecto.
+
+function findGitRepos(root, maxDepth = 3) {
+  const found = [];
+  const seen = new Set();
+  const walk = (dir, depth) => {
+    if (depth > maxDepth) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name === "node_modules" || e.name === ".git" || e.name === ".wam" || e.name === "upstream" || e.name === ".cache") continue;
+      const p = path.join(dir, e.name);
+      if (seen.has(p)) continue;
+      seen.add(p);
+      try {
+        if (fs.existsSync(path.join(p, ".git"))) found.push(p);
+        else walk(p, depth + 1);
+      } catch {}
+    }
+  };
+  walk(root, 0);
+  return found;
+}
+
+function readPkgName(repoRoot) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf-8"));
+    return pkg.name || "";
+  } catch {
+    return "";
+  }
+}
+
+const PATH_RE = /(?:^|\s|["'(])((\/[a-zA-Z0-9_.-]+)+(?:\/[a-zA-Z0-9_.-]+)*\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|py|go|rs|java|css|html|yaml|yml|sh)(?::\d+)?)(?=\s|["')]|$)/g;
+
+export function extractPaths(prompt = "") {
+  const out = [];
+  for (const m of (prompt || "").matchAll(PATH_RE)) {
+    const p = m[1].replace(/:\d+$/, "");
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
+const repoScanCache = new Map();
+
+/**
+ * Resuelve el root de .wam para un mensaje:
+ * 1. paths explícitos del prompt → repo git que los contiene
+ * 2. term-match del prompt contra nombre del repo + package.json name
+ * 3. fallback: sessionRoot
+ */
+export function resolveWamRoot(prompt = "", sessionRoot = process.cwd()) {
+  const repos = [sessionRoot];
+  if (repoScanCache.has(sessionRoot)) {
+    repos.push(...repoScanCache.get(sessionRoot));
+  } else {
+    const nested = findGitRepos(sessionRoot).filter((r) => r !== sessionRoot);
+    repoScanCache.set(sessionRoot, nested);
+    repos.push(...nested);
+  }
+  const repoSet = repos.filter((r) => fileExists(path.join(r, ".git")));
+  if (!repoSet.length) return sessionRoot;
+
+  for (const p of extractPaths(prompt)) {
+    const abs = path.resolve(sessionRoot, p);
+    for (const repo of repoSet) {
+      if (abs === repo || abs.startsWith(repo + path.sep)) return repo;
+    }
+  }
+
+  const promptTokens = tokenize(prompt);
+  let best = sessionRoot;
+  let bestScore = 0;
+  for (const repo of repoSet) {
+    const score = overlapScore(promptTokens, tokenize(`${path.basename(repo)} ${readPkgName(repo)}`));
+    if (score > bestScore) {
+      best = repo;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+export function clearRepoCache() {
+  repoScanCache.clear();
+}

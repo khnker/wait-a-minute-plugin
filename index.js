@@ -1,6 +1,6 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
 import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, updateLiveContext } from "./memory.js";
-import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession } from "./context.js";
+import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot } from "./context.js";
 import { assembleContext } from "./assembly.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -65,24 +65,24 @@ function nextActionFrom(state) {
 
 const BLOCKED_TOOLS = new Set(["write", "edit", "bash", "task", "todowrite", "pty_spawn", "pty_write", "pty_kill"]);
 
-const ACTIVE_FILE = () => path.join(process.cwd(), ".wam", "active-task");
+const ACTIVE_FILE = (root) => path.join(root || process.cwd(), ".wam", "active-task");
 
-function readActiveTaskId() {
+function readActiveTaskId(root) {
   try {
-    const v = fs.readFileSync(ACTIVE_FILE(), "utf-8").trim();
+    const v = fs.readFileSync(ACTIVE_FILE(root), "utf-8").trim();
     return v || null;
   } catch {
     return null;
   }
 }
 
-function writeActiveTaskId(id) {
-  fs.mkdirSync(path.dirname(ACTIVE_FILE()), { recursive: true });
-  fs.writeFileSync(ACTIVE_FILE(), id);
+function writeActiveTaskId(id, root) {
+  fs.mkdirSync(path.dirname(ACTIVE_FILE(root)), { recursive: true });
+  fs.writeFileSync(ACTIVE_FILE(root), id);
 }
 
-function listTaskIds() {
-  const dir = path.join(process.cwd(), ".wam", "tasks");
+function listTaskIds(root) {
+  const dir = path.join(root || process.cwd(), ".wam", "tasks");
   try {
     return fs
       .readdirSync(dir, { withFileTypes: true })
@@ -134,16 +134,16 @@ function extractPrompt(input, output) {
   return "";
 }
 
-function applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom) {
+function applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom, root) {
   const gate = waitAMinute.evaluateCompletionGate(state, promptText);
   if (gate.blocked) {
     state.phase = gate.verifying ? "VERIFYING" : "IMPLEMENTING";
     state.nextAction = nextActionFrom(state);
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
   } else if (gate.allDone) {
     state.phase = "DONE";
     state.nextAction = "Tarea completa — contrato verificado";
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
   }
   return gate;
 }
@@ -200,6 +200,14 @@ const WaitAMinutePlugin = async (pluginInput) => {
   // Track if plugin is bypassed
   let bypassed = false;
 
+  // Multi-repo: root real de cada sesión (capturado del cwd de los tools),
+  // NO el cwd del proceso server. Un server web multi-proyecto usa esto.
+  const sessionRoots = new Map();
+
+  // .wam root para esta sesión+mensaje: repo git objetivo, no el cwd del proceso.
+  const wamRootFor = (sessionID, promptText) =>
+    resolveWamRoot(promptText, sessionRoots.get(sessionID) || projectDirectory);
+
   // -------------------------------------------------------------------------
   // opencode 1.18.25 plugin API: factory RETURNS the hooks object
   // -------------------------------------------------------------------------
@@ -216,11 +224,14 @@ const WaitAMinutePlugin = async (pluginInput) => {
       const promptText = extractPrompt(input, output);
       if (!promptText.trim()) return;
 
+      // Multi-repo: root de .wam del repo git objetivo de ESTE mensaje
+      const wamRoot = wamRootFor(input.sessionID, promptText);
+
       // No-task-assumption: intención de resume sin tarea activa → preguntar, no asumir
       const RESUME_RE = /\b(en qué estábamos|en que estabamos|dónde íbamos|donde íbamos|sigamos|continuemos|retomar la tarea)\b/i;
       if (!input.taskId && RESUME_RE.test(promptText)) {
-        const active = readActiveTaskId();
-        const st = active ? getTaskState(active) : null;
+        const active = readActiveTaskId(wamRoot);
+        const st = active ? getTaskState(active, wamRoot) : null;
         if (st && st.phase !== "DONE") {
           emitTextPart(output, `[wait-a-minute] Hay una tarea pendiente: ${active} (fase ${st.phase}). ¿Quieres continuarla? Responde /wam resume ${active} o define una tarea nueva — no asumo intención.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
         } else {
@@ -229,11 +240,11 @@ const WaitAMinutePlugin = async (pluginInput) => {
         return;
       }
 
-      let taskId = input.taskId || readActiveTaskId() || "default-task";
+      let taskId = input.taskId || readActiveTaskId(wamRoot) || "default-task";
 
       // Clarification Gate (spec clarification-gate): en ASKING el mensaje se
       // clasifica — respuesta natural, intento de implementación o cambio de tarea.
-      const askingState = getTaskState(taskId);
+      const askingState = getTaskState(taskId, wamRoot);
       if (askingState?.phase === "ASKING") {
         const trimmed = promptText.trim();
         if (/^(answer|resolve|contract|progress|task|skills|assumptions|compress)\b/.test(trimmed)) return; // lo maneja command.execute.before
@@ -256,11 +267,11 @@ const WaitAMinutePlugin = async (pluginInput) => {
         if (kind === "new-intent") {
           // E2E-06: el usuario cambia de tarea → la anterior queda persistida sin
           // contaminar; el mensaje corre como nuevo pre-flight (nueva tarea).
-          try { fs.rmSync(path.join(process.cwd(), ".wam", "active-task"), { force: true }); } catch {}
+          try { fs.rmSync(path.join(wamRoot, ".wam", "active-task"), { force: true }); } catch {}
           taskId = `task-${Date.now()}`;
           input.taskId = taskId;
         } else {
-          const resolved = waitAMinute.answerFromMessage(taskId, promptText);
+          const resolved = waitAMinute.answerFromMessage(taskId, promptText, wamRoot);
           if (resolved.ok) {
             emitTextPart(
               output,
@@ -281,15 +292,15 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       // Continuation fast-path: contrato aprobado + sin claim de DONE → no inyectar nada,
       // el agente fluye sin interrupción (ni contrato ni línea de progreso).
-      const existingState = getTaskState(taskId);
+      const existingState = getTaskState(taskId, wamRoot);
       if (existingState?.contract?.status === "APPROVED") {
         const claim = waitAMinute.evaluateCompletionGate(existingState, promptText);
         if (!claim.blocked && !claim.allDone) {
           input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
           // Continuation: solo N2 (live task delta) — no reconstruir el pack
           try {
-            updateLiveContext(taskId, existingState);
-            const liveFile = path.join(projectDirectory, ".wam", "context", "task-context.md");
+            updateLiveContext(taskId, existingState, wamRoot);
+            const liveFile = path.join(wamRoot, ".wam", "context", "task-context.md");
             if (fs.existsSync(liveFile)) {
               const live = fs.readFileSync(liveFile, "utf-8").trim();
               if (live) emitTextPart(output, `[wam N2 task]\n${live}\n`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
@@ -301,21 +312,21 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       const analysis = await waitAMinute.analyze({
         prompt: promptText,
-        projectPath: projectDirectory,
+        projectPath: wamRoot,
         config: cfg,
         tierCaps: cfg.tierCaps,
         activePreset: cfg.activePreset,
         activeMode: cfg.activeMode,
       });
 
-      const state = waitAMinute.buildPersistedState(taskId, analysis);
+      const state = waitAMinute.buildPersistedState(taskId, analysis, wamRoot);
       state.lastAction = promptText;
 
       // Assumption Gate (spec change 3): escalar asunciones con impacto material
       // → DECISION_CRITICAL/blocking + mirror a unknowns → ASKING (sin ejecución).
       try {
         const { changed } = escalateAssumptions(state, promptText);
-        if (changed) persistTaskState(taskId, state);
+        if (changed) persistTaskState(taskId, state, wamRoot);
       } catch (err) {
         console.error("[wait-a-minute] escalate assumptions failed:", err);
       }
@@ -324,14 +335,14 @@ const WaitAMinutePlugin = async (pluginInput) => {
       sessionStore.set("completionContract", state.contract);
       sessionStore.set("persistentPolicies", analysis.persistentPolicies || []);
       sessionStore.set("skillRegistry", analysis.skillRegistry || {});
-      persistTaskState(taskId, state);
+      persistTaskState(taskId, state, wamRoot);
 
       // Blocking Questions: DECISION_CRITICAL sin responder → ASKING, preguntar, no ejecutar.
       const blockingUnknowns = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
       if (blockingUnknowns.length > 0 && state.phase !== "ANSWERED") {
         state.phase = "ASKING";
         state.nextAction = "Responder pregunta bloqueante antes de ejecutar";
-        persistTaskState(taskId, state);
+        persistTaskState(taskId, state, wamRoot);
         const questions = [];
         for (const u of blockingUnknowns) {
           questions.push(`⛔ [wait-a-minute] ASKING — ${u.id}: ${u.question}\nNo implementar hasta responder. Responder: /wam answer ${u.id} <respuesta>`);
@@ -340,26 +351,26 @@ const WaitAMinutePlugin = async (pluginInput) => {
         return;
       }
 
-      const gate = applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom);
-      const updatedState = getTaskState(taskId);
+      const gate = applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom, wamRoot);
+      const updatedState = getTaskState(taskId, wamRoot);
 
       // Contexto vivo: snapshot de la tarea activa, actualizado en cada mensaje
       try {
-        updateLiveContext(taskId, updatedState);
+        updateLiveContext(taskId, updatedState, wamRoot);
       } catch {}
 
-      const inject = prepareSystemInject(analysis, updatedState, cfg, projectDirectory, waitAMinute, taskId, emitTextPart, input, output);
+      const inject = prepareSystemInject(analysis, updatedState, cfg, wamRoot, waitAMinute, taskId, emitTextPart, input, output);
 
       // Context Assembly Layer: paquete formal N0-N3 por tarea (ni más ni menos)
       try {
-        initMemory();
-        updateProjectMemo(analysis);
+        initMemory(wamRoot);
+        updateProjectMemo(analysis, wamRoot);
         const pack = assembleContext({
           prompt: promptText,
           taskId,
           classification: analysis.intent?.classification,
           mode: analysis.strategy,
-          projectPath: projectDirectory,
+          projectPath: wamRoot,
           budget: cfg.contextBudget || 4000,
           taskState: updatedState,
         });
@@ -395,20 +406,20 @@ const WaitAMinutePlugin = async (pluginInput) => {
             "## Status",
             "COMPLETED",
           ].join("\n"),
-        });
+        }, wamRoot);
         addRecentChange({
           date: new Date().toISOString().slice(0, 10),
           scope: taskId,
           changes: updatedState.contract?.requirements || [],
           verification: `requisitos completos: ${(updatedState.requirements || []).length}`,
-        });
+        }, wamRoot);
         try {
           closeSession({
-            sessionId: getSessionId(projectDirectory),
+            sessionId: getSessionId(wamRoot),
             taskId,
             summary: (updatedState.contract?.requirements || []).join("; "),
             candidates: (updatedState.requirements || []).map((r) => ({ id: r.id, title: r.title, evidence: r.evidence || [] })),
-          });
+          }, wamRoot);
         } catch {}
       }
 
@@ -425,7 +436,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       if (!needsApproval || lower.includes("continuar") || lower.includes("aprobar contrato")) {
         if (needsApproval) {
-          waitAMinute.approveContract(taskId);
+          waitAMinute.approveContract(taskId, wamRoot);
           try {
             recordDecision({
               id: `strategy-${taskId}-${Date.now()}`,
@@ -433,7 +444,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
               reason: promptText.slice(0, 120),
               source: "user-decided",
               confidence: "high",
-            });
+            }, wamRoot);
           } catch {}
         }
       } else {
@@ -473,17 +484,30 @@ const WaitAMinutePlugin = async (pluginInput) => {
       output.parts.push({
         id: genPartId(),
         type: "text",
-        text: wamCli((input.arguments || "").split(/\s+/), cfg),
+        text: wamCli((input.arguments || "").split(/\s+/), cfg, sessionRoots.get(input.sessionID) || projectDirectory),
       });
     },
 
     // Enforce Clarification Gate (spec change 4): en ASKING se bloquean las
     // herramientas mutantes — la investigación read-only sigue permitida.
-    "tool.execute.before": async (input) => {
+    // Además captura el root real de la sesión desde los args de los tools
+    // (openmode web multi-proyecto: el cwd de la sesión llega por aquí, no
+    // por pluginInput.directory que es el cwd del proceso server).
+    "tool.execute.before": async (input, output) => {
       try {
         if (bypassed) return;
-        const taskId = readActiveTaskId() || "default-task";
-        const st = getTaskState(taskId);
+        const sid = input?.sessionID;
+        if (sid && output?.args) {
+          const cwd = output.args.path?.cwd || output.args.workdir || output.args.cwd;
+          if (cwd && !sessionRoots.has(sid)) {
+            try {
+              sessionRoots.set(sid, path.resolve(projectDirectory, cwd));
+            } catch {}
+          }
+        }
+        const taskRoot = sessionRoots.get(sid) || projectDirectory;
+        const taskId = readActiveTaskId(taskRoot) || "default-task";
+        const st = getTaskState(taskId, taskRoot);
         if (st?.phase !== "ASKING") return;
         const tool = input?.tool || "";
         if (BLOCKED_TOOLS.has(tool)) {
@@ -520,9 +544,9 @@ function classifyAskingMessage(text = "") {
  * /wam CLI — opencode 1.18.25 entrega comandos vía command.execute.before,
  * no vía ctx.command. Lógica extraída del handler antiguo.
  */
-function wamCli(args, cfg = {}) {
+function wamCli(args, cfg = {}, root = process.cwd()) {
   const [sub, action, ...rest] = args || [];
-  const taskId = readActiveTaskId() || "default-task";
+  const taskId = readActiveTaskId(root) || "default-task";
 
   if (sub === "skills") {
     const skills = waitAMinute.getRegistry();
@@ -564,11 +588,11 @@ function wamCli(args, cfg = {}) {
   }
 
   if (sub === "contract") {
-    if (action === "approve") return JSON.stringify(waitAMinute.approveContract(taskId));
-    if (action === "reject") return JSON.stringify(waitAMinute.rejectContract(taskId));
+    if (action === "approve") return JSON.stringify(waitAMinute.approveContract(taskId, root));
+    if (action === "reject") return JSON.stringify(waitAMinute.rejectContract(taskId, root));
     if (action === "edit") {
       try {
-        return JSON.stringify(waitAMinute.editContract(taskId, JSON.parse(rest.join(" "))));
+        return JSON.stringify(waitAMinute.editContract(taskId, JSON.parse(rest.join(" ")), root));
       } catch {
         return "Error: JSON inválido para /wam contract edit";
       }
@@ -577,21 +601,21 @@ function wamCli(args, cfg = {}) {
   }
 
   if (sub === "resume") {
-    return JSON.stringify(waitAMinute.resumeTask(action || taskId));
+    return JSON.stringify(waitAMinute.resumeTask(action || taskId, root));
   }
 
   if (sub === "progress") {
     const [reqId, op, ...evidence] = [action, ...rest];
     if (!reqId) {
-      const st = getTaskState(taskId);
+      const st = getTaskState(taskId, root);
       if (!st) return "Sin estado de tarea (persiste tras el primer mensaje)";
       return st.requirements
         .map(r => `${r.id} [${r.status}] ${r.title}${r.evidence?.length ? " | evidence: " + r.evidence.join("; ") : ""}`)
         .join("\n");
     }
-    if (op === "done") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "done", evidence.join(" ")));
-    if (op === "verified") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "verified", evidence.join(" ")));
-    if (op === "pending") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "pending", ""));
+    if (op === "done") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "done", evidence.join(" "), root));
+    if (op === "verified") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "verified", evidence.join(" "), root));
+    if (op === "pending") return JSON.stringify(waitAMinute.markRequirement(taskId, reqId, "pending", "", root));
     return "Uso: /wam progress | /wam progress <id> done <evidencia> | /wam progress <id> verified <evidencia> | /wam progress <id> pending";
   }
 
@@ -599,11 +623,11 @@ function wamCli(args, cfg = {}) {
     const qid = action;
     const answer = rest.join(" ").trim();
     if (!qid || !answer) return "Uso: /wam answer <questionId> <respuesta>";
-    return JSON.stringify(waitAMinute.answerQuestion(taskId, qid, answer));
+    return JSON.stringify(waitAMinute.answerQuestion(taskId, qid, answer, root));
   }
 
   if (sub === "assumptions") {
-    const st = getTaskState(taskId);
+    const st = getTaskState(taskId, root);
     if (!st) return "Sin estado de tarea";
     const list = st.contract?.assumptions || [];
     if (!list.length) return "Sin asunciones registradas";
@@ -616,7 +640,7 @@ function wamCli(args, cfg = {}) {
     const aid = action;
     const evidence = rest.join(" ").trim();
     if (!aid || !evidence) return "Uso: /wam resolve <assumptionId> <evidencia>";
-    return JSON.stringify(waitAMinute.resolveAssumption(taskId, aid, evidence));
+    return JSON.stringify(waitAMinute.resolveAssumption(taskId, aid, evidence, root));
   }
 
   if (sub === "compress") {
@@ -641,12 +665,12 @@ function wamCli(args, cfg = {}) {
 
   if (sub === "task") {
     if (action === "list") {
-      const ids = listTaskIds();
+      const ids = listTaskIds(root);
       if (!ids.length) return "Sin tareas persistidas (.wam/tasks)";
-      const active = readActiveTaskId();
+      const active = readActiveTaskId(root);
       return ids
         .map((id) => {
-          const st = getTaskState(id);
+          const st = getTaskState(id, root);
           return `${id}${id === active ? " *activa" : ""} [${st?.phase || "?"}] ${st?.contract?.status || ""}`;
         })
         .join("\n");
@@ -665,20 +689,20 @@ function wamCli(args, cfg = {}) {
 
   if (sub === "ctx") {
     if (action === "list") {
-      const caps = listCapsules(process.cwd());
+      const caps = listCapsules(root);
       if (!caps.length) return "Sin cápsulas (usa /wam ctx add o extracción en DONE)";
       return caps.map((c) => `${c.context_id} [${c.level} ${c.lifecycle}] ${c.provenance} ${(c.purpose || "").slice(0, 60)}`).join("\n");
     }
     if (action === "get") {
       const q = rest.join(" ");
       if (!q) return "Uso: /wam ctx get <query>";
-      const r = retrieveContext(q, { root: process.cwd() });
+      const r = retrieveContext(q, { root });
       if (!r.ok) return r.message;
       return r.capsules.map((h) => `[${h.capsule.level}] ${h.capsule.context_id} (rel ${h.relevance.toFixed(2)}) ${(h.capsule.purpose || "").slice(0, 80)}`).join("\n");
     }
     if (action === "show") {
       const id = rest.join(" ");
-      const c = getCapsule(id, process.cwd());
+      const c = getCapsule(id, root);
       if (!c) return `Cápsula ${id} no existe`;
       return [
         `${c.context_id} [${c.level} ${c.lifecycle}]`,
@@ -693,12 +717,12 @@ function wamCli(args, cfg = {}) {
     if (action === "promote") {
       const [id, target, approved] = rest;
       if (!id || !target) return "Uso: /wam ctx promote <id> <L2|L1> [approved]";
-      const r = promoteCapsule(id, target, { approvedBy: approved === "approved" ? "user" : "", root: process.cwd() });
+      const r = promoteCapsule(id, target, { approvedBy: approved === "approved" ? "user" : "", root });
       if (!r.ok) return `Promoción rechazada: ${r.reason}`;
       return `Promovida ${id} → ${target} [${r.capsule.provenance}]`;
     }
     if (action === "session") {
-      const sid = getSessionId(process.cwd());
+      const sid = getSessionId(root);
       const caps = listCapsules(process.cwd(), { sessionId: sid });
       return `session: ${sid}\ncapsules de esta sesión: ${caps.length}\nL1 base: ${listCapsules(process.cwd(), { level: "L1", lifecycle: "active" }).length} cápsula(s)`;
     }
@@ -862,8 +886,8 @@ const waitAMinute = {
    * Estado durable de tarea: contrato + requisitos por evidencia.
    * PROPOSED la primera vez; preserva contrato APPROVED y progreso existente.
    */
-  buildPersistedState: function(taskId, analysis) {
-    const existing = getTaskState(taskId);
+  buildPersistedState: function(taskId, analysis, root) {
+    const existing = getTaskState(taskId, root);
     if (existing && existing.requirements && existing.requirements.length) {
       // Preservar contrato/requisitos existentes (PROPOSED/APPROVED/REJECTED):
       // el contrato se sintetiza UNA vez (primer mensaje); los mensajes
@@ -873,7 +897,7 @@ const waitAMinute = {
         lastAction: existing.lastAction,
         nextAction: nextActionFrom(existing),
       };
-      persistTaskState(taskId, merged);
+      persistTaskState(taskId, merged, root);
       return merged;
     }
     const fresh = {
@@ -882,7 +906,7 @@ const waitAMinute = {
       nextAction: "Revisar contrato — /wam contract approve o edit",
       lastAction: "",
     };
-    persistTaskState(taskId, fresh);
+    persistTaskState(taskId, fresh, root);
     return fresh;
   },
 
@@ -941,19 +965,19 @@ const waitAMinute = {
   },
 
   /** Aprueba el contrato: PROPOSED → APPROVED, fase → IMPLEMENTING. */
-  resumeTask: function(taskId) {
-    const state = getTaskState(taskId);
+  resumeTask: function(taskId, root) {
+    const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea para: " + taskId };
     if (state.phase === "DONE") return { ok: false, reason: "Tarea DONE — no se reabre automáticamente. Crea una nueva." };
-    writeActiveTaskId(taskId);
+    writeActiveTaskId(taskId, root);
     try {
-      updateLiveContext(taskId, state);
+      updateLiveContext(taskId, state, root);
     } catch {}
     return { ok: true, taskId, phase: state.phase, contract: state.contract?.status || "?" };
   },
 
-  approveContract: function(taskId) {
-    const state = getTaskState(taskId);
+  approveContract: function(taskId, root) {
+    const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const blocking = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
     if (blocking.length > 0) {
@@ -971,27 +995,27 @@ const waitAMinute = {
     state.contract = { ...(state.contract || {}), status: "APPROVED" };
     if (state.phase !== "DONE") state.phase = "IMPLEMENTING";
     state.nextAction = nextActionFrom(state);
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
     try {
-      updateLiveContext(taskId, state);
+      updateLiveContext(taskId, state, root);
     } catch {}
     return { ok: true, status: "APPROVED", phase: state.phase };
   },
 
   /** Rechaza el contrato: REJECTED, fase WAITING. */
-  rejectContract: function(taskId) {
-    const state = getTaskState(taskId);
+  rejectContract: function(taskId, root) {
+    const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     state.contract = { ...(state.contract || {}), status: "REJECTED" };
     state.phase = "WAITING";
     state.nextAction = "Revisar contrato con el usuario";
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
     return { ok: true, status: "REJECTED", phase: state.phase };
   },
 
   /** Edita el contrato (JSON patch), vuelve a PROPOSED. */
-  editContract: function(taskId, patch) {
-    const state = getTaskState(taskId);
+  editContract: function(taskId, patch, root) {
+    const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const contract = state.contract || { status: "PROPOSED", requirements: [], verification: [], constraints: [] };
     if (Array.isArray(patch?.requirements)) {
@@ -1009,13 +1033,13 @@ const waitAMinute = {
     state.contract = contract;
     state.phase = "PROPOSED";
     state.nextAction = "Revisar contrato — /wam contract approve o edit";
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
     return { ok: true, status: "PROPOSED", requirements: contract.requirements.length };
   },
 
   /** Marca requisito done/pending con evidencia. DONE exige evidencia (no "parece funcionar"). */
-  markRequirement: function(taskId, reqId, status, evidence) {
-    const state = getTaskState(taskId);
+  markRequirement: function(taskId, reqId, status, evidence, root) {
+    const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const req = (state.requirements || []).find((r) => r.id === reqId);
     if (!req) return { ok: false, reason: `Requisito ${reqId} no existe` };
@@ -1029,13 +1053,13 @@ const waitAMinute = {
     if (status === "done" || status === "verified") req.evidence.push(evidence.trim());
     if (status === "pending") req.evidence = [];
     state.nextAction = nextActionFrom(state);
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
     return { ok: true, phase: state.phase, nextAction: state.nextAction };
   },
 
   /** Responde una pregunta bloqueante: unknown → answered, fase ASKING → ANSWERED → PROPOSED. */
-  answerQuestion: function(taskId, qid, answer) {
-    const state = getTaskState(taskId);
+  answerQuestion: function(taskId, qid, answer, root) {
+    const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const u = (state.contract?.unknowns || []).find((x) => x.id === qid);
     if (!u) return { ok: false, reason: `Pregunta ${qid} no existe` };
@@ -1051,18 +1075,18 @@ const waitAMinute = {
       }
     }
     state.phase = "ANSWERED";
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
     state.phase = "PROPOSED";
     state.nextAction = "Revisar contrato — /wam contract approve";
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
     return { ok: true, phase: "PROPOSED", unknown: u };
   },
 
   /** Reconocimiento de respuesta natural (spec enforce-clarification-gate): en ASKING,
    *  un mensaje normal resuelve TODAS las preguntas bloqueantes con ese texto y
    *  re-evalúa el estado (assumption asociada → resolved). */
-  answerFromMessage: function(taskId, text) {
-    const state = getTaskState(taskId);
+  answerFromMessage: function(taskId, text, root) {
+    const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const blocking = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
     if (!blocking.length) return { ok: false, reason: "Sin preguntas bloqueantes" };
@@ -1084,12 +1108,12 @@ const waitAMinute = {
     }
     state.phase = "PROPOSED";
     state.nextAction = "Revisar contrato — /wam contract approve";
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
     return { ok: true, u: first, phase: state.phase, nextAction: state.nextAction };
   },
   /** Resuelve una asunción con evidencia del repo (spec change 3 R4): → RESOLVED sin preguntar al usuario. */
-  resolveAssumption: function(taskId, aid, evidence) {
-    const state = getTaskState(taskId);
+  resolveAssumption: function(taskId, aid, evidence, root) {
+    const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const a = (state.contract?.assumptions || []).find((x) => x.id === aid);
     if (!a) return { ok: false, reason: `Asunción ${aid} no existe` };
@@ -1108,7 +1132,7 @@ const waitAMinute = {
       state.phase = "PROPOSED";
       state.nextAction = "Revisar contrato — /wam contract approve";
     }
-    persistTaskState(taskId, state);
+    persistTaskState(taskId, state, root);
     return { ok: true, assumption: a };
   },
 
