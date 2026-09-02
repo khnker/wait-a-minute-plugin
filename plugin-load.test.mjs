@@ -486,3 +486,54 @@ test("client.session.get ausente → fallback al directory del plugin (compat)",
     fs.rmSync(tmp, { recursive: true, force: true });
   } catch {}
 });
+
+test("delegación dura: contrato APPROVED con reqs pendientes genera directivas paralelas con dominio", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wam-del-"));
+  const hooks = await pluginDefault({ directory: tmp, client: {}, project: {}, $: {} });
+  const taskId = `del-${Date.now()}`;
+  await hooks["chat.message"](
+    { sessionID: "sd1", parts: [{ type: "text", text: "arregla el bug del frontend y agrega tests e2e" }], taskId },
+    { parts: [], system: [] }
+  );
+  pluginDefault.approveContract(taskId, tmp);
+  const st = getTaskState(taskId, tmp);
+  assert.ok(st.contract.status === "APPROVED", "contrato aprobado");
+
+  const out = { parts: [], system: [] };
+  await hooks["chat.message"]({ sessionID: "sd1", parts: [{ type: "text", text: "tarea terminada, done" }], taskId }, out);
+  const t = out.parts.map((p) => p.text || "").join("\n");
+  assert.ok(t.includes("[wam delegation]"), "directiva de delegación visible");
+  assert.ok(/Task\(parallel\)/.test(t), "reqs → Task paralelo");
+  assert.ok(/contexto: frontend/.test(t), "req con hint de dominio frontend");
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+});
+
+test("bloqueo duro: sesión principal NO muta con reqs pendientes; subagente (parentID) sí", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wam-hard-"));
+  // sesión principal: session.get sin parentID
+  const hooks = await pluginDefault({
+    directory: tmp,
+    client: { session: { get: async ({ sessionID }) => ({ location: { directory: tmp }, parentID: sessionID === "sub-1" ? "parent" : undefined }) } },
+    project: {}, $: {},
+  });
+  const taskId = `hard-${Date.now()}`;
+  await hooks["chat.message"](
+    { sessionID: "main-1", parts: [{ type: "text", text: "implementar migración de base de datos con tests" }], taskId },
+    { parts: [], system: [] }
+  );
+  pluginDefault.approveContract(taskId, tmp);
+
+  // principal intenta write → bloqueado
+  const err = await hooks["tool.execute.before"]({ sessionID: "main-1", tool: "write", callID: "c1" }, { args: {} }).then(() => null).catch((e) => e.message);
+  assert.ok(err && err.includes("ENFORCED BLOCK"), "write bloqueado en sesión principal: " + err);
+  assert.ok(/delegar via Task/i.test(err), "directiva exige delegación");
+
+  // principal con read → permitido
+  const okRead = await hooks["tool.execute.before"]({ sessionID: "main-1", tool: "read", callID: "c2" }, { args: {} }).then(() => true).catch((e) => e.message);
+  assert.equal(okRead, true, "read permitido (investigación)");
+
+  // subagente (parentID) → write permitido
+  const okSub = await hooks["tool.execute.before"]({ sessionID: "sub-1", tool: "write", callID: "c3" }, { args: {} }).then(() => true).catch((e) => e.message);
+  assert.equal(okSub, true, "subagente ejecutor puede mutar: " + okSub);
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+});

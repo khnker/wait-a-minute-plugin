@@ -426,7 +426,14 @@ export function getSessionLog(root) {
 // scraper/api/frontend internos). El .wam debe vivir en el repo git objetivo
 // del mensaje, NO en el cwd del proceso ni en la raíz del proyecto.
 
-function findGitRepos(root, maxDepth = 3) {
+function findGitRepos(root, maxDepth = 2) {
+  // Si el root ya es repo git, NO hay repos hijos que buscar (caso común:
+  // opencode abierto DENTRO de un repo) — cero escaneo del filesystem.
+  try {
+    if (fs.existsSync(path.join(root, ".git"))) return [];
+  } catch {
+    return [];
+  }
   const found = [];
   const seen = new Set();
   const walk = (dir, depth) => {
@@ -439,7 +446,7 @@ function findGitRepos(root, maxDepth = 3) {
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
-      if (e.name === "node_modules" || e.name === ".git" || e.name === ".wam" || e.name === "upstream" || e.name === ".cache") continue;
+      if (e.name === "node_modules" || e.name === ".git" || e.name === ".wam" || e.name === "upstream" || e.name === ".cache" || e.name === "dist" || e.name === "build") continue;
       const p = path.join(dir, e.name);
       if (seen.has(p)) continue;
       seen.add(p);

@@ -168,6 +168,38 @@ function writeCavemanSummary(taskId, state, root, extra = "") {
   return cav;
 }
 
+// -- Delegación dura: reqs pendientes → subagentes en paralelo --------------
+
+const MUTATING_TOOLS = new Set(["write", "edit", "apply_patch", "patch", "todo_write", "todowrite"]);
+
+function domainHint(text = "") {
+  const t = text.toLowerCase();
+  const hints = [];
+  if (/\bfrontend\b|\bfe\b|front-?end|\bui\b|button|componente|vista|pantalla|react|web\b/.test(t)) hints.push("frontend");
+  if (/backend|back-?end|\bapi\b|server|endpoint|base de datos|\bdb\b|database|nest|express|postgres|mongo/.test(t)) hints.push("backend");
+  if (/scrap|crawl|parser|puppeteer|playwright/.test(t)) hints.push("scraper");
+  if (/test|e2e|spec|coverage|unitario/.test(t)) hints.push("tests");
+  if (/security|seguridad|auth|token|jwt|credencial/.test(t)) hints.push("security");
+  return hints.length ? hints.join("+") : "";
+}
+
+/**
+ * Directiva de delegación para reqs pendientes de un contrato APPROVED:
+ * cada req → Task en paralelo con agente libre (el que el entorno tenga).
+ */
+function delegationLines(state) {
+  const reqs = (state?.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified");
+  if (!reqs.length || state?.contract?.status !== "APPROVED") return [];
+  const lines = [
+    "[wam delegation] Reqs pendientes → delegar en PARALELO via Task (agente: el apropiado según config del entorno). Mutación directa de archivos desde la sesión principal está BLOQUEADA — solo un subagente ejecuta write/edit.",
+  ];
+  for (const r of reqs) {
+    const hint = domainHint(r.title);
+    lines.push(`  ${r.id} → Task(parallel) "${(r.title || "").slice(0, 120)}"${hint ? ` [contexto: ${hint}]` : ""}`);
+  }
+  return lines;
+}
+
 function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute, taskId) {
   const inject = [];
 
@@ -225,6 +257,8 @@ const WaitAMinutePlugin = async (pluginInput) => {
   // sesión tiene su propio directorio de trabajo (location.directory) — lo
   // consultamos vía client.session.get para no depender del cwd del proceso.
   const sessionRoots = new Map();
+  const sessionParents = new Map(); // sessionID → parentID (subagentes Task tienen parent)
+  const sessionTasks = new Map(); // sessionID → taskId activo visto en chat.message
   const client = pluginInput?.client;
 
   async function resolveSessionBase(sessionID) {
@@ -233,6 +267,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
     try {
       const info = client?.session?.get && sessionID ? await client.session.get({ sessionID }) : null;
       if (info?.location?.directory) base = info.location.directory;
+      if (info?.parentID) sessionParents.set(sessionID, info.parentID);
     } catch {
       // fallback: cwd del server
     }
@@ -290,6 +325,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       }
 
       let taskId = input.taskId || readActiveTaskId(wamRoot) || "default-task";
+      if (input.sessionID) sessionTasks.set(input.sessionID, taskId);
 
       // Clarification Gate (spec clarification-gate): en ASKING el mensaje se
       // clasifica — respuesta natural, intento de implementación o cambio de tarea.
@@ -358,7 +394,9 @@ const WaitAMinutePlugin = async (pluginInput) => {
             const liveFile = path.join(wamRoot, ".wam", "context", "task-context.md");
             if (fs.existsSync(liveFile)) {
               const live = fs.readFileSync(liveFile, "utf-8").trim();
-              if (live) emitTextPart(output, `[wam N2 task]\n${live}\n`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+              const parts = [`[wam N2 task]\n${live}\n`];
+              parts.push(...delegationLines(existingState).map((l) => l + "\n"));
+              if (parts.length) emitTextPart(output, parts.join("\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
             }
           } catch {}
           return;
@@ -485,6 +523,12 @@ const WaitAMinutePlugin = async (pluginInput) => {
         } catch {}
       }
 
+      // Delegación visible cuando el contrato está APPROVED con reqs pendientes
+      // (la directiva de fan-out paralelo via Task + bloqueo de mutación directa)
+      if (updatedState.contract?.status === "APPROVED") {
+        inject.push(...delegationLines(updatedState));
+      }
+
       if (inject.length > 0) {
         emitTextPart(output, inject.join("\n") + "\n", { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
       }
@@ -558,11 +602,26 @@ const WaitAMinutePlugin = async (pluginInput) => {
     "tool.execute.before": async (input, output) => {
       try {
         if (bypassed) return;
-        const taskRoot = await resolveSessionBase(input?.sessionID);
-        const taskId = readActiveTaskId(taskRoot) || "default-task";
+        const sid = input?.sessionID;
+        const taskRoot = await resolveSessionBase(sid);
+        const taskId = sessionTasks.get(sid) || readActiveTaskId(taskRoot) || "default-task";
         const st = getTaskState(taskId, taskRoot);
-        if (st?.phase !== "ASKING") return;
         const tool = input?.tool || "";
+
+        // Delegación dura: la sesión PRINCIPAL (sin parentID) NO muta archivos
+        // cuando hay reqs pendientes de un contrato APPROVED — debe delegar a
+        // un subagente (Task). Los subagentes (con parentID) ejecutan libre.
+        if (st?.contract?.status === "APPROVED" && !sessionParents.has(sid)) {
+          const pend = (st.requirements || []).some((r) => r.status !== "done" && r.status !== "verified");
+          if (pend && MUTATING_TOOLS.has(tool)) {
+            const n = (st.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified").length;
+            const directive = `[wait-a-minute] ENFORCED BLOCK — ${n} req(s) pendiente(s) del contrato APPROVED: la sesión principal NO muta archivos. Delegar via Task en paralelo (ver [wam delegation]). Herramienta ${tool} bloqueada aquí.`;
+            input.output = directive;
+            throw new Error(directive);
+          }
+        }
+
+        if (st?.phase !== "ASKING") return;
         if (BLOCKED_TOOLS.has(tool)) {
           const u = (st.contract?.unknowns || []).find((x) => x.status === "blocking");
           const question = u ? `${u.id}: ${u.question}` : "pregunta bloqueante pendiente";
