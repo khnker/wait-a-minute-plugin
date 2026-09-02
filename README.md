@@ -416,6 +416,36 @@ The default budget is 32,000 tokens and the estimate uses a lightweight characte
 
 ---
 
+## Four-Level Context Loading
+
+WAM assembles the prompt context as a formal **Context Pack** with four levels. For every task the runtime declares which sources enter the prompt — nothing more, nothing less.
+
+| Level | Canonical source | Load rule | Mandatory |
+|---|---|---|---|
+| **N0 Global/Policy** | active policies (scope/verify/simplify) | always | yes |
+| **N1 Project** | `.wam/context/{project,architecture,decisions,constraints,recent-changes}` | selective by task domain (`##` sections matched against the prompt) | no |
+| **N2 Task** | `.wam/tasks/<id>/state.yaml` → live task context | always (continuations: only the delta) | yes |
+| **N3 Session** | capsules L1/L2/L3 | relevance utility (deterministic, no embeddings) | no |
+
+Assembly rules (`assembleContext` in `assembly.js`):
+
+- **trivial** tasks load only N0 + N2 (no project docs, no capsules).
+- **normal** tasks load N0 + selective N1 (recent-changes summary + decisions/constraints sections matching the task) + N2 + N3.
+- **architectural/STRICT** tasks also load architecture and the full constraints list.
+- **continuations** (contract APPROVED + follow-up message) inject only the N2 delta — the pack is never rebuilt.
+- **prohibited**: L4 ephemeral, superseded capsules, transcripts, docs of unrelated domains, capsules without content.
+- **provenance**: docs with `source: inferred` or confidence < 0.7 are injected with a warning — an inference is never presented as a confirmed fact.
+
+The pack reports per-level token usage:
+
+```
+[wam pack 412/4000 tok N0+N1+N2+N3]
+```
+
+No-task assumption: for resume intents without an active task ("¿en qué estábamos?") WAM asks whether to continue (`/wam resume <id>`) instead of injecting the previous task's context.
+
+---
+
 ## `/wam` CLI
 
 **Skills**

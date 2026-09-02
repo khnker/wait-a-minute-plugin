@@ -292,7 +292,7 @@ test("cavemanify + /wam compress: resumen terse y headroom reportado", async () 
   } catch {}
 });
 
-test("Continuation fast-path: contrato aprobado + continuación NO inyecta nada y el gate de DONE sigue activo", async () => {
+test("Continuation fast-path: contrato aprobado + continuación inyecta SOLO N2 (live task delta) y el gate de DONE sigue activo", async () => {
   const taskId = `flow-${Date.now()}`;
   const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
 
@@ -306,7 +306,12 @@ test("Continuation fast-path: contrato aprobado + continuación NO inyecta nada 
   const inp = { parts: [{ type: "text", text: "sigue con el paso 2" }], taskId };
   const out = { parts: [], system: [] };
   await hooks["chat.message"](inp, out);
-  assert.equal(out.parts.length, 0, "no emite parts de validación/progreso en continuación");
+  assert.ok(out.parts.length > 0, "emite N2 delta en continuación");
+  const emitted = out.parts.map((p) => p.text || "").join("\n");
+  assert.ok(emitted.includes("[wam N2 task]"), "solo N2 (live task delta)");
+  assert.ok(!emitted.includes("[wam N1"), "no reconstruye N1");
+  assert.ok(!emitted.includes("[wam N3"), "no reconstruye N3");
+  assert.ok(!emitted.includes("PROPOSED"), "no re-emite contrato");
   assert.equal(inp.parts[0].text, "sigue con el paso 2", "no reescribe el prompt de continuación");
 
   const inp2 = { parts: [{ type: "text", text: "listo, terminé la tarea" }], taskId };
@@ -380,5 +385,54 @@ test("Memory on DONE: tarea completada deriva summary.md + recent-changes.md (sp
 
   try {
     fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
+  } catch {}
+});
+test("no_task_assumption: '¿en qué estábamos?' sin tarea activa → pregunta, no crea tarea", async () => {
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+  const out = { parts: [], system: [] };
+  await hooks["chat.message"]({ parts: [{ type: "text", text: "¿en qué estábamos?" }] }, out);
+  const t = out.parts.map((p) => p.text || "").join("\n");
+  assert.ok(/no hay tarea activa|No hay tarea activa/i.test(t), "informa no-active-task sin asumir");
+  assert.ok(!t.includes("[wam N1 project]"), "no inyecta contexto de proyecto");  assert.ok(!t.includes("[wam N2 task]"), "no inyecta contexto de tarea inexistente");
+});
+
+test("no_task_assumption: con tarea pendiente → ofrece continuar, NO inyecta su contexto", async () => {
+  const taskId = `resume-${Date.now()}`;
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+  await hooks["chat.message"]({ parts: [{ type: "text", text: "implementar migración postgres con tests" }], taskId }, { parts: [], system: [] });
+  pluginDefault.approveContract(taskId);
+  pluginDefault.resumeTask(taskId);
+  const out = { parts: [], system: [] };
+  await hooks["chat.message"]({ parts: [{ type: "text", text: "¿en qué estábamos?" }] }, out);
+  const t = out.parts.map((p) => p.text || "").join("\n");
+  assert.ok(t.includes(`tarea pendiente: ${taskId}`), "ofrece la tarea pendiente: " + t);
+  assert.ok(!t.includes("[wam N2 task]"), "NO asume la continuación (no inyecta su contexto)");
+  assert.ok(!t.includes("migración postgres"), "no re-emite contenido de la tarea");
+  try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });
+  } catch {}
+});
+
+test("task_isolation live: A→B→A — el live context alterna sin contaminación", async () => {
+  const taskA = `iso-a-${Date.now()}`;
+  const taskB = `iso-b-${Date.now()}`;
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+
+  await hooks["chat.message"]({ parts: [{ type: "text", text: "implementar autenticación JWT" }], taskId: taskA }, { parts: [], system: [] });
+  pluginDefault.approveContract(taskA);
+
+  await hooks["chat.message"]({ parts: [{ type: "text", text: "documentar la API rest" }], taskId: taskB }, { parts: [], system: [] });
+  pluginDefault.approveContract(taskB);
+
+  const outA = { parts: [], system: [] };
+  await hooks["chat.message"]({ parts: [{ type: "text", text: "sigue con la implementación" }], taskId: taskA }, outA);
+  const tA = outA.parts.map((p) => p.text || "").join("\n");
+  assert.ok(tA.includes(`task: ${taskA}`), "live de A recuperado al volver: " + tA);
+  assert.ok(!tA.includes(`task: ${taskB}`), "A no contamina con B");
+  assert.ok(!/documentar la API/.test(tA), "contenido de B fuera del pack de A");
+
+  try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskA), { recursive: true, force: true });
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskB), { recursive: true, force: true });
   } catch {}
 });

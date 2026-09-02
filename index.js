@@ -1,6 +1,7 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
 import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, updateLiveContext } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession } from "./context.js";
+import { assembleContext } from "./assembly.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -116,22 +117,6 @@ function updateProjectMemo(analysis) {
   updateContext("project", body, { source: "observed", confidence: inferred.length ? "medium" : "high" });
 }
 
-function injectOperationalMemory(inject, analysis) {
-  try {
-    initMemory();
-    updateProjectMemo(analysis);
-    const note = summarizeOperationalContext();
-    if (note) inject.push(`[wait-a-minute: memoria operacional] ${note}`);
-    const liveFile = path.join(process.cwd(), ".wam", "context", "task-context.md");
-    if (fs.existsSync(liveFile)) {
-      const live = fs.readFileSync(liveFile, "utf-8").trim();
-      if (live) inject.push(`[wait-a-minute: contexto vivo]\n${live}`);
-    }
-  } catch (err) {
-    console.error("[wait-a-minute] operational memory load failed:", err);
-  }
-}
-
 function projectState(analysis) {
   return {
     contract: {
@@ -187,7 +172,6 @@ function applyCompletionGate(state, promptText, taskId, waitAMinute, persistTask
 
 function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute, taskId) {
   const inject = [];
-  injectOperationalMemory(inject);
 
   if (state.phase === "PROPOSED") {
     inject.push(
@@ -260,6 +244,19 @@ const WaitAMinutePlugin = async (pluginInput) => {
       const promptText = extractPrompt(input, output);
       if (!promptText.trim()) return;
 
+      // No-task-assumption: intención de resume sin tarea activa → preguntar, no asumir
+      const RESUME_RE = /\b(en qué estábamos|en que estabamos|dónde íbamos|donde íbamos|sigamos|continuemos|retomar la tarea)\b/i;
+      if (!input.taskId && RESUME_RE.test(promptText)) {
+        const active = readActiveTaskId();
+        const st = active ? getTaskState(active) : null;
+        if (st && st.phase !== "DONE") {
+          emitTextPart(output, `[wait-a-minute] Hay una tarea pendiente: ${active} (fase ${st.phase}). ¿Quieres continuarla? Responde /wam resume ${active} o define una tarea nueva — no asumo intención.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+        } else {
+          emitTextPart(output, "[wait-a-minute] No hay tarea activa. Dime qué tarea nueva quieres — no asumo intención previa.", { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+        }
+        return;
+      }
+
       let taskId = input.taskId || readActiveTaskId() || "default-task";
 
       // Clarification Gate (spec clarification-gate): en ASKING el mensaje se
@@ -313,10 +310,19 @@ const WaitAMinutePlugin = async (pluginInput) => {
       // Continuation fast-path: contrato aprobado + sin claim de DONE → no inyectar nada,
       // el agente fluye sin interrupción (ni contrato ni línea de progreso).
       const existingState = getTaskState(taskId);
-      if (existingState?.contract?.status === "APPROVED" && existingState?.phase !== "ASKING") {
+      if (existingState?.contract?.status === "APPROVED") {
         const claim = waitAMinute.evaluateCompletionGate(existingState, promptText);
         if (!claim.blocked && !claim.allDone) {
           input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
+          // Continuation: solo N2 (live task delta) — no reconstruir el pack
+          try {
+            updateLiveContext(taskId, existingState);
+            const liveFile = path.join(projectDirectory, ".wam", "context", "task-context.md");
+            if (fs.existsSync(liveFile)) {
+              const live = fs.readFileSync(liveFile, "utf-8").trim();
+              if (live) emitTextPart(output, `[wam N2 task]\n${live}\n`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+            }
+          } catch {}
           return;
         }
       }
@@ -372,18 +378,21 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       const inject = prepareSystemInject(analysis, updatedState, cfg, projectDirectory, waitAMinute, taskId, emitTextPart, input, output);
 
-      // Contexto seleccionado bajo presupuesto (change 2): L1 base + cápsulas
-      // relevantes de la tarea, con dependencias y sin redundancia.
+      // Context Assembly Layer: paquete formal N0-N3 por tarea (ni más ni menos)
       try {
-        const pkg = selectContext(promptText, { budget: cfg.contextBudget || 4000, root: projectDirectory });
-        if (pkg.selected_ids.length) {
-          inject.push(`[wait-a-minute: contexto seleccionado (${pkg.budget_used}/${pkg.budget} tok)]`);
-          for (const c of pkg.capsules) {
-            inject.push(`- [${c.level} ${c.provenance}] ${c.context_id} — ${(c.purpose || c.content).slice(0, 120)}`);
-          }
-          if (pkg.sufficiency === "insufficient") {
-            inject.push(`[wait-a-minute: contexto insuficiente — faltan: ${pkg.missing.join(", ")}. /wam ctx get <q>]`);
-          }
+        initMemory();
+        updateProjectMemo(analysis);
+        const pack = assembleContext({
+          prompt: promptText,
+          taskId,
+          classification: analysis.intent?.classification,
+          mode: analysis.strategy,
+          projectPath: projectDirectory,
+          budget: cfg.contextBudget || 4000,
+          taskState: updatedState,
+        });
+        if (pack.lines.length) {
+          inject.push(pack.lines.join("\n") + `\n[wam pack ${pack.budget_used}/${pack.budget} tok ${pack.levels.N0 ? "N0" : ""}${pack.levels.N1 ? "+N1" : ""}${pack.levels.N2 ? "+N2" : ""}${pack.levels.N3 ? "+N3" : ""}]`);
         }
       } catch {}
 
@@ -593,6 +602,10 @@ function wamCli(args, cfg = {}) {
       }
     }
     return "Uso: /wam contract <approve|reject|edit <json>>";
+  }
+
+  if (sub === "resume") {
+    return JSON.stringify(waitAMinute.resumeTask(action || taskId));
   }
 
   if (sub === "progress") {
@@ -956,6 +969,17 @@ const waitAMinute = {
   },
 
   /** Aprueba el contrato: PROPOSED → APPROVED, fase → IMPLEMENTING. */
+  resumeTask: function(taskId) {
+    const state = getTaskState(taskId);
+    if (!state) return { ok: false, reason: "Sin estado de tarea para: " + taskId };
+    if (state.phase === "DONE") return { ok: false, reason: "Tarea DONE — no se reabre automáticamente. Crea una nueva." };
+    writeActiveTaskId(taskId);
+    try {
+      updateLiveContext(taskId, state);
+    } catch {}
+    return { ok: true, taskId, phase: state.phase, contract: state.contract?.status || "?" };
+  },
+
   approveContract: function(taskId) {
     const state = getTaskState(taskId);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
@@ -976,6 +1000,9 @@ const waitAMinute = {
     if (state.phase !== "DONE") state.phase = "IMPLEMENTING";
     state.nextAction = nextActionFrom(state);
     persistTaskState(taskId, state);
+    try {
+      updateLiveContext(taskId, state);
+    } catch {}
     return { ok: true, status: "APPROVED", phase: state.phase };
   },
 
