@@ -370,6 +370,16 @@ function detectSubprojects(root, maxDepth = 2) {
       } catch {}
     }
   };
+  // El propio root: si es repo git con package.json, reportarlo como Proyecto
+  try {
+    const pkgPath = path.join(root, "package.json");
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+      const langs = stackOf(pkg);
+      out.push(`Proyecto ${path.basename(root)} (${pkg.name || path.basename(root)}${langs.length ? `: ${langs.join("+")}` : ""})`);
+      seen.add(root);
+    }
+  } catch {}
   walk(root, 1);
   return out;
 }

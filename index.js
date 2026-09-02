@@ -326,7 +326,13 @@ const WaitAMinutePlugin = async (pluginInput) => {
         const claim = waitAMinute.evaluateCompletionGate(existingState, promptText);
         if (!claim.blocked && !claim.allDone) {
           input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
-          // Continuation: solo N2 (live task delta) — no reconstruir el pack
+          // Continuation: solo N2 (live task delta) — no reconstruir el pack.
+          // PERO la memoria de contexto se persiste SIEMPRE (sesión nueva o
+          // retomada): project.md con subproyectos detectados se genera aunque
+          // el mensaje no pase por el flujo completo.
+          try {
+            updateProjectMemo({}, wamRoot);
+          } catch {}
           try {
             updateLiveContext(taskId, existingState, wamRoot);
             const liveFile = path.join(wamRoot, ".wam", "context", "task-context.md");
