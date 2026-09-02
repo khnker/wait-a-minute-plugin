@@ -70,15 +70,42 @@ const ACTIVE_FILE = (root) => path.join(root || process.cwd(), ".wam", "active-t
 function readActiveTaskId(root) {
   try {
     const v = fs.readFileSync(ACTIVE_FILE(root), "utf-8").trim();
-    return v || null;
+    if (!v) return null;
+    try {
+      const j = JSON.parse(v);
+      if (j && typeof j === "object" && j.id) return j.id;
+    } catch {}
+    return v;
   } catch {
     return null;
   }
 }
 
+function readActiveTaskRecord(root) {
+  try {
+    const raw = fs.readFileSync(ACTIVE_FILE(root), "utf-8").trim();
+    if (!raw) return null;
+    try {
+      const j = JSON.parse(raw);
+      if (j && j.id && typeof j.ts === "number") return j;
+    } catch {}
+    return { id: raw, ts: 0 };
+  } catch {
+    return null;
+  }
+}
+
+function readActiveTaskIdFresh(root, ttlMs = 60000) {
+  const rec = readActiveTaskRecord(root);
+  if (!rec) return null;
+  if (!rec.ts) return null;
+  if (Date.now() - rec.ts <= ttlMs) return rec.id;
+  return null;
+}
+
 function writeActiveTaskId(id, root) {
   fs.mkdirSync(path.dirname(ACTIVE_FILE(root)), { recursive: true });
-  fs.writeFileSync(ACTIVE_FILE(root), id);
+  fs.writeFileSync(ACTIVE_FILE(root), JSON.stringify({ id, ts: Date.now() }));
 }
 
 function listTaskIds(root) {
@@ -101,17 +128,22 @@ const GENERIC_TASK = /^(default-task|task|general|)$/;
 /**
  * taskId efectivo de WAM para un mensaje:
  * - input.taskId explícito y específico (conversación de opencode) → se usa tal cual
- * - taskId genérico (default-task) → namespace por sesión: ses-<sessionID>
- * - sin taskId ni sesión conocida → active-task global de la carpeta
+ * - taskId conocido en sessionTasks (cache de chat.message) → ese
+ * - active-task reciente (<=60s, escrito por /wam task switch o /wam resume) →
+ *   ese (intención explícita reciente del usuario)
+ * - sin taskId ni sesión conocida → namespace por sesión: ses-<sessionID>
+ *
+ * active-task global NO se usa como fallback automático: solo /wam task switch
+ * o /wam resume lo consultan vía readActiveTaskIdFresh() con TTL de 60s. Esto
+ * evita que sesiones nuevas adopten estado de tareas previas en la misma
+ * carpeta; tras 60s sin actividad el active-task se considera obsoleto.
  */
 function effectiveTaskId(input, sessionTasks, wamRoot) {
   if (input?.taskId && !GENERIC_TASK.test(input.taskId)) return input.taskId;
   const cached = sessionTasks?.get?.(input?.sessionID);
   if (cached) return cached;
-  // active global de la carpeta (fijado explícito via /wam task switch o resume)
-  const active = readActiveTaskId(wamRoot);
-  if (active) return active;
-  // sesión nueva en carpeta sin active → namespace por sesión (N sesiones aisladas)
+  const fresh = readActiveTaskIdFresh(wamRoot);
+  if (fresh) return fresh;
   if (input?.sessionID) return `ses-${input.sessionID.slice(-10)}`;
   return "default-task";
 }
@@ -371,7 +403,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       // No-task-assumption: intención de resume sin tarea activa → preguntar, no asumir
       const RESUME_RE = /\b(en qué estábamos|en que estabamos|dónde íbamos|donde íbamos|sigamos|continuemos|retomar la tarea)\b/i;
       if (!input.taskId && RESUME_RE.test(promptText)) {
-        const active = sessionTasks.get(input.sessionID) || readActiveTaskId(wamRoot);
+        const active = sessionTasks.get(input.sessionID) || readActiveTaskIdFresh(wamRoot);
         const st = active ? getTaskState(active, wamRoot) : null;
         if (st && st.phase !== "DONE") {
           emitTextPart(output, `[wait-a-minute] Hay una tarea pendiente: ${active} (fase ${st.phase}). ¿Quieres continuarla? Responde /wam resume ${active} o define una tarea nueva — no asumo intención.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
@@ -654,7 +686,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
       output.parts = output.parts || [];
       const sid = input.sessionID;
       const root = await resolveSessionBase(sid);
-      const taskKey = sessionTasks.get(sid) || readActiveTaskId(root) || "default-task";
+      const taskKey = sessionTasks.get(sid) || readActiveTaskIdFresh(root) || (sid ? `ses-${sid.slice(-10)}` : "default-task");
       output.parts.push({
         id: genPartId(),
         type: "text",
@@ -672,7 +704,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
         if (bypassed) return;
         const sid = input?.sessionID;
         const taskRoot = await resolveSessionBase(sid);
-        const taskId = sessionTasks.get(sid) || readActiveTaskId(taskRoot) || "default-task";
+        const taskId = sessionTasks.get(sid) || readActiveTaskIdFresh(taskRoot) || (sid ? `ses-${sid.slice(-10)}` : "default-task");
         const st = getTaskState(taskId, taskRoot);
         const tool = input?.tool || "";
 
