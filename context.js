@@ -88,7 +88,7 @@ export function listCapsules(root, { level, lifecycle, sessionId } = {}) {
     .filter(Boolean)
     .filter((c) => !level || c.level === level)
     .filter((c) => !lifecycle || c.lifecycle === lifecycle)
-    .filter((c) => !sessionId || c.session_id === sessionId)
+    .filter((c) => !sessionId || c.session_id === undefined || c.session_id === sessionId)
     .sort((a, b) => (a.importance || 0) - (b.importance || 0));
 }
 
@@ -269,7 +269,7 @@ export function estimateCapsuleTokens(capsule) {
 export function selectContext(task, { budget = 8000, root, sessionId, log = true } = {}) {
   const now = Date.now();
   const taskTokens = tokenize(task);
-  const capsules = listCapsules(root)
+  const capsules = listCapsules(root, sessionId ? { sessionId } : {})
     .filter((c) => c.lifecycle === "active" && c.level !== "L4");
 
   const selected = [];
