@@ -21,6 +21,9 @@ import { updateProjectMemo } from "./memory.js";
 import { getTaskState } from "./engine.js";
 import { routeSkillsV2 } from "./engine.js";
 
+// Aislamiento: los tests NO deben escribir .wam en el repo del plugin
+process.chdir(fs.mkdtempSync(path.join(os.tmpdir(), "wam-pl-iso-")));
+
 test("default export es una función (Plugin factory)", () => {
   assert.equal(typeof pluginDefault, "function");
 });
@@ -382,6 +385,13 @@ test("Memory on DONE: tarea completada deriva summary.md + recent-changes.md (sp
   const today = new Date().toISOString().slice(0, 10);
   const rc = fs.readFileSync(path.join(process.cwd(), ".wam", "context", "recent-changes.md"), "utf8");
   assert.ok(rc.includes(`## ${today} — ${taskId}`), "recent-changes registra la tarea completada");
+
+  // Compresión automática en DONE: caveman-summary.md persistido sin /wam compress
+  const cavFile = path.join(process.cwd(), ".wam", "tasks", taskId, "caveman-summary.md");
+  assert.ok(fs.existsSync(cavFile), "caveman-summary.md generado automáticamente en DONE");
+  const cav = fs.readFileSync(cavFile, "utf8");
+  assert.ok(cav.includes(taskId), "resumen terse identifica la tarea");
+  assert.ok(cav.length < 600, "resumen comprimido (terse, no el transcript)");
 
   try {
     fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true });

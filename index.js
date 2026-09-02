@@ -148,6 +148,26 @@ function applyCompletionGate(state, promptText, taskId, waitAMinute, persistTask
   return gate;
 }
 
+/**
+ * Compresión automática de tarea (caveman-summary.md). Se genera en DONE
+ * (memoria comprimida para continuidad) y manualmente via /wam compress.
+ */
+function writeCavemanSummary(taskId, state, root, extra = "") {
+  const reqs = state?.requirements || [];
+  const pend = reqs.filter((r) => r.status !== "done" && r.status !== "verified").length;
+  const base = [
+    `task ${taskId} — ${state?.phase || "?"} / ${state?.contract?.status || "?"}`,
+    `req: ${pend}/${reqs.length} pend | next: ${state?.nextAction || "—"}`,
+  ];
+  const cav = cavemanify([...base, extra].filter(Boolean).join("\n"));
+  try {
+    const dir = path.join(root || process.cwd(), ".wam", "tasks", taskId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "caveman-summary.md"), cav + "\n");
+  } catch {}
+  return cav;
+}
+
 function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute, taskId) {
   const inject = [];
 
@@ -448,6 +468,13 @@ const WaitAMinutePlugin = async (pluginInput) => {
           changes: updatedState.contract?.requirements || [],
           verification: `requisitos completos: ${(updatedState.requirements || []).length}`,
         }, wamRoot);
+        // Compresión automática en DONE: memoria terse para continuidad futura
+        writeCavemanSummary(taskId, updatedState, wamRoot, [
+          "completed:",
+          ...(updatedState.contract?.requirements || []).map((r) => `- ${r}`),
+          "verification:",
+          ...(updatedState.requirements || []).map((r) => `- ${r.id}: ${r.status}`),
+        ].join("\n"));
         try {
           closeSession({
             sessionId: getSessionId(wamRoot),
@@ -671,21 +698,12 @@ function wamCli(args, cfg = {}, root = process.cwd()) {
 
   if (sub === "compress") {
     const id = rest.join(" ") || action || taskId;
-    const st = getTaskState(id);
+    const st = getTaskState(id, root);
     if (!st) return "Sin estado de tarea";
-    const pend = (st.requirements || []).filter((r) => r.status !== "done").length;
     const budget = cfg.budgetTokens || DEFAULT_CONFIG.budgetTokens;
-    const cav = cavemanify([
-      `task ${id} — ${st.phase} / ${st.contract?.status || "?"}`,
-      `req: ${pend}/${(st.requirements || []).length} pend | next: ${st.nextAction || "—"}`,
-    ].join("\n"));
+    const cav = writeCavemanSummary(id, st, root);
     const tokens = estimateTokens(cav);
     const headroom = Math.max(0, budget - tokens);
-    try {
-      const dir = path.join(process.cwd(), ".wam", "tasks", id);
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, "caveman-summary.md"), cav + "\n");
-    } catch {}
     return `${cav}\n[tokens ${tokens} | headroom ${headroom}/${budget}]`;
   }
 
