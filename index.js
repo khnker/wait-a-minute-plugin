@@ -444,6 +444,42 @@ const WaitAMinutePlugin = async (pluginInput) => {
         return;
       }
 
+      // Aprobación: automática solo si NO hay incertidumbre. Si la hay, se
+      // presenta el contrato y se pide confirmación (flujo humano en el loop).
+      // Incertidumbre = ambigüedad alta, confianza de intención baja, o
+      // unknowns abiertos sin responder (los blocking ya fueron ASKING).
+      const intentConf = Number(analysis.intent?.confidence ?? analysis.intent?.conf ?? 100);
+      const openUnknowns = (state.contract?.unknowns || []).filter((u) => u.status !== "answered" && u.status !== "blocking");
+      const highUncertainty =
+        (analysis.ambiguity || "low") === "high" ||
+        intentConf < 60 ||
+        openUnknowns.length > 0;
+      // Confirmación natural del usuario ante el contrato presentado (sin /wam)
+      const trimmed = promptText.trim();
+      const userConfirms =
+        !highUncertainty ||
+        /^(s[ií]|ok|okey|dale|hazlo|adelante|continuar|continua|aprobar|confirmo|correcto|perfecto|bueno|va|listo|sigue)\b/i.test(trimmed) ||
+        trimmed.includes("aprobar contrato");
+
+      if (state.contract?.status === "PROPOSED" && state.phase === "PROPOSED" && userConfirms) {
+        waitAMinute.approveContract(taskId, wamRoot);
+        try {
+          recordDecision({
+            id: `strategy-${taskId}-${Date.now()}`,
+            decision: `Aprobar estrategia ${analysis.strategy || "NORMAL"} para ${taskId}`,
+            reason: promptText.slice(0, 120),
+            source: highUncertainty ? "user-decided" : "observed",
+            confidence: "high",
+          }, wamRoot);
+        } catch {}
+        const fresh = getTaskState(taskId, wamRoot);
+        if (fresh) {
+          state.contract = fresh.contract;
+          state.phase = fresh.phase;
+          state.nextAction = fresh.nextAction;
+        }
+      }
+
       const gate = applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom, wamRoot);
       const updatedState = getTaskState(taskId, wamRoot);
 
@@ -533,32 +569,9 @@ const WaitAMinutePlugin = async (pluginInput) => {
         emitTextPart(output, inject.join("\n") + "\n", { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
       }
 
-      // Detectar confirmación implícita de continuación
-      const lower = (input.message?.parts?.[0]?.text || "").toLowerCase();
-      
-      // Auto-aprobación para tareas que no requieren contrato explícito o son triviale
-      const isApproved = updatedState.contract?.status === "APPROVED";
-      const needsApproval = updatedState.phase === "PROPOSED" && !isApproved;
-
-      if (!needsApproval || lower.includes("continuar") || lower.includes("aprobar contrato")) {
-        if (needsApproval) {
-          waitAMinute.approveContract(taskId, wamRoot);
-          try {
-            recordDecision({
-              id: `strategy-${taskId}-${Date.now()}`,
-              decision: `Aprobar estrategia ${analysis.strategy || "NORMAL"} para ${taskId}`,
-              reason: promptText.slice(0, 120),
-              source: "user-decided",
-              confidence: "high",
-            }, wamRoot);
-          } catch {}
-        }
-      } else {
-        // Bloquear ejecución si no está aprobado
-        updatedState.phase = "PROPOSED";
-      }
-
-      if (updatedState.contract.status !== "APPROVED") {
+      // Incertidumbre sin confirmar → presentar contrato y pedir aprobación
+      // (el usuario confirma con "sí/ok/dale/continuar..." — sin comandos).
+      if (updatedState.contract?.status !== "APPROVED" && updatedState.phase !== "DONE") {
         waitAMinute.presentValidation({
           analysis: {
             ...analysis,
@@ -569,12 +582,6 @@ const WaitAMinutePlugin = async (pluginInput) => {
           ctx: output,
           meta: { sessionID: input.sessionID, messageID: output.message?.id || input.messageID },
         });
-      } else {
-        // En IMPLEMENTING o APPROVED, inyectar solo progreso corto
-        const pend = (updatedState.requirements || []).filter((r) => r.status !== "done").length;
-        if (pend > 0) {
-          emitTextPart(output, `[wait-a-minute: fase ${updatedState.phase}, ${pend}/${updatedState.requirements.length} requisitos pendientes]\n`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-        }
       }
 
       input.waitAnalysis = analysis;

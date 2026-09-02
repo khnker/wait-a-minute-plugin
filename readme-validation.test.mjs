@@ -5,10 +5,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import pluginDefault from "./index.js";
 import { routeSkillsV2, getTaskState } from "./engine.js";
 
+// Aislamiento: los tests NO deben escribir .wam en el repo del plugin
+process.chdir(fs.mkdtempSync(path.join(os.tmpdir(), "wam-rv-iso-")));
 const CWD = process.cwd();
 
 async function runHook(prompt, taskId, sessionID = "rv") {
@@ -23,20 +26,23 @@ function cleanup(taskId) {
 }
 
 test("Pre-flight cognitivo: analiza intención, contexto de proyecto y riesgo", async () => {
-  const a = await pluginDefault.analyze({ prompt: "refactorizar el scraper con tests", projectPath: CWD });
+  // projectPath = repo real del plugin (tiene package.json) — el cwd del test es tmp aislado
+  const a = await pluginDefault.analyze({ prompt: "refactorizar el scraper con tests", projectPath: import.meta.dirname });
   assert.ok(a.intent?.classification, "clasifica intención");
   assert.ok(a.known?.some((k) => /package\.json/.test(k)), "inspecciona repo (package.json detectado)");
   assert.ok(["low", "medium", "high"].includes(a.risk), "evalúa riesgo");
   assert.ok(a.complexity, "evalúa complejidad");
 });
 
-test("Completion Contract: propone requisitos, verificación y restricciones (PROPOSED)", async () => {
+test("Completion Contract: propone requisitos, verificación y restricciones (auto-aprobado sin incertidumbre)", async () => {
   const taskId = `rv-ct-${Date.now()}`;
   await runHook("implementar auth con refresh token y migración", taskId);
   const st = getTaskState(taskId);
   cleanup(taskId);
   assert.ok(st, "estado persistido");
-  assert.equal(st.phase, "PROPOSED");
+  // Prompt claro (sin incertidumbre) → contrato auto-aprobado, fase IMPLEMENTING
+  assert.equal(st.phase, "IMPLEMENTING");
+  assert.equal(st.contract?.status, "APPROVED");
   assert.ok(st.contract?.requirements?.length >= 1, "propone requisitos");
   assert.ok(Array.isArray(st.contract?.verification), "define verificación");
   assert.ok(Array.isArray(st.contract?.constraints), "define restricciones");

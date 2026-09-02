@@ -537,3 +537,24 @@ test("bloqueo duro: sesión principal NO muta con reqs pendientes; subagente (pa
   assert.equal(okSub, true, "subagente ejecutor puede mutar: " + okSub);
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
 });
+
+test("incertidumbre: prompt ambiguo pide aprobación; confirmación natural 'sí' aprueba (sin /wam)", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wam-unc-"));
+  const hooks = await pluginDefault({ directory: tmp, client: {}, project: {}, $: {} });
+  const taskId = `unc-${Date.now()}`;
+
+  // primer mensaje ambiguo → contrato PROPOSED (pide aprobación)
+  const out1 = { parts: [], system: [] };
+  await hooks["chat.message"]({ sessionID: "su1", parts: [{ type: "text", text: "haz algo con eso" }], taskId }, out1);
+  let st = getTaskState(taskId, tmp);
+  assert.equal(st.contract?.status, "PROPOSED", "ambiguo → espera aprobación (no auto-aprueba)");
+  const t1 = out1.parts.map((p) => p.text || "").join("\n");
+  assert.ok(/Continuar → ejecutar|contrato PROPOSED/i.test(t1), "contrato presentado pidiendo confirmación");
+
+  // confirmación natural → aprueba sin comando /wam
+  const out2 = { parts: [], system: [] };
+  await hooks["chat.message"]({ sessionID: "su1", parts: [{ type: "text", text: "si hazlo" }], taskId }, out2);
+  st = getTaskState(taskId, tmp);
+  assert.equal(st.contract?.status, "APPROVED", "confirmación 'si' aprueba el contrato");
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+});
