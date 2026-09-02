@@ -1,5 +1,5 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
-import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision } from "./memory.js";
+import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, updateLiveContext } from "./memory.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -120,6 +120,11 @@ function injectOperationalMemory(inject, analysis) {
     updateProjectMemo(analysis);
     const note = summarizeOperationalContext();
     if (note) inject.push(`[wait-a-minute: memoria operacional] ${note}`);
+    const liveFile = path.join(process.cwd(), ".wam", "context", "task-context.md");
+    if (fs.existsSync(liveFile)) {
+      const live = fs.readFileSync(liveFile, "utf-8").trim();
+      if (live) inject.push(`[wait-a-minute: contexto vivo]\n${live}`);
+    }
   } catch (err) {
     console.error("[wait-a-minute] operational memory load failed:", err);
   }
@@ -357,6 +362,11 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       const gate = applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom);
       const updatedState = getTaskState(taskId);
+
+      // Contexto vivo: snapshot de la tarea activa, actualizado en cada mensaje
+      try {
+        updateLiveContext(taskId, updatedState);
+      } catch {}
 
       const inject = prepareSystemInject(analysis, updatedState, cfg, projectDirectory, waitAMinute, taskId, emitTextPart, input, output);
 

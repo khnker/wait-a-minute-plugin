@@ -230,6 +230,45 @@ test("Operational Memory: updateProjectMemo mapea analysis.project → project.m
   fs.rmSync(projectMd, { force: true });
 });
 
+test("Live Context: task-context.md refleja la tarea activa, cierre y sobreescritura", async () => {
+  const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
+  const liveFile = path.join(process.cwd(), ".wam", "context", "task-context.md");
+
+  const t1 = `live-${Date.now()}`;
+  await hooks["chat.message"](
+    { parts: [{ type: "text", text: "implementa refresh-token rotation y agrega tests" }], taskId: t1 },
+    { parts: [], system: [] }
+  );
+  let body = fs.readFileSync(liveFile, "utf-8");
+  assert.ok(body.includes(t1), "contexto vivo apunta a la tarea activa");
+  assert.ok(/PROPOSED/.test(body), "fase reflejada");
+
+  assert.equal(pluginDefault.approveContract(t1).ok, true);
+  for (const r of getTaskState(t1).requirements) {
+    pluginDefault.markRequirement(t1, r.id, "done", "evidencia");
+    pluginDefault.markRequirement(t1, r.id, "verified", "npm test pasa");
+  }
+  await hooks["chat.message"](
+    { parts: [{ type: "text", text: "tarea completa, done" }], taskId: t1 },
+    { parts: [], system: [] }
+  );
+  body = fs.readFileSync(liveFile, "utf-8");
+  assert.ok(/DONE/.test(body), "contexto vivo refleja el cierre de tarea");
+
+  const t2 = `live2-${Date.now()}`;
+  await hooks["chat.message"](
+    { parts: [{ type: "text", text: "agrega cache redis" }], taskId: t2 },
+    { parts: [], system: [] }
+  );
+  body = fs.readFileSync(liveFile, "utf-8");
+  assert.ok(body.includes(t2), "contexto vivo sobreescrito por la nueva tarea");
+
+  try {
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", t1), { recursive: true, force: true });
+    fs.rmSync(path.join(process.cwd(), ".wam", "tasks", t2), { recursive: true, force: true });
+  } catch {}
+});
+
 test("cavemanify + /wam compress: resumen terse y headroom reportado", async () => {
   const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
   const taskId = `cav-${Date.now()}`;

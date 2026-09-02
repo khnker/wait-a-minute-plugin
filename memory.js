@@ -291,6 +291,30 @@ export function updateTaskMemory(taskId, { evidence = "", summary = "" } = {}, r
   return { ok: true, dir };
 }
 
+// -- contexto vivo (auto-adaptativo a la tarea en ejecución) ----------------
+
+/**
+ * Snapshot vivo de la tarea activa en .wam/context/task-context.md.
+ * Se actualiza en cada mensaje (chat.message) y se sobreescribe al cambiar
+ * de tarea — el contexto siempre refleja lo que el agente está ejecutando.
+ */
+export function updateLiveContext(taskId, state = {}, root) {
+  const dir = path.join(rootDir(root), ".wam", "context");
+  const reqs = state.requirements || [];
+  const pend = reqs.filter((r) => r.status !== "done" && r.status !== "verified").length;
+  const unverified = reqs.filter((r) => r.status === "done").length;
+  const unknowns = (state.unknowns || []).filter((u) => u.status === "blocking");
+  const body = [
+    "# Live Task Context",
+    `task: ${taskId} — ${state.phase || "?"} / ${state.contract?.status || "?"}`,
+    `req: ${pend} pend${unverified ? ` | ${unverified} sin verificar` : ""} de ${reqs.length}`,
+    `next: ${state.nextAction || "—"}`,
+    ...(unknowns.length ? [`blocking: ${unknowns.map((u) => `${u.id} ${u.question || u.statement}`).join(" | ")}`] : []),
+  ].join("\n");
+  StorageProvider.write(path.join(dir, "task-context.md"), body + "\n");
+  return { ok: true };
+}
+
 // -- recuperación de contexto (espec §13) -----------------------------------
 
 export function getOperationalContext(root) {
