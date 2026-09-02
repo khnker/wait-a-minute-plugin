@@ -277,7 +277,9 @@ export function selectContext(task, { budget = 8000, root, sessionId, log = true
   let used = 0;
 
   // 1. L1 base (siempre)
-  const l1 = capsules.filter((c) => c.level === "L1").sort((a, b) => (b.importance || 0) - (a.importance || 0));
+  const l1 = capsules
+    .filter((c) => c.level === "L1" && (c.content || "").trim().length > 0)
+    .sort((a, b) => (b.importance || 0) - (a.importance || 0));
   for (const c of l1) {
     const t = estimateCapsuleTokens(c);
     if (used + t > budget) {
@@ -289,9 +291,9 @@ export function selectContext(task, { budget = 8000, root, sessionId, log = true
     rationale.push(`${c.context_id}: L1 foundation (importance ${c.importance})`);
   }
 
-  // 2. L2/L3 por utility
+  // 2. L2/L3 por utility (solo capsules con contenido real — sin contenido no hay conocimiento)
   const candidates = capsules
-    .filter((c) => c.level === "L2" || c.level === "L3")
+    .filter((c) => (c.level === "L2" || c.level === "L3") && (c.content || "").trim().length > 0)
     .map((c) => ({ c, ...utility(c, taskTokens, now) }))
     .filter((u) => u.relevance > 0)
     .sort((a, b) => b.value - a.value);
