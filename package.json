@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node wait-a-minute-test.mjs && node --test --test-concurrency=1 plugin-load.test.mjs operational-memory.test.mjs readme-validation.test.mjs assumption-gate.test.mjs clarification-gate.test.mjs"
+    "test": "node wait-a-minute-test.mjs && node --test --test-concurrency=1 plugin-load.test.mjs operational-memory.test.mjs readme-validation.test.mjs assumption-gate.test.mjs clarification-gate.test.mjs context.test.mjs"
   },
   "keywords": [
     "opencode",

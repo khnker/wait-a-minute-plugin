@@ -1,5 +1,6 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
 import { initMemory, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, updateLiveContext } from "./memory.js";
+import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession } from "./context.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -19,6 +20,7 @@ const DEFAULT_CONFIG = {
   activePreset: "omni",
   silent: false,
   budgetTokens: 32000,
+  contextBudget: 4000,
   tierPrompts: {},
 };
 
@@ -370,6 +372,21 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       const inject = prepareSystemInject(analysis, updatedState, cfg, projectDirectory, waitAMinute, taskId, emitTextPart, input, output);
 
+      // Contexto seleccionado bajo presupuesto (change 2): L1 base + cápsulas
+      // relevantes de la tarea, con dependencias y sin redundancia.
+      try {
+        const pkg = selectContext(promptText, { budget: cfg.contextBudget || 4000, root: projectDirectory });
+        if (pkg.selected_ids.length) {
+          inject.push(`[wait-a-minute: contexto seleccionado (${pkg.budget_used}/${pkg.budget} tok)]`);
+          for (const c of pkg.capsules) {
+            inject.push(`- [${c.level} ${c.provenance}] ${c.context_id} — ${(c.purpose || c.content).slice(0, 120)}`);
+          }
+          if (pkg.sufficiency === "insufficient") {
+            inject.push(`[wait-a-minute: contexto insuficiente — faltan: ${pkg.missing.join(", ")}. /wam ctx get <q>]`);
+          }
+        }
+      } catch {}
+
       if (gate.blocked) {
         const pendingList = gate.pending.length > 0
           ? "\n  Requisitos pendientes:\n    " + gate.pending.map((p) => `- ${p}`).join("\n    ") + "\n"
@@ -404,6 +421,14 @@ const WaitAMinutePlugin = async (pluginInput) => {
           changes: updatedState.contract?.requirements || [],
           verification: `requisitos completos: ${(updatedState.requirements || []).length}`,
         });
+        try {
+          closeSession({
+            sessionId: getSessionId(projectDirectory),
+            taskId,
+            summary: (updatedState.contract?.requirements || []).join("; "),
+            candidates: (updatedState.requirements || []).map((r) => ({ id: r.id, title: r.title, evidence: r.evidence || [] })),
+          });
+        } catch {}
       }
 
       if (inject.length > 0) {
@@ -653,7 +678,49 @@ function wamCli(args, cfg = {}) {
     return "Uso: /wam task <list|switch <id>>";
   }
 
-  return "Uso: /wam <skills|contract|progress|task|compress|answer|assumptions|resolve>";
+  if (sub === "ctx") {
+    if (action === "list") {
+      const caps = listCapsules(process.cwd());
+      if (!caps.length) return "Sin cápsulas (usa /wam ctx add o extracción en DONE)";
+      return caps.map((c) => `${c.context_id} [${c.level} ${c.lifecycle}] ${c.provenance} ${(c.purpose || "").slice(0, 60)}`).join("\n");
+    }
+    if (action === "get") {
+      const q = rest.join(" ");
+      if (!q) return "Uso: /wam ctx get <query>";
+      const r = retrieveContext(q, { root: process.cwd() });
+      if (!r.ok) return r.message;
+      return r.capsules.map((h) => `[${h.capsule.level}] ${h.capsule.context_id} (rel ${h.relevance.toFixed(2)}) ${(h.capsule.purpose || "").slice(0, 80)}`).join("\n");
+    }
+    if (action === "show") {
+      const id = rest.join(" ");
+      const c = getCapsule(id, process.cwd());
+      if (!c) return `Cápsula ${id} no existe`;
+      return [
+        `${c.context_id} [${c.level} ${c.lifecycle}]`,
+        `provenance: ${c.provenance} | importance: ${c.importance}/10 | confidence: ${c.confidence}`,
+        `purpose: ${c.purpose}`,
+        `scope: ${c.scope}`,
+        `deps: ${(c.dependencies || []).join(", ") || "—"} | supersedes: ${c.supersedes || "—"}`,
+        `--- content (max 600 chars) ---`,
+        `${(c.content || "(sin contenido)").slice(0, 600)}`,
+      ].join("\n");
+    }
+    if (action === "promote") {
+      const [id, target, approved] = rest;
+      if (!id || !target) return "Uso: /wam ctx promote <id> <L2|L1> [approved]";
+      const r = promoteCapsule(id, target, { approvedBy: approved === "approved" ? "user" : "", root: process.cwd() });
+      if (!r.ok) return `Promoción rechazada: ${r.reason}`;
+      return `Promovida ${id} → ${target} [${r.capsule.provenance}]`;
+    }
+    if (action === "session") {
+      const sid = getSessionId(process.cwd());
+      const caps = listCapsules(process.cwd(), { sessionId: sid });
+      return `session: ${sid}\ncapsules de esta sesión: ${caps.length}\nL1 base: ${listCapsules(process.cwd(), { level: "L1", lifecycle: "active" }).length} cápsula(s)`;
+    }
+    return "Uso: /wam ctx <list|get <q>|show <id>|promote <id> <L2|L1> [approved]|session>";
+  }
+
+  return "Uso: /wam <skills|contract|progress|task|compress|ctx|answer|assumptions|resolve>";
 }
 
 /**
