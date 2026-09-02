@@ -177,8 +177,23 @@ test("resolveWamRoot: proyecto multi-repo → repo git objetivo del mensaje", ()
   assert.equal(resolveWamRoot("arregla el bug del frontend", proj), repoB);
   // path explícito → repo contenedor
   assert.equal(resolveWamRoot("revisa /frontend/src/app.tsx", proj), repoB);
-  // sin match → fallback al root del proyecto
-  assert.equal(resolveWamRoot("hola, ¿cómo estás?", proj), proj);
+  // sin match → continuidad: repo hijo con memoria .wam reciente
+  const proj2 = fs.mkdtempSync(path.join(os.tmpdir(), "wam-multi2-"));
+  const rA = path.join(proj2, "backend");
+  const rB = path.join(proj2, "frontend");
+  for (const r of [rA, rB]) {
+    fs.mkdirSync(path.join(r, ".wam", "context"), { recursive: true });
+    fs.writeFileSync(path.join(r, ".git"), "");
+    fs.writeFileSync(path.join(r, "package.json"), JSON.stringify({ name: path.basename(r) }));
+  }
+  // frontend tiene la memoria más reciente → mensaje sin señal de repo va a frontend
+  fs.writeFileSync(path.join(rB, ".wam", "context", "task-context.md"), "# Live Task Context\ntask: t-front");
+  fs.writeFileSync(path.join(rA, ".wam", "context", "task-context.md"), "# Live Task Context\ntask: t-back");
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(path.join(rA, ".wam", "context", "task-context.md"), old, old);
+  clearRepoCache();
+  assert.equal(resolveWamRoot("hola, ¿cómo estás?", proj2), rB, "continuidad: repo con .wam más reciente");
+  fs.rmSync(proj2, { recursive: true, force: true });
   fs.rmSync(proj, { recursive: true, force: true });
 });
 

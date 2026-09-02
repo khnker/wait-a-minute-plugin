@@ -95,7 +95,9 @@ export function assembleContext({
     const recent = ctx.recentChanges?.body || "";
     const recentSummary = recent.split(/^## /m).slice(0, 3).map((s) => s.trim()).filter(Boolean).join("\n# ");
     if (!isTrivial) {
-      spend("N1", `[wam N1 project] ${summarizeOperationalContext(projectPath)}`);
+      // N1 solo si hay memoria operacional real — cero líneas vacías (rigor = ahorro de tokens)
+      const n1summary = summarizeOperationalContext(projectPath);
+      if (n1summary) spend("N1", `[wam N1 project] ${n1summary}`);
       if (recentSummary) spend("N1", `[wam N1 recent] ${recentSummary.slice(0, 500)}`);
 
       // Provenance: inferido ≠ hecho — marcar docs con source inferred / confianza baja

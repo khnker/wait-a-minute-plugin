@@ -510,6 +510,23 @@ export function resolveWamRoot(prompt = "", sessionRoot = process.cwd()) {
       bestScore = score;
     }
   }
+  // Sin match y sessionRoot no es repo → continuidad: repo hijo con memoria
+  // .wam más reciente (el usuario sigue donde dejó el trabajo, no donde nació
+  // el proceso). Evita que mensajes sin señal de repo caigan a la raíz vacía.
+  if (best === sessionRoot && !repoSet.includes(sessionRoot) && repoSet.length) {
+    const withMemory = repoSet
+      .map((r) => {
+        const ctxFile = path.join(r, ".wam", "context", "task-context.md");
+        try {
+          return { r, mtime: fs.statSync(ctxFile).mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime);
+    if (withMemory.length) return withMemory[0].r;
+  }
   return best;
 }
 

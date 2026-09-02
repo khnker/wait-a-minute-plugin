@@ -127,7 +127,8 @@ function sectionsOf(body) {
 }
 
 function firstLine(s) {
-  const m = (s || "").split("\n").find((l) => l.trim());
+  // primera línea INFORMATIVA: salta headings (#/##) y líneas vacías
+  const m = (s || "").split("\n").find((l) => l.trim() && !/^#+\s/.test(l.trim()));
   return m ? m.trim() : "";
 }
 
@@ -317,15 +318,76 @@ export function updateLiveContext(taskId, state = {}, root) {
 
 // -- recuperación de contexto (espec §13) -----------------------------------
 
+const SUBPROJ_SKIP = new Set(["node_modules", ".git", ".wam", "upstream", ".cache", "dist", "build", "coverage", ".next", "vendor"]);
+
+/**
+ * Detecta subproyectos (repos git hijos) con package.json bajo el root.
+ * Útil cuando el root es multi-repo sin stack propio (ej. comparador-precios
+ * con backend/frontend/scraper) — la raíz no tiene package.json pero los
+ * repos hijos sí. Cada repo se reporta con su lenguaje dominante.
+ */
+function detectSubprojects(root, maxDepth = 2) {
+  const out = [];
+  const seen = new Set();
+  const stackOf = (pkg) => {
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    const langs = [];
+    if (deps.typescript) langs.push("typescript");
+    if (deps.react || deps["react-dom"] || deps.next) langs.push("react");
+    if (deps["@nestjs/core"] || deps.nestjs) langs.push("nestjs");
+    if (deps.express) langs.push("express");
+    if (deps.vue) langs.push("vue");
+    if (deps.svelte) langs.push("svelte");
+    if (deps.python || deps.flask || deps.django) langs.push("python");
+    return langs;
+  };
+  const walk = (dir, depth) => {
+    if (depth > maxDepth) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory() || SUBPROJ_SKIP.has(e.name)) continue;
+      const p = path.join(dir, e.name);
+      if (seen.has(p)) continue;
+      seen.add(p);
+      try {
+        if (fs.existsSync(path.join(p, ".git"))) {
+          const pkgPath = path.join(p, "package.json");
+          if (fs.existsSync(pkgPath)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+            const langs = stackOf(pkg);
+            out.push(`Subproyecto ${path.basename(p)} (${pkg.name || path.basename(p)}${langs.length ? `: ${langs.join("+")}` : ""})`);
+          } else {
+            out.push(`Subproyecto ${path.basename(p)} (repo git sin package.json)`);
+          }
+          continue; // no descender dentro de repos hijos
+        }
+        walk(p, depth + 1);
+      } catch {}
+    }
+  };
+  walk(root, 1);
+  return out;
+}
+
 export function updateProjectMemo(analysis, root) {
   const pi = analysis?.project || analysis?.projectInfo;
-  if (!pi) return;
   const known = [];
-  if (pi.detected_stack && pi.detected_stack !== "unknown") known.push(`Stack: ${pi.detected_stack}`);
-  if (pi.architecture && pi.architecture !== "unknown") known.push(`Arquitectura: ${pi.architecture}`);
-  for (const f of pi.relevant_files || []) known.push(`Artefacto: ${f}`);
-  const inferred = pi.inferred || [];
-  const assumed = pi.assumed || [];
+  if (pi) {
+    if (pi.detected_stack && pi.detected_stack !== "unknown") known.push(`Stack: ${pi.detected_stack}`);
+    if (pi.architecture && pi.architecture !== "unknown") known.push(`Arquitectura: ${pi.architecture}`);
+    for (const f of pi.relevant_files || []) known.push(`Artefacto: ${f}`);
+  }
+  const inferred = pi?.inferred || [];
+  const assumed = pi?.assumed || [];
+  // Raíz multi-repo sin stack propio → detectar subproyectos observados
+  if (!known.length && root) {
+    known.push(...detectSubprojects(root));
+  }
   if (!known.length && !inferred.length && !assumed.length) return;
   const body = [
     "# Project Context",

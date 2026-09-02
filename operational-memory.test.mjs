@@ -13,6 +13,7 @@ import {
   addConstraint,
   markStale,
   updateTaskMemory,
+  updateProjectMemo,
   redact,
 } from "./memory.js";
 
@@ -209,4 +210,24 @@ test("Formato: docs legibles y frontmatter YAML parseable", (t) => {
   assert.ok(raw.startsWith("---"));
   assert.ok(raw.includes("source: observed"));
   assert.ok(raw.includes("last_verified:"));
+});
+
+test("updateProjectMemo: raíz multi-repo sin stack → persiste subproyectos observados", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wam-subproj-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fe = path.join(root, "frontend");
+  const api = path.join(root, "api");
+  for (const [dir, name, deps] of [
+    [fe, "web-app", { typescript: "5", react: "18" }],
+    [api, "api-server", { typescript: "5", "@nestjs/core": "10" }],
+  ]) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, ".git"), "");
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name, dependencies: deps }));
+  }
+  // análisis sin stack detectado (raíz no tiene package.json)
+  updateProjectMemo({ project: { detected_stack: "unknown", architecture: "unknown", relevant_files: [] } }, root);
+  const { project } = getOperationalContext(root);
+  assert.match(project.body, /frontend.*react/, "detecta subproyecto frontend con react");
+  assert.match(project.body, /api.*nestjs/, "detecta subproyecto api con nestjs");
 });
