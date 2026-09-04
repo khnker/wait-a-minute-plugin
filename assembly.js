@@ -147,7 +147,7 @@ export function assembleContext({
   }
 
   // -- N2 Task (obligatorio, live state) ------------------------------------
-  const liveFile = path.join(projectPath, ".wam", "context", "task-context.md");
+   const liveFile = path.join(projectPath, ".wam", "tasks", taskId, "context.md");
   let liveBody = "";
   try {
     if (fs.existsSync(liveFile)) liveBody = fs.readFileSync(liveFile, "utf-8").trim();

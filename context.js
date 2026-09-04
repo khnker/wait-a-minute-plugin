@@ -362,7 +362,7 @@ export function selectContext(task, { budget = 8000, root, sessionId, log = true
 
   if (log) {
     try {
-      const logFile = path.join(root || process.cwd(), ".wam", "context", "selection-log.jsonl");
+       const logFile = path.join(root || process.cwd(), ".wam", "traces", "selection-log.jsonl");
       fs.mkdirSync(path.dirname(logFile), { recursive: true });
       fs.appendFileSync(logFile, JSON.stringify({ timestamp: nowIso(), task, selected_ids: pkg.selected_ids, budget_used: used, budget, sufficiency }) + "\n");
     } catch {}
@@ -523,9 +523,22 @@ export function resolveWamRoot(prompt = "", sessionRoot = process.cwd()) {
   if (best === sessionRoot && !repoSet.includes(sessionRoot) && repoSet.length) {
     const withMemory = repoSet
       .map((r) => {
-        const ctxFile = path.join(r, ".wam", "context", "task-context.md");
+        const wamRoot = path.join(r, ".wam", "tasks");
         try {
-          return { r, mtime: fs.statSync(ctxFile).mtimeMs };
+          const entries = fs.readdirSync(wamRoot, { withFileTypes: true });
+          let latest = 0;
+          for (const e of entries) {
+            if (!e.isDirectory()) continue;
+            const tf = path.join(wamRoot, e.name, "context.md");
+            try {
+              const m = fs.statSync(tf).mtimeMs;
+              if (m > latest) latest = m;
+            } catch {}
+          }
+          if (!latest) {
+            try { latest = fs.statSync(path.join(r, ".wam")).mtimeMs; } catch {}
+          }
+          return latest ? { r, mtime: latest } : null;
         } catch {
           return null;
         }

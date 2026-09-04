@@ -1,4 +1,5 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
+
 import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, updateLiveContext } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot } from "./context.js";
 import { assembleContext } from "./assembly.js";
@@ -64,6 +65,21 @@ function nextActionFrom(state) {
 }
 
 const BLOCKED_TOOLS = new Set(["write", "edit", "bash", "task", "todowrite", "pty_spawn", "pty_write", "pty_kill"]);
+
+// git de solo lectura (status/diff/log/...) es investigación read-only:
+// nunca requiere run-loop ni delegación — permitido aun en ASKING.
+const READONLY_GIT_RE = /^\s*git\s+(status|diff|log|show|ls-files|branch|stash\s+list|remote\s+-v|rev-parse|ls-remote)\b/;
+
+function bashCommandOf(input) {
+  const c = input?.args?.command ?? input?.params?.command ?? input?.input?.command ?? "";
+  if (typeof c === "string" && c.trim()) return c;
+  try {
+    for (const v of Object.values(input?.args ?? {})) {
+      if (typeof v === "string" && /^\s*git\s+/m.test(v)) return v;
+    }
+  } catch {}
+  return "";
+}
 
 const ACTIVE_FILE = (root) => path.join(root || process.cwd(), ".wam", "active-task");
 
@@ -148,9 +164,12 @@ function effectiveTaskId(input, sessionTasks, wamRoot) {
   return "default-task";
 }
 
+function taskDir(root, taskId) {
+  return path.join(root || process.cwd(), ".wam", "tasks", taskId);
+}
+
 function liveFileFor(root, taskId) {
-  const perSession = path.join(root || process.cwd(), ".wam", "context", `task-context-${taskId}.md`);
-  return perSession;
+  return path.join(taskDir(root, taskId), "context.md");
 }
 
 function readLiveContext(root, taskId) {
@@ -158,28 +177,15 @@ function readLiveContext(root, taskId) {
   try {
     if (fs.existsSync(perSession)) return fs.readFileSync(perSession, "utf-8").trim();
   } catch {}
-  try {
-    const global = path.join(root || process.cwd(), ".wam", "context", "task-context.md");
-    if (fs.existsSync(global)) return fs.readFileSync(global, "utf-8").trim();
-  } catch {}
   return "";
 }
 
 /**
- * Live context por sesión: escribe el global (última actividad de la carpeta)
- * y además una copia task-context-<taskId>.md aislada por sesión — dos sesiones
- * sobre la misma carpeta NO se pisan el N2.
+ * Live context por sesión: live snapshot en .wam/tasks/<taskId>/context.md.
+ * Aislado por task — dos sesiones sobre la misma carpeta NO se pisan el N2.
  */
 function persistLiveContext(taskId, state, root) {
   updateLiveContext(taskId, state, root);
-  try {
-    const g = path.join(root || process.cwd(), ".wam", "context", "task-context.md");
-    const s = liveFileFor(root, taskId);
-    if (fs.existsSync(g)) {
-      fs.mkdirSync(path.dirname(s), { recursive: true });
-      fs.copyFileSync(g, s);
-    }
-  } catch {}
 }
 
 // -- operational memory (memory.js): contexto inicial acelerador (spec §13) --
@@ -708,20 +714,21 @@ const WaitAMinutePlugin = async (pluginInput) => {
         const st = getTaskState(taskId, taskRoot);
         const tool = input?.tool || "";
 
-        // Delegación dura: la sesión PRINCIPAL (sin parentID) NO muta archivos
-        // cuando hay reqs pendientes de un contrato APPROVED — debe delegar a
-        // un subagente (Task). Los subagentes (con parentID) ejecutan libre.
-        if (st?.contract?.status === "APPROVED" && !sessionParents.has(sid)) {
-          const pend = (st.requirements || []).some((r) => r.status !== "done" && r.status !== "verified");
-          if (pend && MUTATING_TOOLS.has(tool)) {
-            const n = (st.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified").length;
-            const directive = `[wait-a-minute] ENFORCED BLOCK — ${n} req(s) pendiente(s) del contrato APPROVED: la sesión principal NO muta archivos. Delegar via Task en paralelo (ver [wam delegation]). Herramienta ${tool} bloqueada aquí.`;
-            input.output = directive;
-            throw new Error(directive);
-          }
-        }
+        // Delegación dura: DESACTIVADA PARA DESARROLLO — la sesión principal
+        // puede mutar archivos directamente (flujo sin fricción).
+        // if (st?.contract?.status === "APPROVED" && !sessionParents.has(sid)) {
+        //   const pend = (st.requirements || []).some((r) => r.status !== "done" && r.status !== "verified");
+        //   if (pend && MUTATING_TOOLS.has(tool)) {
+        //     const n = (st.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified").length;
+        //     const directive = `[wait-a-minute] ENFORCED BLOCK — ${n} req(s) pendiente(s) del contrato APPROVED: la sesión principal NO muta archivos. Delegar via Task en paralelo (ver [wam delegation]). Herramienta ${tool} bloqueada aquí.`;
+        //     throw new Error(directive);
+        //   }
+        // }
 
         if (st?.phase !== "ASKING") return;
+        // git read-only (status/diff/log) es investigación: permitido aun en ASKING.
+        // git mutante (commit/push) sigue bloqueado hasta responder la pregunta.
+        if (tool === "bash" && READONLY_GIT_RE.test(bashCommandOf(input))) return;
         if (BLOCKED_TOOLS.has(tool)) {
           const u = (st.contract?.unknowns || []).find((x) => x.status === "blocking");
           const question = u ? `${u.id}: ${u.question}` : "pregunta bloqueante pendiente";
@@ -1140,7 +1147,11 @@ const waitAMinute = {
         pending: blockingAssumptions.map((a) => `${a.id} — ${a.statement} (DECISION_CRITICAL sin resolver)`),
       };
     }
-    const pending = (state?.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified");
+    const pending = (state?.requirements || []).filter(
+      (r) =>
+        (r.status !== "done" && r.status !== "verified") ||
+        (r.status === "done" && !(r.evidence || []).length)
+    );
     if (pending.length > 0) {
       return {
         blocked: true,
@@ -1150,6 +1161,17 @@ const waitAMinute = {
         }),
       };
     }
+
+    const failingCriteria = (state?.completionContract?.criteria || []).filter(
+      (c) => c.status === "FAIL" || c.status === "UNKNOWN"
+    );
+    if (failingCriteria.length > 0) {
+      return {
+        blocked: true,
+        pending: failingCriteria.map((c) => `${c.id} — ${c.criterion} (${c.status})`),
+      };
+    }
+
     if (state?.contract?.status !== "APPROVED") {
       return {
         blocked: true,

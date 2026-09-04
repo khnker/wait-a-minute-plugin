@@ -47,7 +47,13 @@ test("R5: incertidumbre destructiva → DECISION_CRITICAL → bloquea aprobació
 
   const inp = { parts: [{ type: "text", text: "terminé, done" }], taskId };
   await hooks["chat.message"](inp, { parts: [], system: [] });
-  assert.ok(inp.parts[0].text.includes("COMPLETION GATE"), "DONE bloqueado por unknown sin responder");
+  const outText = inp.parts[0].text;
+  assert.ok(
+    outText.includes("BLOQUEADO") || outText.includes("COMPLETION GATE") || outText.includes("No implementar"),
+    "DONE bloqueado (interceptado, no avanza)"
+  );
+  const after = JSON.parse(requireState(taskId));
+  assert.notEqual(after.phase, "DONE", "no avanza a DONE mientras unknown sin responder");
 
   // resolución: se marca la unknown como respondida en el contrato persistido
   state.contract.unknowns.forEach((u) => (u.status = "answered"));

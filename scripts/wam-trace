@@ -1,0 +1,20 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+
+const traceId = process.argv[2];
+
+if (!traceId) {
+  console.error("Usage: wam trace <trace_id>");
+  process.exit(1);
+}
+
+const traceFile = path.join(process.cwd(), ".wam", "traces", `${traceId}.json`);
+
+if (!fs.existsSync(traceFile)) {
+  console.error(`Trace file not found: ${traceFile}`);
+  process.exit(1);
+}
+
+const content = fs.readFileSync(traceFile, "utf-8");
+console.log(content);

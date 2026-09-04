@@ -4,10 +4,12 @@
  * Analiza peticiones de usuario antes de la resolución de skills y la ejecución del agente.
  * Clasifica la tarea, inspecciona el proyecto, detecta supuestos y selecciona skills.
  */
+console.log('DEBUG: Engine loaded from /home/nicolas/dev/wait-a-minute-plugin/engine.js');
 
 const fs = await import("node:fs");
 const path = await import("node:path");
 const os = await import("node:os");
+import { logger } from "./logger.js";
 const tmpdir = os.tmpdir();
 
 
@@ -34,6 +36,78 @@ export function estimateTokens(text = "") {
 
 
 // -- Task State Management --
+
+import { ContextDecisionTracer } from "./context-decision-audit.js";
+
+/**
+ * Archives a completed task session by moving its directory to history.
+ *
+ * @param {string} taskId - The ID of the task to archive.
+ * @param {string} root - The workspace root.
+ */
+export async function archiveTaskSession(taskId, root) {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+
+  const taskDir = path.join(root, ".wam", "tasks", taskId);
+  const date = new Date().toISOString().split("T")[0];
+  const historyDir = path.join(root, ".wam", "history", date);
+  const destDir = path.join(historyDir, taskId);
+
+  try {
+    await fs.mkdir(historyDir, { recursive: true });
+    await fs.rename(taskDir, destDir);
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      console.error(`[WAM] Failed to archive task ${taskId}:`, err);
+    }
+  }
+}
+
+/**
+ * Decision Gate — helper para subagentes.
+ *
+ * Invocado cuando una bifurcación arquitectónica (nuevo servicio, modelo de datos,
+ * cambio de arquitectura) es detectada. Delegado obligatorio: documentar alternativas
+ * y evidencia técnica ANTES de implementar.
+ *
+ * @param {Object} args
+ * @param {string} args.taskId        - ID de tarea (default: "default").
+ * @param {string} args.projectRoot   - Raíz del proyecto (default: cwd).
+ * @param {string} args.decisionPoint - Qué se está decidiendo.
+ * @param {string} args.rationale     - Por qué esta ruta.
+ * @param {Array}  args.alternatives  - Alternativas descartadas [{name, pros, cons, whyRejected}].
+ * @param {Array}  args.evidence      - Evidencia técnica (links, benchmarks, docs, file:line).
+ * @param {Object} [args.technicalMetrics] - Métricas opcionales (latencia, costo, complejidad).
+ * @returns {{ok: boolean, entry: object|null, errors: string[]}}
+ */
+export function logArchitecturalDecision({
+  taskId = "default",
+  projectRoot,
+  decisionPoint,
+  rationale,
+  alternatives = [],
+  evidence = [],
+  technicalMetrics = {},
+} = {}) {
+  const errors = [];
+  if (!decisionPoint || typeof decisionPoint !== "string") errors.push("decisionPoint requerido");
+  if (!rationale || typeof rationale !== "string") errors.push("rationale requerido");
+  if (!Array.isArray(alternatives) || alternatives.length === 0) {
+    errors.push("alternatives[] requerido (≥1 alternativa descartada)");
+  }
+  if (!Array.isArray(evidence) || evidence.length === 0) {
+    errors.push("evidence[] requerido (≥1 evidencia técnica)");
+  }
+  if (errors.length > 0) {
+    logger.warn("DecisionGate", `Bloqueado: ${errors.join("; ")}`);
+    return { ok: false, entry: null, errors };
+  }
+  const tracer = new ContextDecisionTracer(taskId, projectRoot || process.cwd());
+  tracer.logTechnicalDecision(decisionPoint, rationale, alternatives, evidence, technicalMetrics);
+  logger.info("DecisionGate", `Registrada bifurcación: ${decisionPoint}`);
+  return { ok: true, entry: { decisionPoint, rationale }, errors: [] };
+}
 
 export function persistTaskState(taskId, state, root) {
   // Migrate legacy progress to requirements if needed
@@ -291,6 +365,45 @@ const SIMPLIFY_PROTECTED = [
 function evaluatePersistentPolicies(prompt, projectInfo, classification, mode) {
   const lower = prompt.toLowerCase();
   const applied = [];
+
+  // -- Decision Gate: detectar bifurcaciones arquitectónicas / modelo de datos --
+  // Bifurcaciones que exigen documentación obligatoria de alternativas + evidencia
+  // antes de proceder. Si hay match, se loguea vía tracer (si está disponible) y se
+  // marca como POLICY ACTIVE con gates adicionales para forzar cumplimiento.
+  const DECISION_GATES = [
+    {
+      id: "new-service",
+      label: "Nuevo servicio / componente",
+      pattern: /\b(nuevo|nueva|create|new)\s+(servicio|service|microservicio|módulo|module|servicio\s+externo)\b/,
+      gates: ["service-design-evidence", "alternatives-documented"],
+    },
+    {
+      id: "data-model",
+      label: "Cambio de modelo de datos / schema",
+      pattern: /\b(schema|migraci(ó|o)n|migration|modelo\s+de\s+datos|data\s+model|entidad\s+nueva|new\s+entity|nueva\s+tabla|new\s+table)\b/,
+      gates: ["schema-evolution-evidence", "backward-compat-check"],
+    },
+    {
+      id: "architecture",
+      label: "Cambio de arquitectura",
+      pattern: /\b(arquitectura|architecture|refactor\s+arquitect(ó|o)nico|migrar\s+a|migrate\s+to|reemplazar\s+stack|replace\s+stack|monorepo|monolith\s+to\s+microservices|event\s+driven|ddd|hexagonal)\b/,
+      gates: ["adr-required", "trade-off-analysis"],
+    },
+  ];
+
+  const bifurcations = DECISION_GATES.filter((g) => g.pattern.test(lower));
+  if (bifurcations.length > 0) {
+    applied.push({
+      policy: "decision-gate",
+      status: "ACTIVE",
+      gates: bifurcations.flatMap((b) => b.gates),
+      restrictions: bifurcations.map(
+        (b) => `Bifurcación detectada (${b.label}): subagente DEBE invocar tracer.logTechnicalDecision(decisionPoint, rationale, alternatives[], evidence[], technicalMetrics{}) antes de implementar.`
+      ),
+      bifurcations: bifurcations.map((b) => b.id),
+    });
+  }
+
 
   // Scope: siempre aplica salvo tareas triviales puras
   if (classification.type !== "trivial") {
@@ -614,6 +727,7 @@ function recordSkillUsage(usage, baseDir) {
   }
   log.push(entry);
   if (log.length > 200) log = log.slice(-200);
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
   fs.writeFileSync(logFile, JSON.stringify(log, null, 2));
   return entry;
 }
@@ -622,6 +736,16 @@ function recordSkillUsage(usage, baseDir) {
  * Routing con scoring ponderado + persistencia. Reemplaza routeSkills() en analyze.
  */
 export function routeSkillsV2(prompt, projectInfo, registry, mode, options = {}) {
+  logger.info("pipeline-routing", `Starting routeSkillsV2. Mode: ${mode}, Prompt: ${prompt.substring(0, 50)}...`);
+  const tracer = new ContextDecisionTracer(options.taskId || "default", options.projectRoot || process.cwd()); console.log("--- DEBUG: Tracer instanciado para " + (options.taskId || "default"));
+
+  // Log concept extraction
+  tracer.logConceptExtraction(prompt, { source: "user" });
+
+// Log candidate retrieval
+   tracer.logCandidateRetrieval(prompt, Object.keys(registry).length, { source: "registry" });
+
+  // Continue with existing routing logic...
   const rigor = options.rigor || (mode === "FAST" ? "MINIMAL" : mode === "STRICT" ? "RIGOROUS" : "STANDARD");
   const lower = prompt.toLowerCase();
   const candidates = [];
@@ -646,10 +770,29 @@ export function routeSkillsV2(prompt, projectInfo, registry, mode, options = {})
     }
   }
 
-  candidates.sort((a, b) => b.score - a.score);
-  const limit = rigor === "MINIMAL" ? 0 : rigor === "RIGOROUS" ? 5 : 3;
-  const selected = candidates.slice(0, limit);
-  const overflow = candidates.slice(limit);
+candidates.sort((a, b) => b.score - a.score);
+   const limit = rigor === "MINIMAL" ? 0 : rigor === "RIGOROUS" ? 5 : 3;
+   const selected = candidates.slice(0, limit);
+   const overflow = candidates.slice(limit);
+
+   // Log selection decisions
+   selected.forEach(skill => {
+     tracer.logSelectionDecision(skill.id, skill.score, {
+       reason: `Seleccionado por score ${skill.score} y keywords: ${skill.matchingKeywords.join(', ')}`
+     });
+   });
+
+   overflow.forEach(skill => {
+     tracer.logSelectionDecision(skill.id, skill.score, {
+       reason: `Rechazado por score bajo (${skill.score})`
+     });
+   });
+
+   rejected.forEach(skill => {
+     tracer.logSelectionDecision(skill.id, 0, {
+       reason: skill.reason
+     });
+   });
 
   return {
     candidates,
@@ -749,12 +892,21 @@ function evaluateSkill(skillId, registry) {
  * El contenido real viaja embebido en el catálogo (build-time); sin red en runtime.
  */
 export function loadSkillOnDemand(skillId, registry, baseDir) {
+  logger.info("plugin-load", `Starting loadSkillOnDemand for skill: ${skillId}`);
+  const tracer = new ContextDecisionTracer(`load-${skillId}`, baseDir || process.cwd());
+  tracer.logConceptExtraction(`Carga de skill ${skillId}`, { source: "demand" });
+
   const skill = registry[skillId];
-  if (!skill) return { loaded: false, reason: "No registrada" };
+  if (!skill) {
+    tracer.logSelectionDecision(skillId, 0, { reason: "No registrada" });
+    return { loaded: false, reason: "No registrada" };
+  }
   if (!APPROVED_STATUSES.includes(skill.status)) {
+    tracer.logSelectionDecision(skillId, 0, { reason: `No aprobada (${skill.status})` });
     return { loaded: false, reason: `No aprobada (${skill.status})` };
   }
   if (!skill.content || !skill.content.trim()) {
+    tracer.logSelectionDecision(skillId, 0, { reason: `Sin contenido embebido (${skillId}) — catálogo metadata-only` });
     return { loaded: false, skillId, reason: `Sin contenido embebido (${skillId}) — catálogo metadata-only` };
   }
   const root = baseDir || process.cwd();
@@ -764,6 +916,7 @@ export function loadSkillOnDemand(skillId, registry, baseDir) {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(skillFile, skill.content);
   }
+  tracer.logSelectionDecision(skillId, 1, { reason: "Cargada exitosamente" });
   return {
     loaded: true,
     skillId,
@@ -1365,7 +1518,7 @@ export async function analyze(options) {
 
   // Step 5.5: Skill routing v2 — scoring ponderado + persistencia registry
   const rigor = modeInfo.mode === "FAST" ? "MINIMAL" : modeInfo.mode === "STRICT" ? "RIGOROUS" : "STANDARD";
-  const skillSelection = routeSkillsV2(prompt, projectInfo, skillRegistry, rigor, { rigor, weights: config?.scoringWeights });
+  const skillSelection = routeSkillsV2(prompt, projectInfo, skillRegistry, rigor, { rigor, weights: config?.scoringWeights, projectRoot: baseDir });
   try { persistRegistry(registryFile, skillRegistry); } catch {}
 
   // Explicalidad: qué skills seleccionadas y por qué (spec §23)

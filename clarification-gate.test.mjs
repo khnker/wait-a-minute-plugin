@@ -150,6 +150,27 @@ test("tool.execute.before: mutantes bloqueadas en ASKING, read-only permitidas",
   cleanup(taskId);
 });
 
+test("git read-only permitido en ASKING; git mutante sigue bloqueado", async () => {
+  const hooks = await freshHooks();
+  const taskId = `cg-git-${Date.now()}`;
+  await enterAsking(hooks, taskId);
+  await wam(hooks, `task switch ${taskId}`);
+
+  await hooks["tool.execute.before"]({ tool: "bash", args: { command: "git status --short" }, output: {} });
+  await hooks["tool.execute.before"]({ tool: "bash", args: { command: "git diff --stat" }, output: {} });
+  await assert.rejects(
+    () => hooks["tool.execute.before"]({ tool: "bash", args: { command: "git push origin main" }, output: {} }),
+    /ENFORCED BLOCK/,
+    "git push sigue bloqueado en ASKING hasta responder"
+  );
+  await assert.rejects(
+    () => hooks["tool.execute.before"]({ tool: "bash", output: {} }),
+    /ENFORCED BLOCK/,
+    "bash sin comando sigue bloqueado"
+  );
+  cleanup(taskId);
+});
+
 test("AC10+AC11: fast-path no aplica en ASKING y DONE queda bloqueado", async () => {
   const hooks = await freshHooks();
   const taskId = `cg-ac1011-${Date.now()}`;

@@ -123,7 +123,7 @@ test("retrieveContext: no fabrica contexto", () => {
 
 test("selection observability: log registrado", () => {
   selectContext("token rotation", { budget: 500, root: ROOT });
-  const logFile = path.join(ROOT, ".wam", "context", "selection-log.jsonl");
+   const logFile = path.join(ROOT, ".wam", "traces", "selection-log.jsonl");
   assert.ok(fs.existsSync(logFile), "selection-log.jsonl existe");
   const lines = fs.readFileSync(logFile, "utf-8").trim().split("\n").filter(Boolean);
   assert.ok(lines.length >= 1, "al menos una entrada");
@@ -187,10 +187,12 @@ test("resolveWamRoot: proyecto multi-repo → repo git objetivo del mensaje", ()
     fs.writeFileSync(path.join(r, "package.json"), JSON.stringify({ name: path.basename(r) }));
   }
   // frontend tiene la memoria más reciente → mensaje sin señal de repo va a frontend
-  fs.writeFileSync(path.join(rB, ".wam", "context", "task-context.md"), "# Live Task Context\ntask: t-front");
-  fs.writeFileSync(path.join(rA, ".wam", "context", "task-context.md"), "# Live Task Context\ntask: t-back");
+  fs.mkdirSync(path.join(rB, ".wam", "tasks", "t-front"), { recursive: true });
+  fs.mkdirSync(path.join(rA, ".wam", "tasks", "t-back"), { recursive: true });
+  fs.writeFileSync(path.join(rB, ".wam", "tasks", "t-front", "context.md"), "# Live Task Context\ntask: t-front");
+  fs.writeFileSync(path.join(rA, ".wam", "tasks", "t-back", "context.md"), "# Live Task Context\ntask: t-back");
   const old = new Date(Date.now() - 60000);
-  fs.utimesSync(path.join(rA, ".wam", "context", "task-context.md"), old, old);
+  fs.utimesSync(path.join(rA, ".wam", "tasks", "t-back", "context.md"), old, old);
   clearRepoCache();
   assert.equal(resolveWamRoot("hola, ¿cómo estás?", proj2), rB, "continuidad: repo con .wam más reciente");
   fs.rmSync(proj2, { recursive: true, force: true });

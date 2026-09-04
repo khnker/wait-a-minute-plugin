@@ -235,14 +235,14 @@ test("Operational Memory: updateProjectMemo mapea analysis.project → project.m
 
 test("Live Context: task-context.md refleja la tarea activa, cierre y sobreescritura", async () => {
   const hooks = await pluginDefault({ directory: process.cwd(), client: {}, project: {}, $: {} });
-  const liveFile = path.join(process.cwd(), ".wam", "context", "task-context.md");
+  const liveFileFor = (id) => path.join(process.cwd(), ".wam", "tasks", id, "context.md");
 
   const t1 = `live-${Date.now()}`;
   await hooks["chat.message"](
     { parts: [{ type: "text", text: "implementa refresh-token rotation y agrega tests" }], taskId: t1 },
     { parts: [], system: [] }
   );
-  let body = fs.readFileSync(liveFile, "utf-8");
+  let body = fs.readFileSync(liveFileFor(t1), "utf-8");
   assert.ok(body.includes(t1), "contexto vivo apunta a la tarea activa");
   assert.ok(/PROPOSED/.test(body), "fase reflejada");
 
@@ -255,7 +255,7 @@ test("Live Context: task-context.md refleja la tarea activa, cierre y sobreescri
     { parts: [{ type: "text", text: "tarea completa, done" }], taskId: t1 },
     { parts: [], system: [] }
   );
-  body = fs.readFileSync(liveFile, "utf-8");
+  body = fs.readFileSync(liveFileFor(t1), "utf-8");
   assert.ok(/DONE/.test(body), "contexto vivo refleja el cierre de tarea");
 
   const t2 = `live2-${Date.now()}`;
@@ -263,8 +263,8 @@ test("Live Context: task-context.md refleja la tarea activa, cierre y sobreescri
     { parts: [{ type: "text", text: "agrega cache redis" }], taskId: t2 },
     { parts: [], system: [] }
   );
-  body = fs.readFileSync(liveFile, "utf-8");
-  assert.ok(body.includes(t2), "contexto vivo sobreescrito por la nueva tarea");
+  body = fs.readFileSync(liveFileFor(t2), "utf-8");
+  assert.ok(body.includes(t2), "contexto vivo aislado por tarea");
 
   try {
     fs.rmSync(path.join(process.cwd(), ".wam", "tasks", t1), { recursive: true, force: true });
@@ -508,7 +508,7 @@ test("delegación dura: contrato APPROVED con reqs pendientes genera directivas 
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
 });
 
-test("bloqueo duro: sesión principal NO muta con reqs pendientes; subagente (parentID) sí", async () => {
+test("flujo sin fricción: sesión principal SÍ muta con reqs pendientes (bloqueo duro desactivado)", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wam-hard-"));
   // sesión principal: session.get sin parentID
   const hooks = await pluginDefault({
@@ -523,10 +523,9 @@ test("bloqueo duro: sesión principal NO muta con reqs pendientes; subagente (pa
   );
   pluginDefault.approveContract(taskId, tmp);
 
-  // principal intenta write → bloqueado
+  // principal intenta write → permitido (flujo sin fricción: bloqueo duro desactivado)
   const err = await hooks["tool.execute.before"]({ sessionID: "main-1", tool: "write", callID: "c1" }, { args: {} }).then(() => null).catch((e) => e.message);
-  assert.ok(err && err.includes("ENFORCED BLOCK"), "write bloqueado en sesión principal: " + err);
-  assert.ok(/delegar via Task/i.test(err), "directiva exige delegación");
+  assert.equal(err, null, "write permitido en sesión principal (sin fricción): " + err);
 
   // principal con read → permitido
   const okRead = await hooks["tool.execute.before"]({ sessionID: "main-1", tool: "read", callID: "c2" }, { args: {} }).then(() => true).catch((e) => e.message);
@@ -577,7 +576,9 @@ test("multi-sesión: 2 sesiones sobre la MISMA carpeta tienen tareas aisladas (n
   assert.ok(taskB.contract?.requirements?.some((r) => /front/i.test(r)), "B conserva su dominio (frontend)");
 
   // live context aislado por sesión
-  const liveA = fs.existsSync(path.join(tmp, ".wam", "context", "task-context-ses-" + "sesA-aaaaaaaaaa".slice(-10) + ".md"));
+  const liveA = fs.existsSync(path.join(tmp, ".wam", "tasks", "ses-" + "sesA-aaaaaaaaaa".slice(-10), "context.md"));
+  const liveB = fs.existsSync(path.join(tmp, ".wam", "tasks", "ses-" + "sesB-bbbbbbbbbb".slice(-10), "context.md"));
   assert.ok(liveA, "live context aislado para sesión A");
+  assert.ok(liveB, "live context aislado para sesión B");
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
 });

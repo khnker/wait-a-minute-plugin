@@ -43,11 +43,12 @@ test("G5: DONE con requisito pendiente -> BLOCK, indica qué falta y próxima ac
 
   const out = await runHook("tarea terminada, declare done", taskId, "g5a2");
   const gate = gateText(out);
+  const pendingReq = (getTaskState(taskId)?.requirements || []).find((r) => r.id !== implReq.id && /test/i.test(r.title));
   cleanup(taskId);
 
   assert.ok(gate.includes("COMPLETION GATE BLOQUEADO") || gate.includes("COMPLETION GATE:"), "gate bloquea");
   assert.ok(/No declare[s]? DONE/.test(gate), "prohíbe DONE");
-  assert.ok(gate.includes(testsReq.title), "indica exactamente qué falta (tests)");
+  assert.ok(pendingReq && gate.includes(pendingReq.title), "indica exactamente qué falta (tests pendientes)");
   assert.ok(/req-\d/.test(gate), "identifica el requisito pendiente por ID");
   assert.ok(/Continuar con:|Continúa con el próximo requisito/.test(gate), "produce próxima acción concreta");
   assert.ok(gate.toLowerCase().includes("requisito"), "explica qué falta");
@@ -92,10 +93,14 @@ test("G5: DONE con todo verificado y evidencia -> ALLOW, fase DONE, summary.md, 
   const taskId = `g5-c-${Date.now()}`;
   await runHook("implementar X y agregar tests", taskId);
   pluginDefault.approveContract(taskId);
-  const reqs = getTaskState(taskId).requirements;
+  let reqs = getTaskState(taskId).requirements;
   for (const r of reqs) {
     const rMark = pluginDefault.markRequirement(taskId, r.id, "done", `evidencia: ${r.title} -> npm test passed, typecheck passed`);
     assert.equal(rMark.ok, true, `${r.id} marcado done con evidencia`);
+  }
+  for (const r of getTaskState(taskId).requirements) {
+    const rVerify = pluginDefault.markRequirement(taskId, r.id, "verified", `npm test passed for ${r.title}`);
+    assert.equal(rVerify.ok, true, `${r.id} verificado`);
   }
   const out = await runHook("todo verificado, tarea completa done", taskId, "g5c2");
   const gate = gateText(out);
@@ -109,7 +114,7 @@ test("G5: DONE con todo verificado y evidencia -> ALLOW, fase DONE, summary.md, 
   assert.equal(gate, "", "gate NO bloquea (sin ⛔ ni COMPLETION GATE de bloqueo)");
   assert.equal(st.phase, "DONE", "fase DONE");
   assert.equal(st.nextAction, "Tarea completa — contrato verificado");
-  assert.ok(st.requirements.every((r) => r.status === "done" && r.evidence.length > 0), "todos con evidencia");
+  assert.ok(st.requirements.every((r) => r.status === "verified" && r.evidence.length > 0), "todos verificados con evidencia");
   assert.ok(summary.includes("## Status") && summary.includes("COMPLETED"), "summary.md COMPLETED");
   assert.ok(hasRecentChange, "recent-changes.md registra la tarea");
 });

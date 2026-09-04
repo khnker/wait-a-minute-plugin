@@ -47,7 +47,8 @@ test("R6: DONE mientras ASKING → interceptado, no avanza", async () => {
   const st = readState(taskId);
   assert.equal(st.phase, "ASKING", "sigue en ASKING, no avanza a DONE");
   const emitted = out2.parts.filter((p) => p.type === "text").map((p) => p.text).join("\n");
-  assert.ok(emitted.includes("ASKING"), "re-emite la pregunta bloqueante");
+  assert.ok(emitted.includes("U1"), "re-emite la pregunta bloqueante");
+  assert.ok(emitted.includes("/wam answer U1"), "re-emite instrucción de respuesta");
   assert.ok(!emitted.includes("COMPLETED") && !/COMPLETION GATE/.test(inp2.parts[0].text) || true, "claim no ejecutado");
   try { fs.rmSync(path.join(process.cwd(), ".wam", "tasks", taskId), { recursive: true, force: true }); } catch {}
 });

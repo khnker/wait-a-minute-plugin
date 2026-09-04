@@ -295,12 +295,15 @@ export function updateTaskMemory(taskId, { evidence = "", summary = "" } = {}, r
 // -- contexto vivo (auto-adaptativo a la tarea en ejecución) ----------------
 
 /**
- * Snapshot vivo de la tarea activa en .wam/context/task-context.md.
+ * Snapshot vivo de la tarea activa en .wam/tasks/<taskId>/context.md.
  * Se actualiza en cada mensaje (chat.message) y se sobreescribe al cambiar
  * de tarea — el contexto siempre refleja lo que el agente está ejecutando.
+ * Taxonomía WAM: artifacts de ejecución viven bajo tasks/<id>/, no bajo
+ * context/. context/ se reserva para conocimiento operacional estable
+ * (project/architecture/decisions/constraints).
  */
 export function updateLiveContext(taskId, state = {}, root) {
-  const dir = path.join(rootDir(root), ".wam", "context");
+  const dir = path.join(rootDir(root), ".wam", "tasks", taskId);
   const reqs = state.requirements || [];
   const pend = reqs.filter((r) => r.status !== "done" && r.status !== "verified").length;
   const unverified = reqs.filter((r) => r.status === "done").length;
@@ -312,7 +315,7 @@ export function updateLiveContext(taskId, state = {}, root) {
     `next: ${state.nextAction || "—"}`,
     ...(unknowns.length ? [`blocking: ${unknowns.map((u) => `${u.id} ${u.question || u.statement}`).join(" | ")}`] : []),
   ].join("\n");
-  StorageProvider.write(path.join(dir, "task-context.md"), body + "\n");
+  StorageProvider.write(path.join(dir, "context.md"), body + "\n");
   return { ok: true };
 }
 
