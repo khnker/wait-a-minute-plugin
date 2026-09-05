@@ -1,8 +1,10 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
 
-import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, updateLiveContext } from "./memory.js";
+import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot } from "./context.js";
 import { assembleContext } from "./assembly.js";
+import { evaluateRequirement as evaluateRequirementChecks } from "./verification.js";
+import { ContextDecisionTracer } from "./context-decision-audit.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -528,12 +530,23 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       // Blocking Questions: DECISION_CRITICAL sin responder → ASKING, preguntar, no ejecutar.
       const blockingUnknowns = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
-      if (blockingUnknowns.length > 0 && state.phase !== "ANSWERED") {
+
+      // Check for previously decided actions to skip questions
+      const finalQuestions = blockingUnknowns.filter(u => {
+        const decision = getDecision(u.id, wamRoot);
+        if (decision) {
+          console.log(`[wait-a-minute] Found existing decision for ${u.id}: ${decision.decision}`);
+          return false;
+        }
+        return true;
+      });
+
+      if (finalQuestions.length > 0 && state.phase !== "ANSWERED") {
         state.phase = "ASKING";
         state.nextAction = "Responder pregunta bloqueante antes de ejecutar";
         persistTaskState(taskId, state, wamRoot);
         const questions = [];
-        for (const u of blockingUnknowns) {
+        for (const u of finalQuestions) {
           questions.push(`⛔ [wait-a-minute] ASKING — ${u.id}: ${u.question}\nNo implementar hasta responder. Responder: /wam answer ${u.id} <respuesta>`);
         }
         emitTextPart(output, questions.join("\n\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
@@ -936,10 +949,62 @@ function wamCli(args, cfg = {}, root = process.cwd(), taskId = readActiveTaskId(
       const caps = listCapsules(process.cwd(), { sessionId: sid });
       return `session: ${sid}\ncapsules de esta sesión: ${caps.length}\nL1 base: ${listCapsules(process.cwd(), { level: "L1", lifecycle: "active" }).length} cápsula(s)`;
     }
+    if (sub === "decision") {
+      const decisionPoint = action;
+      if (!decisionPoint) {
+        return "Error: decision point required. Usage: /wam decision <point> rationale=\"...\" alternatives=\"...\" evidence=\"...\"";
+      }
+
+      // Parse key-value pairs from rest
+      const params = {};
+      for (const item of rest) {
+        const match = item.match(/^([^=]+)=(.*)$/);
+        if (match) {
+          let key = match[1].trim();
+          let value = match[2].trim();
+          
+          // Remove surrounding quotes if present
+          if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+            value = value.slice(1, -1);
+          } else if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+            value = value.slice(1, -1);
+          }
+          
+          params[key] = value;
+        }
+      }
+
+      const rationale = params.rationale;
+      const alternativesStr = params.alternatives;
+      const evidenceStr = params.evidence;
+
+      if (!rationale || !alternativesStr || !evidenceStr) {
+        return "Error: rationale, alternatives, and evidence are required. Usage: /wam decision <point> rationale=\"...\" alternatives=\"...\" evidence=\"...\"";
+      }
+
+      let alternatives, evidence;
+      try {
+        alternatives = JSON.parse(alternativesStr);
+        evidence = JSON.parse(evidenceStr);
+        
+        // Validate that they are arrays
+        if (!Array.isArray(alternatives) || !Array.isArray(evidence)) {
+          return "Error: alternatives and evidence must be JSON arrays.";
+        }
+      } catch (e) {
+        return `Error: Invalid JSON in alternatives or evidence: ${e.message}`;
+      }
+
+      // Create tracer and log the decision
+      const tracer = new ContextDecisionTracer(`decision-${Date.now()}`, root);
+      tracer.logTechnicalDecision(decisionPoint, rationale, alternatives, evidence);
+      
+      return `Decision "${decisionPoint}" logged successfully.`;
+    }
     return "Uso: /wam ctx <list|get <q>|show <id>|promote <id> <L2|L1> [approved]|session>";
   }
 
-  return "Uso: /wam <skills|contract|progress|task|compress|ctx|answer|assumptions|resolve>";
+  return "Uso: /wam <skills|contract|progress|task|compress|ctx|answer|assumptions|resolve|decision>";
 }
 
 /**
@@ -1186,6 +1251,22 @@ const waitAMinute = {
         pending: unverified.map((r) => `${r.id} — ${r.title} (verificar: /wam progress ${r.id} verified <evidencia>)`),
       };
     }
+    const checks = state?.contract?.checks || [];
+    if (checks.length > 0) {
+      const byReq = new Map();
+      for (const c of checks) {
+        if (!byReq.has(c.reqId)) byReq.set(c.reqId, []);
+        byReq.get(c.reqId).push(c);
+      }
+      const checkFailures = [];
+      for (const [reqId, list] of byReq) {
+        const verdict = evaluateRequirementChecks(list, list);
+        if (verdict.status !== "VERIFIED") checkFailures.push(`${reqId}: ${verdict.reason || "checks pendientes"}`);
+      }
+      if (checkFailures.length > 0) {
+        return { blocked: true, verifying: true, pending: checkFailures };
+      }
+    }
     return { blocked: false, allDone: true };
   },
 
@@ -1273,6 +1354,16 @@ const waitAMinute = {
     }
     if (status === "verified" && req.status !== "done") {
       return { ok: false, reason: `Requisito ${reqId}: marcar done antes de verified` };
+    }
+    const checksForReq = (state.contract?.checks || []).filter((c) => c.reqId === reqId);
+    if (status === "verified" && checksForReq.length > 0) {
+      const verdict = evaluateRequirementChecks(checksForReq, checksForReq);
+      if (verdict.status !== "VERIFIED") {
+        return { ok: false, reason: `Requisito ${reqId}: verificación máquina bloqueada (${verdict.reason || "checks pendientes"}). Ejecuta /wam verify ${reqId}.` };
+      }
+    }
+    if (status === "done" && req.status === "verified" && checksForReq.length > 0) {
+      return { ok: false, reason: `Requisito ${reqId}: ya está verificado, no se puede retroceder a done.` };
     }
     req.status = status;
     if (status === "done" || status === "verified") req.evidence.push(evidence.trim());

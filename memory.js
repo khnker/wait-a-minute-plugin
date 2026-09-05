@@ -210,9 +210,23 @@ function parseDecisionEntries(body) {
   for (const p of sectionsOf(body)) {
     const idm = /^##\s+(.+)$/m.exec(p);
     if (!idm) continue;
+    const datem = /^- date:\s*(.+)$/m.exec(p);
+    const statusm = /^- status:\s*(.+)$/m.exec(p);
     const srcm = /^- source:\s*(.+)$/m.exec(p);
+    const confm = /^- confidence:\s*(.+)$/m.exec(p);
+    const decisionm = /^- decision:\s*(.+)$/m.exec(p);
+    const reasonm = /^- reason:\s*(.+)$/m.exec(p);
     const id = idm[1].trim();
-    list.push({ id, source: srcm ? srcm[1].trim() : "inferred", raw: p });
+    list.push({
+      id,
+      date: datem ? datem[1].trim() : undefined,
+      status: statusm ? statusm[1].trim() : undefined,
+      source: srcm ? srcm[1].trim() : "inferred",
+      confidence: confm ? confm[1].trim() : undefined,
+      decision: decisionm ? decisionm[1].trim() : undefined,
+      reason: reasonm ? reasonm[1].trim() : undefined,
+      raw: p,
+    });
   }
   return list;
 }
@@ -227,6 +241,12 @@ function renderDecisionEntry(d) {
     `- decision: ${d.decision}`,
     ...(d.reason ? [`- reason: ${d.reason}`] : []),
   ].join("\n");
+}
+
+export function getDecision(id, root) {
+  const { body } = readDoc("decisions", root);
+  const entries = parseDecisionEntries(body);
+  return entries.find((e) => e.id === id);
 }
 
 // espe §7 + §10: preserva user-decided ante inferencias de menor autoridad
