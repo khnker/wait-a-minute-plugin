@@ -46,7 +46,22 @@ const SECRET_PATTERNS = [
 ];
 
 const VALID_SOURCES = new Set(["observed", "inferred", "user-decided"]);
-const VALID_CONFIDENCE = new Set(["high", "medium", "low"]);
+
+const CONFIDENCE_STRING_TO_NUM = { high: 0.9, medium: 0.5, low: 0.2 };
+
+export function normalizeConfidence(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.min(1, v));
+  if (typeof v === "string") {
+    const n = CONFIDENCE_STRING_TO_NUM[v.trim().toLowerCase()];
+    return n != null ? n : 0.5;
+  }
+  return 0.5;
+}
+
+export function confidenceLabel(n) {
+  const x = normalizeConfidence(n);
+  return x >= 0.7 ? "high" : x >= 0.4 ? "medium" : "low";
+}
 
 // -- helpers -----------------------------------------------------------------
 
@@ -156,7 +171,7 @@ export function initMemory(root) {
 export function updateContext(doc, body, metadata = {}, root) {
   const meta = {
     source: VALID_SOURCES.has(metadata.source) ? metadata.source : "observed",
-    confidence: VALID_CONFIDENCE.has(metadata.confidence) ? metadata.confidence : "low",
+    confidence: normalizeConfidence(metadata.confidence).toFixed(2),
     last_verified: metadata.last_verified || nowIso(),
     status: metadata.status || "current",
   };
@@ -196,7 +211,7 @@ export function addRecentChange({ date, scope, changes = [], verification = "" }
     all.join("\n\n"),
     {
       source: "observed",
-      confidence: "high",
+      confidence: 0.9,
       last_verified: /^\d{4}-\d{2}-\d{2}/.test(date)
         ? `${date}T00:00:00.000Z`
         : nowIso(),
@@ -266,7 +281,7 @@ export function recordDecision(entry = {}, root) {
     date: entry.date || nowIso().slice(0, 10),
     status: entry.status || "accepted",
     source,
-    confidence: VALID_CONFIDENCE.has(entry.confidence) ? entry.confidence : "medium",
+    confidence: normalizeConfidence(entry.confidence).toFixed(2),
     decision,
     reason: entry.reason || "",
   });
@@ -274,12 +289,12 @@ export function recordDecision(entry = {}, root) {
   return updateContext(
     "decisions",
     newBody,
-    { source, confidence: entry.confidence || "medium" },
+    { source, confidence: normalizeConfidence(entry.confidence) },
     root
   );
 }
 
-export function addConstraint(text, { source = "inferred", confidence = "medium", lastVerified } = {}, root) {
+export function addConstraint(text, { source = "inferred", confidence = 0.5, lastVerified } = {}, root) {
   if (!text) return { ok: false, reason: "text requerido" };
   const safe = redact(String(text).trim());
   const { body } = readDoc("constraints", root);
@@ -293,9 +308,10 @@ export function addConstraint(text, { source = "inferred", confidence = "medium"
     }
     return { ok: true, skipped: true };
   }
-  const entry = `- ${safe} [source: ${source} | confidence: ${confidence} | last_verified: ${lastVerified || nowIso()}]`;
+  const confNum = normalizeConfidence(confidence);
+  const entry = `- ${safe} [source: ${source} | confidence: ${confNum.toFixed(2)} | last_verified: ${lastVerified || nowIso()}]`;
   const newBody = ["# Constraints", ...lines, entry].join("\n");
-  return updateContext("constraints", newBody, { source, confidence }, root);
+  return updateContext("constraints", newBody, { source, confidence: confNum }, root);
 }
 
 // -- task memory (espec §14, derivado de state.yaml — no duplica la fuente) --
@@ -431,7 +447,7 @@ export function updateProjectMemo(analysis, root) {
   ].join("\n");
   const { project } = getOperationalContext(root);
   if (project.body.trim() === body.trim()) return;
-  updateContext("project", body, { source: "observed", confidence: inferred.length ? "medium" : "high" }, root);
+  updateContext("project", body, { source: "observed", confidence: inferred.length ? 0.5 : 0.9 }, root);
 }
 
 export function getOperationalContext(root) {

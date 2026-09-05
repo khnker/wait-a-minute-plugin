@@ -1,7 +1,7 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
 
 import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext } from "./memory.js";
-import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot } from "./context.js";
+import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot, migrateLegacyCapsules } from "./context.js";
 import { assembleContext } from "./assembly.js";
 import { evaluateRequirement as evaluateRequirementChecks } from "./verification.js";
 import { ContextDecisionTracer } from "./context-decision-audit.js";
@@ -949,6 +949,13 @@ function wamCli(args, cfg = {}, root = process.cwd(), taskId = readActiveTaskId(
       const caps = listCapsules(process.cwd(), { sessionId: sid });
       return `session: ${sid}\ncapsules de esta sesión: ${caps.length}\nL1 base: ${listCapsules(process.cwd(), { level: "L1", lifecycle: "active" }).length} cápsula(s)`;
     }
+    if (action === "migrate") {
+      const dryRun = rest.includes("--dry-run");
+      const r = migrateLegacyCapsules(root, { dryRun });
+      if (!r.migrated.length) return "Sin cápsulas legacy (todas tienen session_id)";
+      const tag = r.dryRun ? "[DRY-RUN] " : "";
+      return `${tag}migradas ${r.migrated.length} cápsula(s) a session_id="legacy":\n${r.migrated.map((m) => `  ${m.context_id || m.file}`).join("\n")}`;
+    }
     if (sub === "decision") {
       const decisionPoint = action;
       if (!decisionPoint) {
@@ -1001,7 +1008,7 @@ function wamCli(args, cfg = {}, root = process.cwd(), taskId = readActiveTaskId(
       
       return `Decision "${decisionPoint}" logged successfully.`;
     }
-    return "Uso: /wam ctx <list|get <q>|show <id>|promote <id> <L2|L1> [approved]|session>";
+    return "Uso: /wam ctx <list|get <q>|show <id>|promote <id> <L2|L1> [approved]|session|migrate [--dry-run]>";
   }
 
   return "Uso: /wam <skills|contract|progress|task|compress|ctx|answer|assumptions|resolve|decision>";

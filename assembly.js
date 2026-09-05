@@ -1,21 +1,27 @@
 /**
- * Context Assembly Layer — ensamblado formal de contexto por tarea.
+ * Context Assembly Layer — Context Pack Builder.
  *
- * OpenSpec change: context-assembly-layer.
+ * OpenSpec changes: context-assembly-layer, refactor-context-engine.
+ *
+ * Rol: decide qué nivel (N0/N1/N2/N3) entra al pack y emite N0/N1/N2.
+ * Capsule selection dentro de N3 se delega a context.js (Context Selection Engine).
+ *
+ * Budget partitioning (refactor-context-engine):
+ *   budget = reserved (N0 + N2) + flex (N1 + N3)
+ *   N0 y N2 se reservan primero; violation si reserved > budget (N0 igual se emite).
  *
  * 4 niveles con fuente canónica, obligación y prohibición:
- *   N0 Global/Policy  — obligatorio, tiny
- *   N1 Project        — selectivo por dominio (secciones matcheadas)
- *   N2 Task           — obligatorio (live task state)
- *   N3 Session        — capsules por utility
+ *   N0 Global/Policy  — obligatorio, tiny (reservado)
+ *   N1 Project        — selectivo por dominio (secciones matcheadas) (flex)
+ *   N2 Task           — obligatorio (live task state) (reservado)
+ *   N3 Session        — capsules por utility (delegado a context.js) (flex)
  *
  * Prohibido: L4 ephemeral, superseded, transcript, docs/dominios sin match.
- * Presupuesto global con reporte por nivel.
  */
 
 import fs from "node:fs";
 import path from "node:path";
-import { getOperationalContext, summarizeOperationalContext } from "./memory.js";
+import { getOperationalContext, summarizeOperationalContext, normalizeConfidence, confidenceLabel } from "./memory.js";
 import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
 
 const POLICIES = ["scope(ACTIVE)", "verify(ACTIVE)", "simplify(ACTIVE)"];
@@ -56,7 +62,7 @@ function extractRelevantSections(docName, body, taskTokens, { base = false } = {
 /**
  * Ensambla el Context Pack de la tarea.
  *
- * @returns { levels: {N0,N1,N2,N3}, lines, budget_used, budget, rationale }
+ * @returns { levels, lines, budget_used, budget, budget_violation, reserved, flex, rationale, continuation }
  */
 export function assembleContext({
   prompt = "",
@@ -70,27 +76,34 @@ export function assembleContext({
 } = {}) {
   const levels = { N0: [], N1: [], N2: [], N3: [] };
   const rationale = [];
-  let used = 0;
+  const n0Line = `[wam N0 policy] ${POLICIES.join(" | ")}`;
+  const n0Cost = estTokens(n0Line);
+  let flex = budget - n0Cost;
+  const reserve = (level, text) => {
+    const t = estTokens(text);
+    levels[level].push(text);
+    return t;
+  };
   const spend = (level, text) => {
     const t = estTokens(text);
-    if (used + t > budget) {
-      rationale.push(`${level}: excede presupuesto (${t} tok, restante ${budget - used})`);
+    if (t > flex) {
+      rationale.push(`${level}: excede presupuesto (${t} tok, restante ${flex})`);
       return;
     }
     levels[level].push(text);
-    used += t;
+    flex -= t;
   };
 
   const taskTokens = tokenize(prompt);
   const isTrivial = classification === "trivial" || mode === "FAST";
   const isArch = classification === "architectural" || mode === "STRICT";
 
-  // -- N0 Global/Policy (obligatorio, tiny) ---------------------------------
-  spend("N0", `[wam N0 policy] ${POLICIES.join(" | ")}`);
+  // -- N0 Global/Policy (reservado, obligatorio) ----------------------------
+  const n0Spent = reserve("N0", n0Line);
 
   // -- Continuation: solo N2 (no reconstruir) -------------------------------
   if (!continuation) {
-    // -- N1 Project (selectivo por dominio) ---------------------------------
+    // -- N1 Project (selectivo por dominio, consume flex) -------------------
     const ctx = getOperationalContext(projectPath);
     const recent = ctx.recentChanges?.body || "";
     const recentSummary = recent.split(/^## /m).slice(0, 3).map((s) => s.trim()).filter(Boolean).join("\n# ");
@@ -100,20 +113,23 @@ export function assembleContext({
       if (n1summary) spend("N1", `[wam N1 project] ${n1summary}`);
       if (recentSummary) spend("N1", `[wam N1 recent] ${recentSummary.slice(0, 500)}`);
 
-      // Provenance: inferido ≠ hecho — marcar docs con source inferred / confianza baja
+      // Provenance: inferido ≠ hecho — marcar docs con source inferred + confianza baja
       for (const [key, label] of [["project", "project.md"], ["architecture", "architecture.md"], ["decisions", "decisions.md"], ["constraints", "constraints.md"]]) {
         const meta = ctx[key]?.meta || {};
-        const conf = parseFloat(meta.confidence);
-        if (meta.source === "inferred" || (Number.isFinite(conf) && conf < 0.7)) {
-          spend("N1", `[wam N1 provenance] ${label} es INFERIDO (${meta.source}, conf ${meta.confidence}) — no es decisión confirmada; validar antes de asumir`);
+        const conf = normalizeConfidence(meta.confidence);
+        const inferredLow = meta.source === "inferred" && conf < 0.7;
+        const severeLow = conf < 0.4;
+        if (inferredLow || severeLow) {
+          spend("N1", `[wam N1 provenance] ${label} es INFERIDO (${meta.source}, conf ${meta.confidence} ${confidenceLabel(conf)}) — no es decisión confirmada; validar antes de asumir`);
         }
       }
 
       // L1 metadata provenance (inferido ≠ hecho)
       for (const key of ["decisions", "constraints"]) {
         const doc = ctx[key];
-        if (doc?.meta?.confidence < 0.7 && doc?.meta?.source === "inferred") {
-          spend("N1", `[wam N1 WARNING] ${doc.name} (confidence: ${doc.meta.confidence}) — inferencia, validar antes de usar`);
+        const conf = normalizeConfidence(doc?.meta?.confidence);
+        if (conf < 0.7 && doc?.meta?.source === "inferred") {
+          spend("N1", `[wam N1 WARNING] ${doc.name} (confidence: ${doc.meta.confidence} ${confidenceLabel(conf)}) — inferencia, validar antes de usar`);
         }
       }
       const archDoc = ctx.architecture?.body || "";
@@ -129,7 +145,7 @@ export function assembleContext({
 
     // -- N3 Session (capsules por utility) ----------------------------------
     if (!isTrivial) {
-      const pkg = selectContext(prompt, { budget: budget - used, root: projectPath, sessionId: getSessionId(projectPath) });
+      const pkg = selectContext(prompt, { budget: flex, root: projectPath, sessionId: getSessionId(projectPath) });
       for (const c of pkg.capsules) {
         const head = `[wam N3 ${c.level} ${c.provenance}] ${c.context_id} — ${(c.purpose || "").slice(0, 100)}`;
         const contentMax = 800;
@@ -146,8 +162,8 @@ export function assembleContext({
     }
   }
 
-  // -- N2 Task (obligatorio, live state) ------------------------------------
-   const liveFile = path.join(projectPath, ".wam", "tasks", taskId, "context.md");
+  // -- N2 Task (reservado, obligatorio) --------------------------------------
+  const liveFile = path.join(projectPath, ".wam", "tasks", taskId, "context.md");
   let liveBody = "";
   try {
     if (fs.existsSync(liveFile)) liveBody = fs.readFileSync(liveFile, "utf-8").trim();
@@ -160,14 +176,21 @@ export function assembleContext({
       `req: ${pend}/${reqs.length} pend | next: ${taskState.nextAction || "—"}`,
     ].join("\n") || liveBody;
   }
-  if (liveBody) spend("N2", `[wam N2 task]\n${liveBody}`);
+  const n2Reserved = liveBody ? estTokens(`[wam N2 task]\n${liveBody}`) : 0;
+  const reserved = n0Spent + n2Reserved;
+  const budget_violation = reserved > budget;
+  if (liveBody) reserve("N2", `[wam N2 task]\n${liveBody}`);
 
   const lines = [...levels.N0, ...levels.N1, ...levels.N2, ...levels.N3];
+  const used = budget - flex;
   return {
     levels: Object.fromEntries(Object.entries(levels).map(([k, v]) => [k, v.length])),
     lines,
     budget_used: used,
     budget,
+    budget_violation,
+    reserved,
+    flex,
     rationale,
     continuation,
   };

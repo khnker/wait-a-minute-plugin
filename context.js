@@ -1,12 +1,16 @@
 /**
- * Context Capsules — contexto persistente, jerárquico y recuperable.
+ * Context Capsules — Context Selection Engine.
  *
- * Cambios OpenSpec: context-memory-model, context-selection-budget,
- * session-context-continuity.
+ * OpenSpec changes: context-memory-model, context-selection-budget,
+ * session-context-continuity, refactor-context-engine.
+ *
+ * Rol: ciclo de vida de cápsula, identidad de sesión, selección determinística
+ * bajo presupuesto (N3) y retrieval por relevancia. NO decide N0/N1/N2 (esos
+ * niveles los emite assembly.js, Context Pack Builder).
  *
  * Unidades: Context Capsules (.wam/capsules/<id>.json), identidad de sesión
- * (.wam/session.json), selector determinístico bajo presupuesto y paquete de
- * contexto por tarea. Sin vector DB ni embeddings.
+ * (.wam/session.json), paquete de contexto por tarea. Sin vector DB ni
+ * embeddings; capa de alias determinística (closed set) para tokens sinónimos.
  */
 
 import fs from "node:fs";
@@ -15,6 +19,26 @@ import path from "node:path";
 const LEVELS = ["L1", "L2", "L3", "L4"];
 const LIFECYCLE = ["candidate", "active", "superseded", "stale", "invalidated"];
 const PROVENANCE = ["user_decided", "observed", "inferred"];
+
+export const LEGACY_SESSION_ID = "legacy";
+
+const ALIASES = {
+  auth: "authentication",
+  authentication: "auth",
+  db: "database",
+  database: "db",
+  postgres: "postgresql",
+  postgresql: "postgres",
+  jwt: "token",
+  ts: "typescript",
+  typescript: "ts",
+  py: "python",
+  python: "py",
+  k8s: "kubernetes",
+  kubernetes: "k8s",
+  api: "interface",
+  ui: "frontend",
+};
 
 let _sessionCache = null;
 
@@ -88,8 +112,44 @@ export function listCapsules(root, { level, lifecycle, sessionId } = {}) {
     .filter(Boolean)
     .filter((c) => !level || c.level === level)
     .filter((c) => !lifecycle || c.lifecycle === lifecycle)
-    .filter((c) => !sessionId || c.session_id === undefined || c.session_id === sessionId)
+    .filter((c) => matchesSession(c, sessionId))
     .sort((a, b) => (a.importance || 0) - (b.importance || 0));
+}
+
+function matchesSession(capsule, sessionId) {
+  if (sessionId === undefined) return true;
+  const csid = capsule.session_id;
+  if (csid == null) return sessionId === null || sessionId === LEGACY_SESSION_ID;
+  if (sessionId === null) return false;
+  return csid === sessionId || csid === LEGACY_SESSION_ID;
+}
+
+export function migrateLegacyCapsules(root = process.cwd(), { dryRun = false } = {}) {
+  const dir = capsulesDir(root);
+  let ids = [];
+  try {
+    ids = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return { ok: true, migrated: [], dryRun };
+  }
+  const migrated = [];
+  for (const file of ids) {
+    const full = path.join(dir, file);
+    let capsule;
+    try {
+      capsule = JSON.parse(fs.readFileSync(full, "utf-8"));
+    } catch {
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(capsule, "session_id")) {
+      migrated.push({ file, context_id: capsule.context_id });
+      if (!dryRun) {
+        capsule.session_id = LEGACY_SESSION_ID;
+        fs.writeFileSync(full, JSON.stringify(capsule, null, 2));
+      }
+    }
+  }
+  return { ok: true, migrated, dryRun };
 }
 
 export function getCapsule(contextId, root) {
@@ -222,13 +282,18 @@ function clampNum(v, min, max, dflt) {
 // -- Change 2: context selection bajo presupuesto --------------------------------
 
 function tokenize(text = "") {
-  return new Set(
-    (text || "")
-      .toLowerCase()
-      .replace(/[^a-z0-9áéíóúñü\s]/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length > 2)
-  );
+  const raw = (text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9áéíóúñü\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+  const out = new Set();
+  for (const w of raw) {
+    out.add(w);
+    const aliased = ALIASES[w];
+    if (aliased) out.add(aliased);
+  }
+  return out;
 }
 
 function overlapScore(aTokens, bTokens) {
