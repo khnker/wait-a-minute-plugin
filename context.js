@@ -121,7 +121,7 @@ function matchesSession(capsule, sessionId) {
   const csid = capsule.session_id;
   if (csid == null) return sessionId === null || sessionId === LEGACY_SESSION_ID;
   if (sessionId === null) return false;
-  return csid === sessionId || csid === LEGACY_SESSION_ID;
+  return csid === sessionId;
 }
 
 export function migrateLegacyCapsules(root = process.cwd(), { dryRun = false } = {}) {
