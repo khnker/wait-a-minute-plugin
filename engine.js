@@ -1415,9 +1415,73 @@ export function escalateAssumptions(state, taskText = "") {
  * sin LLM): descompone cláusulas accionables y deriva requisitos/verificación.
  * Fallback: genéricos si no se puede extraer nada.
  */
+/**
+ * Máximo de requisitos individuales que synthesizeContract generará antes de
+ * consolidar. Más allá de este umbral, los excedentes se fusionan en un
+ * req de alto nivel para evitar contratos ingobernables (54 reqs, 12M tokens).
+ */
+const MAX_CONTRACT_REQUIREMENTS = 10;
+
+/**
+ * Patrones de cláusulas NO accionables — preguntas, URLs, narrativa pura,
+ * fragmentos de spec que no representan una tarea concreta.
+ */
+const NON_ACTIONABLE_PATTERNS = [
+  /^\?/,                          // empieza con ?
+  /\?$/,                          // termina con ?
+  /^https?:\/\//,                 // URLs
+  /^https?:/,
+  /^\//,                          // paths /rutas
+  /^\{/,                          // objetos JSON
+  /^\[/,                          // arrays JSON
+  /^".*":\s/,                     // líneas de spec JSON ("field": value)
+  /^\|/,                          // tablas markdown
+  /^---/,                         // separadores
+  /^#+/,                          // headers markdown
+  /^```/,                         // code fences
+  /^ejemplo/i,                    // "Ejemplo: ..."
+  /^ejemplo:/i,
+  /^ver tamb/i,                   // "Ver también..."
+  /^nota:/i,                      // "Nota: ..."
+  /^nota /i,
+  /^decisión/i,                   // "Decisión arquitectónica..."
+  /^decisión/i,
+  /^nombre que/i,                 // "Nombre que usaría..."
+  /^se propondría/i,              // "Yo separaría..."
+  /^yo separaría/i,
+  /^mantendría/i,
+  /^independiente de/i,
+];
+
 export function synthesizeContract(prompt = "", mode = "NORMAL", uncertainties = []) {
   const requirements = [];
   const verification = [];
+  const lower = (prompt || "").toLowerCase();
+
+  // --- Gate 1: prompts tipo documento/spec largo (>2000 chars) → alto nivel ---
+  // Evita explosión de cláusulas por comas. Un spec de 50 párrafos no son
+  // 50 requisitos — es 1-3 bloques de trabajo accionables.
+  if ((prompt || "").length > 2000) {
+    const isSpec = /\b(spec|specification|propuesta|propuesto|objetivo|alcance|requisitos?|criterios?|edge cases?|api|endpoint|flujo principal)\b/i.test(lower);
+    if (isSpec) {
+      requirements.push("Implementar funcionalidad según la especificación");
+      if (/test|prueba|suite/i.test(lower)) {
+        requirements.push("Agregar tests para el cambio");
+        verification.push("Ejecutar suite de tests relevante");
+      }
+      if (/security|seguridad|auth|oauth|token/i.test(lower)) {
+        requirements.push("Auditar seguridad del cambio");
+        verification.push("Revisar superficie de autenticación/secretos");
+      }
+      if (!verification.length) verification.push("Evidencia de satisfacción del contrato");
+      const unknowns = (uncertainties || [])
+        .filter((u) => u.classification === "DECISION_CRITICAL")
+        .map((u) => ({ id: u.id, question: u.question, classification: u.classification, status: "blocking", options: u.options || [] }));
+      return { requirements, constraints: [], verification, unknowns, status: "PROPOSED", rigor: mode };
+    }
+  }
+
+  // --- Gate 2: splitting tradicional con filtros ---
   const clauses = (prompt || "")
     .split(/[;,]|\by\b|\b\+\b|\band\b|\bplus\b/i)
     .map((c) => c.trim())
@@ -1437,22 +1501,25 @@ export function synthesizeContract(prompt = "", mode = "NORMAL", uncertainties =
           : "Implementar";
 
   for (const clause of clauses) {
+    if (requirements.length >= MAX_CONTRACT_REQUIREMENTS) break;
     const cleaned = clean(clause);
     if (!cleaned || cleaned.length < 3) continue;
+    // Filtrar cláusulas no accionables
+    if (NON_ACTIONABLE_PATTERNS.some((p) => p.test(cleaned))) continue;
     const cap = cleaned[0].toUpperCase() + cleaned.slice(1);
     requirements.push(`${verbFor(clause)}: ${cap}`);
   }
 
-  const lower = (prompt || "").toLowerCase();
-  if (/test|prueba|suite/i.test(lower)) {
+  // Keyword-derived requirements (con cap)
+  if (/test|prueba|suite/i.test(lower) && requirements.length < MAX_CONTRACT_REQUIREMENTS) {
     requirements.push("Agregar tests para el cambio");
     verification.push("Ejecutar suite de tests relevante");
   }
-  if (/migra|migrate|migración|refresh.?token/i.test(lower)) {
+  if (/migra|migrate|migración|refresh.?token/i.test(lower) && requirements.length < MAX_CONTRACT_REQUIREMENTS) {
     requirements.push("Invalidar/rotar credenciales anteriores");
     verification.push("Verificar integridad de datos post-migración");
   }
-  if (/security|seguridad|auth|oauth|token/i.test(lower)) {
+  if (/security|seguridad|auth|oauth|token/i.test(lower) && requirements.length < MAX_CONTRACT_REQUIREMENTS) {
     requirements.push("Auditar seguridad del cambio");
     verification.push("Revisar superficie de autenticación/secretos");
   }

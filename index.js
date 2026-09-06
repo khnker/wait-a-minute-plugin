@@ -1188,6 +1188,15 @@ const waitAMinute = {
       nextAction: "Revisar contrato — /wam contract approve o edit",
       lastAction: "",
     };
+    // Safety: consolidar si synthesizeContract generó demasiados requisitos
+    const MAX = 15;
+    if (fresh.requirements && fresh.requirements.length > MAX) {
+      const kept = fresh.requirements.slice(0, MAX);
+      const overflow = fresh.requirements.length - MAX;
+      kept.push({ id: `req-overflow`, title: `(+${overflow} requisitos consolidados de la especificación)`, status: "pending", evidence: [] });
+      fresh.requirements = kept;
+      if (fresh.contract) fresh.contract.requirements = kept.map((r) => r.title);
+    }
     persistTaskState(taskId, fresh, root);
     return fresh;
   },
