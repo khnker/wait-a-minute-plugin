@@ -1,4 +1,4 @@
-import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions } from "./engine.js";
+import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog } from "./engine.js";
 
 import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot, migrateLegacyCapsules } from "./context.js";
@@ -893,6 +893,14 @@ function wamCli(args, cfg = {}, root = process.cwd(), taskId = readActiveTaskId(
     const evidence = rest.join(" ").trim();
     if (!aid || !evidence) return "Uso: /wam resolve <assumptionId> <evidencia>";
     return JSON.stringify(waitAMinute.resolveAssumption(taskId, aid, evidence, root));
+  }
+
+  if (sub === "backlog") {
+    const st = getTaskState(taskId, root);
+    if (!st) return "Sin estado de tarea";
+    const formatted = formatBacklog(st);
+    if (!formatted) return "Sin requerimientos en backlog (todos están en el contract activo)";
+    return formatted;
   }
 
   if (sub === "compress") {
