@@ -490,9 +490,29 @@ const WaitAMinutePlugin = async (pluginInput) => {
         }
       }
 
+      // -----------------------------------------------------------------------
+      // Project Scope: detectar cambio de proyecto → nuevo task
+      // -----------------------------------------------------------------------
+      // Si el task existente pertenece a un proyecto diferente, backlog automático
+      // y nuevo task. ANTES del continuation fast-path para que no se salte.
+      const existingState = getTaskState(taskId, wamRoot);
+      if (existingState?.projectPath && existingState.projectPath !== wamRoot) {
+        // El task pertenece a otro proyecto → backlog automático
+        waitAMinute.addToBacklog(
+          existingState,
+          `Task ${taskId}: ${existingState.contract?.requirements?.map((r) => r.title).join("; ") || "sin reqs"}`,
+          "project-switch"
+        );
+        persistTaskState(taskId, existingState, wamRoot);
+        // Crear nuevo task para este proyecto
+        try { fs.rmSync(path.join(wamRoot, ".wam", "active-task"), { force: true }); } catch {}
+        taskId = `task-${Date.now()}`;
+        input.taskId = taskId;
+        // Continuar al analyze() con el nuevo taskId — NO retornar
+      }
+
       // Continuation fast-path: contrato aprobado + sin claim de DONE → no inyectar nada,
       // el agente fluye sin interrupción (ni contrato ni línea de progreso).
-      const existingState = getTaskState(taskId, wamRoot);
       if (existingState?.contract?.status === "APPROVED") {
         const claim = waitAMinute.evaluateCompletionGate(existingState, promptText);
         if (!claim.blocked && !claim.allDone) {
@@ -1215,6 +1235,7 @@ const waitAMinute = {
       phase: "PROPOSED",
       nextAction: "Revisar contrato — /wam contract approve o edit",
       lastAction: "",
+      projectPath: root,
     };
     // Safety: consolidar si synthesizeContract generó demasiados requisitos
     const MAX = 15;
