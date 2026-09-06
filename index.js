@@ -57,11 +57,16 @@ function emitTextPart(output, text, meta = {}) {
 
 // -- v1-enforcement: estado durable, contrato y progreso --------
 
+function truncate(text, max = 80) {
+  if (!text || text.length <= max) return text || "";
+  return text.slice(0, max - 3) + "...";
+}
+
 function nextActionFrom(state) {
   const pending = (state?.requirements || []).find((r) => !["done", "verified"].includes(r.status));
-  if (pending) return `Implementar ${pending.title} (${pending.id} ${pending.status})`;
+  if (pending) return `Implementar ${truncate(pending.title)} (${pending.id} ${pending.status})`;
   const unverified = (state?.requirements || []).find((r) => r.status === "done");
-  if (unverified) return `Verificar ${unverified.title} — /wam progress ${unverified.id} verified <evidencia>`;
+  if (unverified) return `Verificar ${truncate(unverified.title)} — /wam progress ${unverified.id} verified <evidencia>`;
   if (state?.requirements?.length) return "Verificar requisitos completos antes de DONE";
   return "Continuar tarea";
 }
@@ -290,23 +295,34 @@ function delegationLines(state) {
   const lines = [
     "[wam delegation] Reqs pendientes → delegar en PARALELO via Task (agente: el apropiado según config del entorno). Mutación directa de archivos desde la sesión principal está BLOQUEADA — solo un subagente ejecuta write/edit.",
   ];
-  for (const r of reqs) {
+  const visible = reqs.slice(0, MAX_VISIBLE_REQS);
+  const overflow = reqs.length - MAX_VISIBLE_REQS;
+  for (const r of visible) {
     const hint = domainHint(r.title);
-    lines.push(`  ${r.id} → Task(parallel) "${(r.title || "").slice(0, 120)}"${hint ? ` [contexto: ${hint}]` : ""}`);
+    lines.push(`  ${r.id} → Task(parallel) "${truncate(r.title, 120)}"${hint ? ` [contexto: ${hint}]` : ""}`);
+  }
+  if (overflow > 0) {
+    lines.push(`  ...(+${overflow} requisitos adicionales consolidados)`);
   }
   return lines;
 }
+
+const MAX_VISIBLE_REQS = 8;
 
 function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute, taskId) {
   const inject = [];
 
   if (state.phase === "PROPOSED") {
+    const reqs = state.requirements || [];
+    const visible = reqs.slice(0, MAX_VISIBLE_REQS);
+    const overflow = reqs.length - MAX_VISIBLE_REQS;
     inject.push(
       "──────────────────────────────────────────────",
       "📋 CONTRATO DE TAREA (PROPOSED)",
       `Objetivo: ${state.contract.objective || "Pendiente definir"}`,
       "Etapas:",
-      ...state.requirements.map((r, i) => `  ${i+1}. ${r.title}`),
+      ...visible.map((r, i) => `  ${i+1}. ${truncate(r.title, 120)}`),
+      ...(overflow > 0 ? [`  ...(+${overflow} requisitos adicionales)`] : []),
       "Verificación:",
       ...state.contract.verification.map((v) => `  - ${v}`),
       "──────────────────────────────────────────────"
@@ -618,8 +634,12 @@ const WaitAMinutePlugin = async (pluginInput) => {
       } catch {}
 
       if (gate.blocked) {
-        const pendingList = gate.pending.length > 0
-          ? "\n  Requisitos pendientes:\n    " + gate.pending.map((p) => `- ${p}`).join("\n    ") + "\n"
+        const maxGateReqs = 5;
+        const pendingItems = gate.pending || [];
+        const visiblePending = pendingItems.slice(0, maxGateReqs);
+        const overflowPending = pendingItems.length - maxGateReqs;
+        const pendingList = visiblePending.length > 0
+          ? "\n  Requisitos pendientes:\n    " + visiblePending.map((p) => `- ${truncate(p, 150)}`).join("\n    ") + (overflowPending > 0 ? `\n    ...(+${overflowPending} más)` : "") + "\n"
           : "";
         const gateHold = `⛔ [wait-a-minute] COMPLETION GATE: faltan ${gate.pending.length} requisito(s). No declare DONE.${pendingList} Continuar con: ${updatedState.nextAction}`;
         emitTextPart(output, gateHold, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });

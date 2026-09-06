@@ -1506,6 +1506,8 @@ export function synthesizeContract(prompt = "", mode = "NORMAL", uncertainties =
     if (!cleaned || cleaned.length < 3) continue;
     // Filtrar cláusulas no accionables
     if (NON_ACTIONABLE_PATTERNS.some((p) => p.test(cleaned))) continue;
+    // Filtrar cláusulas que son predominantemente URLs
+    if (/https?:\/\/\S+/.test(cleaned) && cleaned.replace(/https?:\/\/\S+/g, "").trim().length < 10) continue;
     const cap = cleaned[0].toUpperCase() + cleaned.slice(1);
     requirements.push(`${verbFor(clause)}: ${cap}`);
   }

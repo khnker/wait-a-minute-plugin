@@ -74,14 +74,16 @@ export function assembleContext({
   const rationale = [];
   const n0Line = `[wam N0 policy] ${POLICIES.join(" | ")}`;
   const n0Cost = estTokens(n0Line);
-  let flex = budget - n0Cost;
+  const taskTokens = tokenize(prompt);
+  const isTrivial = classification === "trivial" || mode === "FAST";
+  const isArch = classification === "architectural" || mode === "STRICT";
 
   const reserve = (level, text) => {
     const t = estTokens(text);
     levels[level].push(text);
     return t;
   };
-  
+
   const spend = (level, text) => {
     const t = estTokens(text);
     if (t > flex) {
@@ -91,10 +93,6 @@ export function assembleContext({
     levels[level].push(text);
     flex -= t;
   };
-
-  const taskTokens = tokenize(prompt);
-  const isTrivial = classification === "trivial" || mode === "FAST";
-  const isArch = classification === "architectural" || mode === "STRICT";
 
   // -- N0 Global/Policy (reservado, obligatorio) ----------------------------
   const n0Spent = reserve("N0", n0Line);
@@ -108,16 +106,19 @@ export function assembleContext({
   if (taskState) {
     const reqs = taskState.requirements || [];
     const pend = reqs.filter((r) => r.status !== "done" && r.status !== "verified").length;
+    const nextActionTruncated = (taskState.nextAction || "—").slice(0, 80);
     liveBody = [
       `task: ${taskId} — ${taskState.phase} / ${taskState.contract?.status || "?"}`,
-      `req: ${pend}/${reqs.length} pend | next: ${taskState.nextAction || "—"}`,
+      `req: ${pend}/${reqs.length} pend | next: ${nextActionTruncated}`,
     ].join("\n") || liveBody;
   }
-  const n2Spent = liveBody ? reserve("N2", `[wam N2 task]\n${liveBody}`) : 0;
+  const n2Text = liveBody ? `[wam N2 task]\n${liveBody}` : "";
+  const n2Spent = liveBody ? reserve("N2", n2Text) : 0;
 
   const reserved = n0Spent + n2Spent;
   const budget_violation = reserved > budget;
-  flex = Math.max(0, budget - reserved);
+  let flex = Math.max(0, budget - reserved);
+  if (budget_violation) rationale.push(`VIOLACIÓN: Reserva N0+N2 (${reserved}) excede budget (${budget})`);
 
   // -- Continuation: solo N2 (ya reservado y emitido) -----------------------
   if (!continuation) {
@@ -126,6 +127,7 @@ export function assembleContext({
     const recent = ctx.recentChanges?.body || "";
     const recentSummary = recent.split(/^## /m).slice(0, 3).map((s) => s.trim()).filter(Boolean).join("\n# ");
     if (!isTrivial) {
+      // N1 solo si hay memoria operacional real — cero líneas vacías (rigor = ahorro de tokens)
       const n1summary = summarizeOperationalContext(projectPath);
       if (n1summary) spend("N1", `[wam N1 project] ${n1summary}`);
       if (recentSummary) spend("N1", `[wam N1 recent] ${recentSummary.slice(0, 500)}`);
