@@ -1437,7 +1437,6 @@ function tokenOverlap(a, b) {
   return hit / Math.max(aSet.size, 1);
 }
 
-/** Keywords de dominio para clasificación */
 const DOMAIN_KEYWORDS = {
   frontend: /\b(frontend|fe|front-?end|ui|button|componente|vista|pantalla|react|angular|css|tailwind|html|form|input|modal)\b/i,
   backend: /\b(backend|back-?end|api|server|endpoint|base de datos|db|database|nest|express|postgres|mongo|route|middleware)\b/i,

@@ -5,7 +5,7 @@ import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, 
 import { assembleContext } from "./assembly.js";
 import { evaluateRequirement as evaluateRequirementChecks } from "./verification.js";
 import { ContextDecisionTracer } from "./context-decision-audit.js";
-import { evaluateAction } from "./risk-engine.js";
+import { guardAction } from "./runtime-guards.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -334,7 +334,13 @@ function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute
       `Remaining (${pend.length}/${reqs.length}):`,
       ...visible.map((r) => `  - ${truncate(r.title, 120)}`),
       ...(overflow > 0 ? [`  ...(+${overflow} more)`] : []),
-      "Decide your own strategy. nextAction is advisory only.",
+      "----------------------------------------------",
+      "AUTONOMY GUIDELINES:",
+      "1. You are autonomous within the SAFE envelope.",
+      "2. Investigate/experiment safely to reduce uncertainty.",
+      "3. nextAction is advisory — decide your own strategy based on evidence.",
+      "4. Reject failed hypotheses and re-plan.",
+      "5. Authorization required for GUARDED/BLOCKED actions."
     );
     state.contractDisplayed = true;
   }
