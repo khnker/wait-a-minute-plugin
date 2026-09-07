@@ -5,6 +5,7 @@ import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, 
 import { assembleContext } from "./assembly.js";
 import { evaluateRequirement as evaluateRequirementChecks } from "./verification.js";
 import { ContextDecisionTracer } from "./context-decision-audit.js";
+import { evaluateAction } from "./risk-engine.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -771,6 +772,15 @@ const WaitAMinutePlugin = async (pluginInput) => {
         //     throw new Error(directive);
         //   }
         // }
+
+        // Action Risk Envelope: evaluar riesgo de la herramienta antes de cualquier
+        // otra lógica. Bloquea BLOCKED automáticamente. GUARDED pasa si está en scope.
+        const risk = evaluateAction(tool, input.args || input.parameters || {}, taskRoot);
+        if (risk.level === "BLOCKED") {
+          const directive = `[wait-a-minute] RISK BLOCK (${tool}): ${risk.reason || "acción fuera del envelope de riesgo"}. Requiere autorización explícita del usuario.`;
+          input.output = directive;
+          throw new Error(directive);
+        }
 
         if (st?.phase !== "ASKING") return;
         // git read-only (status/diff/log) es investigación: permitido aun en ASKING.
