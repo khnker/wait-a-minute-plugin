@@ -311,6 +311,103 @@ function delegationLines(state) {
 
 const MAX_VISIBLE_REQS = 8;
 
+/**
+ * Strategy Continuity: classify whether an action is covered by an active
+ * approved strategy. Used by tool.execute.before to avoid asking for
+ * per-step approval for actions that are ordinary execution of an
+ * already-approved strategy.
+ *
+ * Returns:
+ *   { covered: true,  reason }       → action proceeds without re-approval
+ *   { covered: false, reason }       → action requires explicit user decision
+ *   { covered: null,  reason }       → no active strategy, fall through to default logic
+ */
+function classifyActionAgainstStrategy(action, tool, args, approvedStrategy) {
+  if (!approvedStrategy || approvedStrategy.status !== "ACTIVE") {
+    return { covered: null, reason: "No active approved strategy" };
+  }
+
+  const actionLower = String(action || "").toLowerCase();
+  const toolLower = String(tool || "").toLowerCase();
+  const cmdLower = String(args?.command || args?.cmd || args?.script || "").toLowerCase();
+
+  // 1. Prohibited actions: ALWAYS require explicit user authorization,
+  //    even if strategy is approved. Strategy continuity is not blanket.
+  for (const prohibited of approvedStrategy.prohibitedActions || []) {
+    if (actionLower.includes(prohibited.toLowerCase())) {
+      return {
+        covered: false,
+        reason: `Acción prohibida explícitamente en strategy: ${prohibited}`,
+      };
+    }
+    if (cmdLower.includes(prohibited.toLowerCase())) {
+      return {
+        covered: false,
+        reason: `Comando prohibido explícitamente en strategy: ${prohibited}`,
+      };
+    }
+  }
+
+  // 2. Allowed actions: cover SAFE and TACTICAL execution of the strategy.
+  //    Examples: read, search, inspect, test, lint, install dependency,
+  //    install browser binary, run validation, modify source, retry.
+  for (const allowed of approvedStrategy.allowedActions || []) {
+    if (actionLower.includes(allowed.toLowerCase())) return { covered: true, reason: `allowed: ${allowed}` };
+    if (toolLower.includes(allowed.toLowerCase())) return { covered: true, reason: `tool: ${allowed}` };
+    if (cmdLower.includes(allowed.toLowerCase())) return { covered: true, reason: `cmd: ${allowed}` };
+  }
+
+  // 3. Heuristic fallback: SAFE/inspector tools are always covered when
+  //    strategy is active (they cannot break it).
+  const safeTools = ["read", "grep", "glob", "ls", "fetch", "webfetch", "test", "lint"];
+  if (safeTools.includes(toolLower)) return { covered: true, reason: "SAFE tool under active strategy" };
+
+  return { covered: false, reason: "Acción no cubierta explícitamente por la estrategia aprobada" };
+}
+
+/**
+ * Evidence-Guided Recovery: classify a failure so the agent must diagnose
+ * before proposing a strategic change.
+ *
+ * Returns a category hint. Provisional, MUST NOT be treated as fact.
+ */
+function classifyFailure(result, expected, observed) {
+  const obs = String(observed || "").toLowerCase();
+  const res = String(result || "").toLowerCase();
+
+  if (/timeout|timed out/.test(obs)) return { category: "TIMING", priority: 2 };
+  if (/403|401|307|blocked|captcha|perimeterx|big-ip/.test(obs)) return { category: "ANTI_BOT", priority: 8 };
+  if (/enotfound|econnrefused|network/.test(obs)) return { category: "NETWORK", priority: 1 };
+  if (/0 products|empty|no results|not found/.test(obs)) return { category: "ZERO_RESULT", priority: 3 };
+  if (/selector|element not found|null/.test(obs)) return { category: "SELECTOR", priority: 4 };
+  if (/chromium|browser|executable/.test(obs)) return { category: "BROWSER_RUNTIME", priority: 5 };
+  if (/dependency|module not found|cannot find/.test(obs)) return { category: "DEPENDENCY", priority: 1 };
+  if (/permission denied|eacces/.test(obs)) return { category: "ENVIRONMENT", priority: 2 };
+  if (/parse|json|syntax/.test(obs)) return { category: "PARSER", priority: 4 };
+
+  return { category: "UNKNOWN", priority: 10 };
+}
+
+/**
+ * Reference Evidence Priority: load known-good references for the current
+ * task domain. Used in context assembly to anchor the agent to proven
+ * implementations instead of letting it invent alternatives.
+ */
+function loadReferenceEvidence(taskRoot, intent) {
+  const refsFile = path.join(taskRoot || "", ".wam", "references.json");
+  if (!fs.existsSync(refsFile)) return [];
+  try {
+    const refs = JSON.parse(fs.readFileSync(refsFile, "utf-8"));
+    const goal = String(intent?.goal || intent?.classification || "").toLowerCase();
+    return (refs.references || []).filter((r) => {
+      const targets = (r.targets || []).map((t) => t.toLowerCase());
+      return targets.some((t) => goal.includes(t)) || goal.length === 0;
+    });
+  } catch {
+    return [];
+  }
+}
+
 function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute, taskId) {
   // Autonomy envelope: WAM injects only objective + remaining requirements as
   // advisory state. It does NOT prescribe the next action or control strategy.
@@ -344,6 +441,20 @@ function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute
       "5. Authorization required for GUARDED/BLOCKED actions."
     );
     state.contractDisplayed = true;
+  }
+
+  // Autonomy: Inyectar estrategia aprobada si existe
+  if (state.approvedStrategy) {
+    const strat = state.approvedStrategy;
+    inject.push(
+      "----------------------------------------------",
+      `APPROVED STRATEGY: ${strat.strategy}`,
+      `scope: ${strat.scope}`,
+      `allowedActions: ${strat.allowedActions?.join(", ") || ""}`,
+      `status: ${strat.status}`,
+      "Continue autonomous execution while actions are SAFE/GUARDED within scope.",
+      "Only invalidate if evidence materially contradicts this strategy."
+    );
   }
 
   // No per-turn classification@risk@complexity line, no repeated header,
@@ -779,6 +890,35 @@ const WaitAMinutePlugin = async (pluginInput) => {
         //     throw new Error(directive);
         //   }
         // }
+
+        // Strategy Continuity: si hay estrategia aprobada, verificar si la acción
+        // está cubierta antes de proceder con la lógica de ASKING.
+        if (st?.approvedStrategy && st.approvedStrategy.status === "ACTIVE") {
+          const stratCheck = classifyActionAgainstStrategy(
+            input?.description || "",
+            tool,
+            input.args || input.parameters || {},
+            st.approvedStrategy
+          );
+          if (stratCheck.covered === true) {
+            // La acción está explícitamente cubierta por la estrategia aprobada.
+            // Loggear para observabilidad pero NO bloquear.
+            try {
+              sessionStore.set(`wam-strategy-hit-${tool}`, { reason: stratCheck.reason, at: Date.now() });
+            } catch {}
+          } else if (stratCheck.covered === false) {
+            // Acción prohibida explícitamente por la estrategia → bloquear.
+            const directive = `[wait-a-minute] STRATEGY VIOLATION: ${stratCheck.reason}. La estrategia aprobada "${st.approvedStrategy.strategy}" no autoriza esta acción.`;
+            input.output = directive;
+            throw new WamPolicyBlock(directive, {
+              tool,
+              reason: stratCheck.reason,
+              level: "BLOCKED",
+              source: "approved-strategy-continuity",
+            });
+          }
+          // covered === null → no decidir aquí; fall through to risk/asking logic
+        }
 
         // Action Risk Envelope: evaluar riesgo de la herramienta antes de cualquier
         // otra lógica. Bloquea BLOCKED con WamPolicyBlock (no genérico Error) para
@@ -1380,6 +1520,31 @@ const waitAMinute = {
     state.contract = { ...(state.contract || {}), status: "APPROVED" };
     if (state.phase !== "DONE") state.phase = "IMPLEMENTING";
     state.nextAction = nextActionFrom(state);
+    // Strategy Continuity: persist approved strategy so tool.execute.before
+    // knows which actions are covered without requiring per-step approval.
+    // Approved scope = the strategy itself + all safe execution steps required
+    // to execute it (install deps, run tests, configure browser, retry).
+    state.approvedStrategy = {
+      strategy: state.contract?.objective || state.intent?.goal || "unspecified",
+      approvedAt: Date.now(),
+      scope: state.contract?.objective || "task scope",
+      allowedActions: [
+        "read", "search", "inspect", "test", "lint", "typecheck",
+        "install dependency", "install browser binary", "run validation",
+        "modify source", "create fixture", "diagnose", "retry",
+      ],
+      prohibitedActions: [
+        "delete production data", "drop database", "production deploy",
+        "credential modification", "scope expansion", "destructive operation",
+      ],
+      invalidationConditions: [
+        "environment cannot satisfy required runtime",
+        "required dependency unavailable and unfixable",
+        "explicit user retraction",
+        "verified evidence contradicts strategy at architectural level",
+      ],
+      status: "ACTIVE",
+    };
     persistTaskState(taskId, state, root);
     try {
       updateLiveContext(taskId, state, root);
