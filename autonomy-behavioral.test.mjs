@@ -330,3 +330,33 @@ test("Autonomy: T-O — Cognitive state restoration after compaction", () => {
     cleanup();
   }
 });
+
+test("Autonomy: T-P — Verification failure allows autonomous recovery", () => {
+  const { root, taskId, cleanup } = setupTask();
+  try {
+    // 1. Initial hypothesis + experiment for fix
+    const h = createHypothesis(root, taskId, { statement: "H recovery" });
+    const e = createExperiment(root, taskId, { hypothesisId: h.id, actionDescription: "verify" });
+
+    // 2. Simulate verification failure (FAIL not COMPLETED)
+    failExperiment(root, taskId, e.id, "verification failed");
+
+    // 3. Record observation — agent CAN investigate again
+    assert.doesNotThrow(() => {
+      recordObservation(root, taskId, { experimentId: e.id, result: "verification failed" });
+    });
+
+    // 4. Agent creates a NEW hypothesis to investigate the verification failure
+    const h2 = createHypothesis(root, taskId, {
+      statement: "Why did verification fail?",
+      confidence: 0.4,
+    });
+
+    // 5. Task is NOT auto-BLOCKED — new hypothesis is proposed
+    const all = listHypotheses(root, taskId);
+    assert.ok(all.length >= 2);
+    assert.equal(all.find((h) => h.id === h2.id).status, "proposed");
+  } finally {
+    cleanup();
+  }
+});

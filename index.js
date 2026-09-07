@@ -802,6 +802,8 @@ const WaitAMinutePlugin = async (pluginInput) => {
           throw new Error(directive);
         }
       } catch (err) {
+        // WamPolicyBlock MUST be re-thrown — never swallowed by generic catch.
+        if (err?.wamPolicyBlock === true) throw err;
         if (typeof err?.message === "string" && err.message.includes("ENFORCED BLOCK")) throw err;
       }
     },

@@ -136,15 +136,27 @@ export function findRepeatedExperiment(taskRoot, taskId, { hypothesisId, actionD
 
 // -- Observations --
 
-export function recordObservation(taskRoot, taskId, { experimentId, result, facts = [], unexpected = [] }) {
+export function recordObservation(taskRoot, taskId, {
+  experimentId,
+  result,
+  facts = [],
+  unexpected = [],
+  source = { type: "runtime", reference: "" },
+}) {
   const dir = cognitionRoot(taskRoot, taskId);
   const file = path.join(dir, FILES.observations);
+  // Enforce provenance: every observation must have a source.type.
+  const provenance = source?.type
+    ? source
+    : { type: "runtime", reference: "" };
   const o = {
     id: genId("O"),
     experimentId,
     result,
     facts,
     unexpected,
+    source: provenance,
+    kind: "FACT", // FACT | INTERPRETATION | VERIFIED_EVIDENCE (runtime defaults to FACT)
   };
   appendLine(file, o);
   return o;
