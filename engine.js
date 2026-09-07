@@ -1,6 +1,6 @@
 /**
  * Wait a Minute — Pre-Flight Cognitive Analysis Engine
- * 
+ *
  * Analiza peticiones de usuario antes de la resolución de skills y la ejecución del agente.
  * Clasifica la tarea, inspecciona el proyecto, detecta supuestos y selecciona skills.
  */
@@ -1408,6 +1408,116 @@ export function escalateAssumptions(state, taskText = "") {
     state.contract = contract;
   }
   return { escalated, changed };
+}
+
+// ---------------------------------------------------------------------------
+// Topic Scope Classifier — Determinista, sin LLM
+// ---------------------------------------------------------------------------
+// Clasifica la relación entre un nuevo mensaje y el contract activo en 3 estados:
+//   "continuation" — mismo tema, el agente debe continuar la tarea actual
+//   "extension"    — tema relacionado, se puede agregar al contract existente
+//   "new-topic"    — tema diferente, requiere nuevo contract / backlog
+
+function tokenize(text = "") {
+  return new Set(
+    (text || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9áéíóúñü\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2)
+  );
+}
+
+function tokenOverlap(a, b) {
+  const aSet = typeof a === "Set" ? a : tokenize(a);
+  const bSet = typeof b === "Set" ? b : tokenize(b);
+  if (!aSet.size || !bSet.size) return 0;
+  let hit = 0;
+  for (const t of bSet) if (aSet.has(t)) hit++;
+  return hit / Math.max(aSet.size, 1);
+}
+
+/** Keywords de dominio para clasificación */
+const DOMAIN_KEYWORDS = {
+  frontend: /\b(frontend|fe|front-?end|ui|button|componente|vista|pantalla|react|angular|css|tailwind|html|form|input|modal)\b/i,
+  backend: /\b(backend|back-?end|api|server|endpoint|base de datos|db|database|nest|express|postgres|mongo|route|middleware)\b/i,
+  scraper: /\b(scrap|crawl|parser|puppeteer|playwright|selenium|fetch|http client)\b/i,
+  tests: /\b(test|e2e|spec|coverage|unitario|prueba|mock|stub|fixture)\b/i,
+  security: /\b(security|seguridad|auth|oauth|token|jwt|credencial|encrypt|hash)\b/i,
+  infra: /\b(infra|deploy|docker|ci|cd|pipeline|aws|gcp|azure|kubernetes|k8s)\b/i,
+  data: /\b(data|datos|migration|migración|schema|modelo|query|sql|orm)\b/i,
+};
+
+function detectDomain(text = "") {
+  const domains = [];
+  for (const [domain, pattern] of Object.entries(DOMAIN_KEYWORDS)) {
+    if (pattern.test(text)) domains.push(domain);
+  }
+  return domains;
+}
+
+/**
+ * Clasifica la relación entre un nuevo prompt y el contract activo.
+ *
+ * @param {string} prompt - El mensaje nuevo del usuario
+ * @param {object} contract - El contract actual (requirements, status, etc.)
+ * @returns {"continuation"|"extension"|"new-topic"}
+ */
+export function topicScope(prompt, contract) {
+  if (!contract?.requirements?.length) return "new-topic";
+
+  const promptTokens = tokenize(prompt);
+  const contractText = contract.requirements.map((r) => r.title || r).join(" ");
+  const contractTokens = tokenize(contractText);
+
+  // 1. Token overlap — qué tan relacionado está el prompt con los reqs actuales
+  const overlap = tokenOverlap(promptTokens, contractTokens);
+
+  // 2. Domain overlap — comparten mismo dominio técnico?
+  const promptDomains = detectDomain(prompt);
+  const contractDomains = detectDomain(contractText);
+  const domainOverlap = promptDomains.some((d) => contractDomains.includes(d));
+
+  // 3. Continuation signals — el usuario dice explícitamente que continúa
+  const CONTINUATION_RE = /\b(continuar|sigue|siguiente|proximo|próximo|seguir|avanzar|completar|terminar|finalizar|resuelto|listo|hecho|done)\b/i;
+  const isContinuationClaim = CONTINUATION_RE.test(prompt);
+
+  // 4. Decision: continuation > extension > new-topic
+  if (isContinuationClaim && overlap > 0.1) return "continuation";
+  if (overlap > 0.3 || (domainOverlap && overlap > 0.15)) return "extension";
+  return "new-topic";
+}
+
+/**
+ * Agrega un requerimiento al backlog (fuera de alcance del contract activo).
+ * El backlog se persiste en state.backlog y NUNCA se inyecta en contexto activo.
+ */
+export function addToBacklog(state, title, source = "user") {
+  if (!state.backlog) state.backlog = [];
+  const id = `backlog-${Date.now()}`;
+  state.backlog.push({
+    id,
+    title: (title || "").slice(0, 200),
+    addedAt: new Date().toISOString(),
+    source,
+    status: "pending",
+  });
+  return id;
+}
+
+/**
+ * Obtiene el backlog formateado para inyección en contexto.
+ * Solo se muestra bajo demanda (/wam backlog), nunca en el pack N0-N3.
+ */
+export function formatBacklog(state) {
+  const pending = (state.backlog || []).filter((b) => b.status === "pending");
+  if (!pending.length) return null;
+  const lines = [`[wam backlog] ${pending.length} requerimiento(s) fuera de alcance:`];
+  for (const b of pending.slice(0, 10)) {
+    lines.push(`  ${b.id}: ${b.title}`);
+  }
+  if (pending.length > 10) lines.push(`  ...(+${pending.length - 10} más)`);
+  return lines.join("\n");
 }
 
 /**

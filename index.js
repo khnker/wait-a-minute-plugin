@@ -310,42 +310,36 @@ function delegationLines(state) {
 const MAX_VISIBLE_REQS = 8;
 
 function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute, taskId) {
+  // Autonomy envelope: WAM injects only objective + remaining requirements as
+  // advisory state. It does NOT prescribe the next action or control strategy.
+  // The agent decides how to inspect, hypothesize, experiment, and re-plan.
   const inject = [];
+  const reqs = state.requirements || [];
+  const pend = reqs.filter((r) => r.status !== "done");
+  const objective = state.contract?.objective || analysis.intent?.goal || null;
 
-  if (state.phase === "PROPOSED") {
-    const reqs = state.requirements || [];
+  // Silence for trivial/fast: no inject noise. Agent has full autonomy.
+  if (analysis.intent?.classification === "trivial" || analysis.strategy === "FAST") {
+    return inject;
+  }
+
+  // Once: contract display, then contractDisplayed flips. After that the agent
+  // already has the objective in working memory — no need to repeat.
+  if (state.phase === "PROPOSED" && !state.contractDisplayed) {
     const visible = reqs.slice(0, MAX_VISIBLE_REQS);
     const overflow = reqs.length - MAX_VISIBLE_REQS;
     inject.push(
-      "──────────────────────────────────────────────",
-      "📋 CONTRATO DE TAREA (PROPOSED)",
-      `Objetivo: ${state.contract.objective || "Pendiente definir"}`,
-      "Etapas:",
-      ...visible.map((r, i) => `  ${i+1}. ${truncate(r.title, 120)}`),
-      ...(overflow > 0 ? [`  ...(+${overflow} requisitos adicionales)`] : []),
-      "Verificación:",
-      ...state.contract.verification.map((v) => `  - ${v}`),
-      "──────────────────────────────────────────────"
+      `Objective: ${objective || "pending"}`,
+      `Remaining (${pend.length}/${reqs.length}):`,
+      ...visible.map((r) => `  - ${truncate(r.title, 120)}`),
+      ...(overflow > 0 ? [`  ...(+${overflow} more)`] : []),
+      "Decide your own strategy. nextAction is advisory only.",
     );
+    state.contractDisplayed = true;
   }
 
-  if (state.requirements?.length) {
-    const pend = state.requirements.filter((r) => r.status !== "done").length;
-    inject.push(`[wait-a-minute: task ${taskId} — fase ${state.phase}, ${pend}/${state.requirements.length} requisitos pendientes]`);
-  }
-
-  if (cfg.experimental?.waitAMinuteInject === true) {
-    inject.push(`[wait-a-minute: ${analysis.intent.classification}@${analysis.risk}@${analysis.complexity}]`);
-    const registry = waitAMinute.getRegistry();
-    for (const s of analysis.skills?.selected || []) {
-      const entry = Object.values(registry).find((r) => r.id === s.id);
-      if (!entry || !s.hasContent) continue;
-      const dl = waitAMinute.loadSkillOnDemand(entry.id, registry, projectDirectory);
-      if (!dl.loaded) continue;
-      inject.push(`[wait-a-minute: skill "${s.name}" — SKILL.md materializado en ${dl.contentPath}. Cargar via runtime nativo si se ejecuta.]`);
-    }
-  }
-
+  // No per-turn classification@risk@complexity line, no repeated header,
+  // no skill inject. The agent reasons; WAM only checks boundaries when triggered.
   return inject;
 }
 

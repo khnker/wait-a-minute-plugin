@@ -24,7 +24,6 @@ import path from "node:path";
 import { getOperationalContext, summarizeOperationalContext, normalizeConfidence, confidenceLabel } from "./memory.js";
 import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
 
-const POLICIES = ["scope(ACTIVE)", "verify(ACTIVE)", "simplify(ACTIVE)"];
 
 function tokenize(text = "") {
   return new Set(
@@ -72,8 +71,6 @@ export function assembleContext({
 } = {}) {
   const levels = { N0: [], N1: [], N2: [], N3: [] };
   const rationale = [];
-  const n0Line = `[wam N0 policy] ${POLICIES.join(" | ")}`;
-  const n0Cost = estTokens(n0Line);
   const taskTokens = tokenize(prompt);
   const isTrivial = classification === "trivial" || mode === "FAST";
   const isArch = classification === "architectural" || mode === "STRICT";
@@ -95,7 +92,6 @@ export function assembleContext({
   };
 
   // -- N0 Global/Policy (reservado, obligatorio) ----------------------------
-  const n0Spent = reserve("N0", n0Line);
 
   // -- N2 Task (reservado, obligatorio) -------------------------------------
   const liveFile = path.join(projectPath, ".wam", "tasks", taskId, "context.md");
@@ -115,7 +111,7 @@ export function assembleContext({
   const n2Text = liveBody ? `[wam N2 task]\n${liveBody}` : "";
   const n2Spent = liveBody ? reserve("N2", n2Text) : 0;
 
-  const reserved = n0Spent + n2Spent;
+  const reserved = n2Spent;
   const budget_violation = reserved > budget;
   let flex = Math.max(0, budget - reserved);
   if (budget_violation) rationale.push(`VIOLACIÓN: Reserva N0+N2 (${reserved}) excede budget (${budget})`);
@@ -171,7 +167,7 @@ export function assembleContext({
     }
   }
 
-  const lines = [...levels.N0, ...levels.N1, ...levels.N2, ...levels.N3];
+  const lines = [...levels.N1, ...levels.N2, ...levels.N3];
   return {
     levels: Object.fromEntries(Object.entries(levels).map(([k, v]) => [k, v.length])),
     lines,
