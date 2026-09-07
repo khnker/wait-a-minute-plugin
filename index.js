@@ -6,6 +6,7 @@ import { assembleContext } from "./assembly.js";
 import { evaluateRequirement as evaluateRequirementChecks } from "./verification.js";
 import { ContextDecisionTracer } from "./context-decision-audit.js";
 import { guardAction } from "./runtime-guards.js";
+import { WamPolicyBlock } from "./risk-engine.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -780,12 +781,13 @@ const WaitAMinutePlugin = async (pluginInput) => {
         // }
 
         // Action Risk Envelope: evaluar riesgo de la herramienta antes de cualquier
-        // otra lógica. Bloquea BLOCKED automáticamente. GUARDED pasa si está en scope.
+        // otra lógica. Bloquea BLOCKED con WamPolicyBlock (no genérico Error) para
+        // evitar que catch genérico lo trague.
         const risk = evaluateAction(tool, input.args || input.parameters || {}, taskRoot);
         if (risk.level === "BLOCKED") {
           const directive = `[wait-a-minute] RISK BLOCK (${tool}): ${risk.reason || "acción fuera del envelope de riesgo"}. Requiere autorización explícita del usuario.`;
           input.output = directive;
-          throw new Error(directive);
+          throw new WamPolicyBlock(directive, { tool, reason: risk.reason, level: risk.level });
         }
 
         if (st?.phase !== "ASKING") return;

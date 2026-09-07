@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getOperationalContext, summarizeOperationalContext, normalizeConfidence, confidenceLabel } from "./memory.js";
 import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
+import { loadCognitiveState, compactCognitiveState } from "./cognitive-state.js";
 
 
 function tokenize(text = "") {
@@ -111,7 +112,21 @@ export function assembleContext({
   const n2Text = liveBody ? `[wam N2 task]\n${liveBody}` : "";
   const n2Spent = liveBody ? reserve("N2", n2Text) : 0;
 
-  const reserved = n2Spent;
+  let reserved = n2Spent;
+
+  // Cognitive state injection (compact, only if cognition exists)
+  const cognitionRaw = loadCognitiveState(projectPath);
+  const hasCognition =
+    cognitionRaw.activeHypotheses.length > 0 ||
+    cognitionRaw.rejectedHypotheses.length > 0 ||
+    cognitionRaw.recentExperiments.length > 0 ||
+    cognitionRaw.criticalObservations.length > 0;
+  if (hasCognition) {
+    const compact = compactCognitiveState(cognitionRaw);
+    const cogText = `[wam N2 cognition] ${JSON.stringify(compact)}`;
+    reserved += estTokens(cogText);
+    levels.N2.push(cogText);
+  }
   const budget_violation = reserved > budget;
   let flex = Math.max(0, budget - reserved);
   if (budget_violation) rationale.push(`VIOLACIÓN: Reserva N0+N2 (${reserved}) excede budget (${budget})`);

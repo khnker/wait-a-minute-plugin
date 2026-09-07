@@ -9,15 +9,18 @@
  * - BLOCKED: Destructivo, irreversible, o sensible. Requiere autorización explícita.
  */
 
+import nodePath from "node:path";// `task` is NOT inherently SAFE — delegation may cause mutations.
+// It MUST be GUARDED and evaluated per-call.
 const SAFE_TOOLS = new Set([
   "read", "glob", "grep", "ls",
-  "tool_search", "task", "webfetch", "fetch",
+  "tool_search", "webfetch", "fetch",
 ]);
 
 const GUARDED_TOOLS = new Set([
   "write", "edit", "apply_patch", "patch",
   "todo_write", "todowrite",
   "bash", "sh", "pty_spawn", "pty_write",
+  "task", // delegation: GUARDED, not SAFE
 ]);
 
 const BLOCKED_TOOLS = new Set([
@@ -35,6 +38,54 @@ const PROTECTED_PATHS = [
 function isProtectedPath(path) {
   if (!path || typeof path !== "string") return false;
   return PROTECTED_PATHS.some((p) => path.startsWith(p) || path.includes(p));
+}
+
+/**
+ * Canonicalize and resolve a path against the task root.
+ * Returns the absolute canonical path, or null if unsafe (path traversal).
+ */
+/**
+ * Canonicalize and resolve a path against the task root.
+ * Returns the absolute canonical path, or null if unsafe (path traversal).
+ */
+function canonicalPath(p, taskRoot) {
+  if (!p || typeof p !== "string") return null;
+  try {
+    let resolved;
+    if (nodePath.isAbsolute(p)) {
+      resolved = nodePath.resolve(p);
+    } else if (taskRoot) {
+      resolved = nodePath.resolve(taskRoot, p);
+    } else {
+      return null;
+    }
+    return resolved;
+  } catch {
+    return null;
+  }
+}
+
+function isWithinScope(absPath, taskRoot) {
+  if (!taskRoot) return true; // No scope constraint
+  try {
+    const resolvedRoot = nodePath.resolve(taskRoot);
+    const rel = nodePath.relative(resolvedRoot, absPath);
+    return !rel.startsWith("..") && !nodePath.isAbsolute(rel);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Structured error for policy blocks. MUST NOT be swallowed by catch.
+ */
+export class WamPolicyBlock extends Error {
+  constructor(message, policy = {}) {
+    super(message);
+    this.name = "WamPolicyBlock";
+    this.wamPolicyBlock = true;
+    this.policy = policy;
+  }
 }
 
 function evaluateBashCommand(cmd) {
@@ -78,11 +129,11 @@ export function evaluateAction(tool, args = {}, taskRoot = "") {
   }
 
   if (GUARDED_TOOLS.has(lowerTool)) {
-    const path = args?.path || args?.file || args?.file_path || args?.target || "";
-    if (isProtectedPath(path)) {
+    const rawPath = args?.path || args?.file || args?.file_path || args?.target || "";
+    if (isProtectedPath(rawPath)) {
       return {
         level: "BLOCKED",
-        reason: `Ruta protegida: ${path}`,
+        reason: `Ruta protegida: ${rawPath}`,
         requiresUser: true,
       };
     }
@@ -99,12 +150,13 @@ export function evaluateAction(tool, args = {}, taskRoot = "") {
       }
     }
 
-    if (taskRoot && path) {
-      const absolutePath = path.startsWith("/") || /^[A-Z]:\\/.test(path);
-      if (absolutePath && !path.startsWith(taskRoot)) {
+    // Path canonicalization (prevents /repo/project-evil/ bypass)
+    if (taskRoot && rawPath) {
+      const canonical = canonicalPath(rawPath, taskRoot);
+      if (canonical && !isWithinScope(canonical, taskRoot)) {
         return {
           level: "BLOCKED",
-          reason: `Acción fuera del scope de tarea: ${path} (root: ${taskRoot})`,
+          reason: `Acción fuera del scope de tarea (path traversal): ${rawPath} → ${canonical} (root: ${taskRoot})`,
           requiresUser: true,
         };
       }

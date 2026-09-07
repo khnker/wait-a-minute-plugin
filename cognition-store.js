@@ -167,7 +167,9 @@ export function buildCompactState(taskRoot, taskId) {
   const observations = listObservations(taskRoot, taskId);
 
   return {
-    activeHypotheses: hypotheses.filter((h) => h.status === "proposed" || h.status === "testing"),
+    activeHypotheses: hypotheses.filter((h) =>
+      h.status === "proposed" || h.status === "testing" || h.status === "supported"
+    ),
     supportedHypotheses: hypotheses.filter((h) => h.status === "supported"),
     rejectedHypotheses: hypotheses.filter((h) => h.status === "rejected"),
     recentExperiments: experiments.slice(-5),
