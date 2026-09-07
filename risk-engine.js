@@ -91,7 +91,7 @@ export class WamPolicyBlock extends Error {
 function evaluateBashCommand(cmd) {
   if (!cmd || typeof cmd !== "string") return { safe: true };
 
-  const destructive = /\b(rm\s+-rf|rm\s+-fr|dd\s+if=|mkfs|format|:()\s*\{|\bdrop\s+database|\bdrop\s+table|truncate\s+table|delete\s+from.*where)\b/i;
+  const destructive = /\b(rm\s+-rf|rm\s+-fr|dd\s+if=|mkfs|format|:()\s*\{|\bdrop\s+database|\bdrop\s+table|truncate\s+table|delete\s+from.*where|pkill\s+.*|killall\s+.*)\b/i;
   const privileged = /\b(sudo|chmod\s+777|chown\s+root|iptables|ufw\s+disable)\b/i;
   const network = /\b(curl.*\|.*sh|wget.*\|.*sh|nc\s+-|netcat)\b/i;
   const gitDestructive = /\bgit\s+push\s+(-f|--force)|git\s+reset\s+--hard|git\s+clean\s+-fd|git\s+filter-branch/i;
