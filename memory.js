@@ -52,7 +52,11 @@ const CONFIDENCE_STRING_TO_NUM = { high: 0.9, medium: 0.5, low: 0.2 };
 export function normalizeConfidence(v) {
   if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.min(1, v));
   if (typeof v === "string") {
-    const n = CONFIDENCE_STRING_TO_NUM[v.trim().toLowerCase()];
+    const trimmed = v.trim();
+    if (trimmed !== "" && !isNaN(Number(trimmed))) {
+      return Math.max(0, Math.min(1, Number(trimmed)));
+    }
+    const n = CONFIDENCE_STRING_TO_NUM[trimmed.toLowerCase()];
     return n != null ? n : 0.5;
   }
   return 0.5;

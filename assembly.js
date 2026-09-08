@@ -79,6 +79,9 @@ export function assembleContext({
   const reserve = (level, text) => {
     const t = estTokens(text);
     levels[level].push(text);
+    if (typeof globalThis.__wamReserveLines !== "undefined") {
+      globalThis.__wamReserveLines.push({ level, text });
+    }
     return t;
   };
 
@@ -93,6 +96,8 @@ export function assembleContext({
   };
 
   // -- N0 Global/Policy (reservado, obligatorio) ----------------------------
+  const n0Text = "[wam N0 policy] autonomy loop | soft-archive only (U1)";
+  const n0Spent = reserve("N0", n0Text);
 
   // -- N2 Task (reservado, obligatorio) -------------------------------------
   const liveFile = path.join(projectPath, ".wam", "tasks", taskId, "context.md");
@@ -111,8 +116,7 @@ export function assembleContext({
   }
   const n2Text = liveBody ? `[wam N2 task]\n${liveBody}` : "";
   const n2Spent = liveBody ? reserve("N2", n2Text) : 0;
-
-  let reserved = n2Spent;
+  let reserved = n0Spent + n2Spent;
 
   // Cognitive state injection (compact, only if cognition exists)
   const cognitionRaw = loadCognitiveState(projectPath);
@@ -148,10 +152,9 @@ export function assembleContext({
         const meta = ctx[key]?.meta || {};
         const conf = normalizeConfidence(meta.confidence);
         if (meta.source === "inferred" && conf < 0.4) {
-          spend("N1", `[wam N1 provenance] ${label} es INFERIDO (${meta.source}, conf ${meta.confidence} ${confidenceLabel(conf)}) — no es decisión confirmada; validar antes de asumir`);
+          spend("N1", `[wam N1 WARNING] ${label} es INFERIDO (conf ${meta.confidence} ${confidenceLabel(conf)}) — no es decisión confirmada; validar antes de asumir`);
         }
-      }
-      
+      }      
       const archDoc = ctx.architecture?.body || "";
       if (isArch && archDoc.trim()) {
         const arch = extractRelevantSections("architecture", archDoc, taskTokens, { base: true });
@@ -182,7 +185,7 @@ export function assembleContext({
     }
   }
 
-  const lines = [...levels.N1, ...levels.N2, ...levels.N3];
+  const lines = [...levels.N0, ...levels.N1, ...levels.N2, ...levels.N3];
   return {
     levels: Object.fromEntries(Object.entries(levels).map(([k, v]) => [k, v.length])),
     lines,

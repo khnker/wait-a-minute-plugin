@@ -132,7 +132,12 @@ export function persistTaskState(taskId, state, root) {
  */
 export function getTaskState(taskId, root) {
   const file = path.join(root || process.cwd(), ".wam", "tasks", taskId, "state.yaml");
-  return fileExists(file) ? JSON.parse(readFileSafely(file)) : null;
+  if (!fileExists(file)) return null;
+  try {
+    return JSON.parse(readFileSafely(file));
+  } catch {
+    return null;
+  }
 }
 
 /**

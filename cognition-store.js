@@ -18,6 +18,30 @@ const FILES = {
   observations: "observations.jsonl",
 };
 
+/** U1: never unlink cognition records. Archive via status append. */
+export const DELETION_POLICY = "soft-archive";
+
+export function archiveHypothesis(taskRoot, taskId, hypothesisId, reason = "archived") {
+  const dir = cognitionRoot(taskRoot, taskId);
+  const file = path.join(dir, FILES.hypotheses);
+  appendLine(file, {
+    id: hypothesisId,
+    status: "archived",
+    reason,
+    archivedAt: Date.now(),
+  });
+}
+
+export function hasRepetitiveFailure(taskRoot, taskId, { hypothesisId, actionDescription } = {}) {
+  const experiments = listExperiments(taskRoot, taskId);
+  return experiments.some(
+    (e) =>
+      e.hypothesisId === hypothesisId &&
+      e.actionDescription === actionDescription &&
+      (e.status === "failed" || e.status === "error" || e.status === "rejected"),
+  );
+}
+
 function cognitionRoot(taskRoot, taskId) {
   return path.join(taskRoot, ".wam", "tasks", taskId, COGNITION_DIR);
 }

@@ -876,9 +876,23 @@ const WaitAMinutePlugin = async (pluginInput) => {
         if (bypassed) return;
         const sid = input?.sessionID;
         const taskRoot = await resolveSessionBase(sid);
-        const taskId = sessionTasks.get(sid) || readActiveTaskIdFresh(taskRoot) || (sid ? `ses-${sid.slice(-10)}` : "default-task");
-        const st = getTaskState(taskId, taskRoot);
+        let taskId = sessionTasks.get(sid) || readActiveTaskIdFresh(taskRoot) || (sid ? `ses-${sid.slice(-10)}` : "default-task");
+        let st = getTaskState(taskId, taskRoot);
+        // Fallback: try the active task from disk if first lookup failed
+        if (!st && !sid) {
+          const activeId = readActiveTaskIdFresh(taskRoot);
+          if (activeId && activeId !== taskId) {
+            taskId = activeId;
+            st = getTaskState(taskId, taskRoot);
+          }
+        }
         const tool = input?.tool || "";
+        if (process.env.WAM_DEBUG_TE) {
+          console.log(`[WAM-DEBUG-TE] sid=${sid} taskId=${taskId} phase=${st?.phase} tool=${tool}`);
+        }
+        if (process.env.WAM_DEBUG_TE) {
+          console.log(`[WAM-DEBUG-TE-CHECK] phase=${st?.phase} tool=${tool} inBlocked=${BLOCKED_TOOLS.has(tool)} riskCheckWillPass`);
+        }
 
         // Delegación dura: DESACTIVADA PARA DESARROLLO — la sesión principal
         // puede mutar archivos directamente (flujo sin fricción).
@@ -935,6 +949,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
         // git mutante (commit/push) sigue bloqueado hasta responder la pregunta.
         if (tool === "bash" && READONLY_GIT_RE.test(bashCommandOf(input))) return;
         if (BLOCKED_TOOLS.has(tool)) {
+          if (process.env.WAM_DEBUG_TE) console.log(`[WAM-DEBUG-TE] BLOCKING ${tool} in ASKING`);
           const u = (st.contract?.unknowns || []).find((x) => x.status === "blocking");
           const question = u ? `${u.id}: ${u.question}` : "pregunta bloqueante pendiente";
           const directive = `[wait-a-minute] ENFORCED BLOCK — tarea en ASKING (${question}). Herramienta ${tool} bloqueada. Responder: /wam answer ${u?.id || "U1"} <respuesta>`;
@@ -1532,6 +1547,7 @@ const waitAMinute = {
         "read", "search", "inspect", "test", "lint", "typecheck",
         "install dependency", "install browser binary", "run validation",
         "modify source", "create fixture", "diagnose", "retry",
+        "write", "edit", "bash", "sh",
       ],
       prohibitedActions: [
         "delete production data", "drop database", "production deploy",
