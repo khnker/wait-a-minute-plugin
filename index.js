@@ -1045,6 +1045,29 @@ function wamCli(args, cfg = {}, root = process.cwd(), taskId = readActiveTaskId(
     return JSON.stringify(waitAMinute.resumeTask(action || taskId, root));
   }
 
+  if (sub === "strategy") {
+    if (action === "set") {
+      const scope = rest.join(" ").trim();
+      if (!scope) return "Uso: /wam strategy set <scope...>";
+      const st = getTaskState(taskId, root);
+      if (!st) return "Sin tarea activa";
+      if (st.contract?.status !== "APPROVED") {
+        return `Contrato no aprobado (status=${st.contract?.status || "?"})`;
+      }
+      if (!st.approvedStrategy || st.approvedStrategy.status !== "ACTIVE") {
+        return "Sin estrategia aprobada activa";
+      }
+      st.approvedStrategy = {
+        ...st.approvedStrategy,
+        strategy: scope.slice(0, 100),
+        scope: scope.slice(0, 100),
+      };
+      persistTaskState(taskId, st, root);
+      return `Estrategia actualizada: "${st.approvedStrategy.strategy}"`;
+    }
+    return "Uso: /wam strategy set <scope...>";
+  }
+
   if (sub === "progress") {
     const [reqId, op, ...evidence] = [action, ...rest];
     if (!reqId) {
@@ -1539,15 +1562,28 @@ const waitAMinute = {
     // knows which actions are covered without requiring per-step approval.
     // Approved scope = the strategy itself + all safe execution steps required
     // to execute it (install deps, run tests, configure browser, retry).
+    const inferredStrategy = (
+      state.contract?.objective ||
+      state.intent?.goal ||
+      state.requirements?.[0]?.title ||
+      state.lastAction?.split("\n")[0] ||
+      "task execution"
+    ).slice(0, 100);
     state.approvedStrategy = {
-      strategy: state.contract?.objective || state.intent?.goal || "unspecified",
+      strategy: inferredStrategy,
       approvedAt: Date.now(),
-      scope: state.contract?.objective || "task scope",
+      scope: inferredStrategy,
       allowedActions: [
         "read", "search", "inspect", "test", "lint", "typecheck",
         "install dependency", "install browser binary", "run validation",
         "modify source", "create fixture", "diagnose", "retry",
         "write", "edit", "bash", "sh",
+        "task", "todowrite", "pty_spawn",
+        "openspec", "openspec new change", "openspec instructions",
+        "openspec validate", "openspec archive",
+        "git commit", "npm test", "pnpm test", "pnpm install",
+        "crear change OpenSpec", "ejecutar test suite",
+        "instalar dependencia", "delegar via Task",
       ],
       prohibitedActions: [
         "delete production data", "drop database", "production deploy",
