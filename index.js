@@ -409,15 +409,15 @@ function loadReferenceEvidence(taskRoot, intent) {
 }
 
 function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute, taskId) {
-  // Autonomy envelope: WAM injects only objective + remaining requirements as
-  // advisory state. It does NOT prescribe the next action or control strategy.
-  // The agent decides how to inspect, hypothesize, experiment, and re-plan.
+  // WAM injects objective + remaining requirements as advisory state.
+  // The agent implements EXACTLY what the user asked — no strategy deviation,
+  // no "decide your own approach". Only ambiguity triggers clarification.
   const inject = [];
   const reqs = state.requirements || [];
   const pend = reqs.filter((r) => r.status !== "done");
   const objective = state.contract?.objective || analysis.intent?.goal || null;
 
-  // Silence for trivial/fast: no inject noise. Agent has full autonomy.
+  // Silence for trivial/fast: no inject noise.
   if (analysis.intent?.classification === "trivial" || analysis.strategy === "FAST") {
     return inject;
   }
@@ -431,34 +431,11 @@ function prepareSystemInject(analysis, state, cfg, projectDirectory, waitAMinute
       `Objective: ${objective || "pending"}`,
       `Remaining (${pend.length}/${reqs.length}):`,
       ...visible.map((r) => `  - ${truncate(r.title, 120)}`),
-      ...(overflow > 0 ? [`  ...(+${overflow} more)`] : []),
-      "----------------------------------------------",
-      "AUTONOMY GUIDELINES:",
-      "1. You are autonomous within the SAFE envelope.",
-      "2. Investigate/experiment safely to reduce uncertainty.",
-      "3. nextAction is advisory — decide your own strategy based on evidence.",
-      "4. Reject failed hypotheses and re-plan.",
-      "5. Authorization required for GUARDED/BLOCKED actions."
+      ...(overflow > 0 ? [`  ...(+${overflow} more)`] : [])
     );
     state.contractDisplayed = true;
   }
 
-  // Autonomy: Inyectar estrategia aprobada si existe
-  if (state.approvedStrategy) {
-    const strat = state.approvedStrategy;
-    inject.push(
-      "----------------------------------------------",
-      `APPROVED STRATEGY: ${strat.strategy}`,
-      `scope: ${strat.scope}`,
-      `allowedActions: ${strat.allowedActions?.join(", ") || ""}`,
-      `status: ${strat.status}`,
-      "Continue autonomous execution while actions are SAFE/GUARDED within scope.",
-      "Only invalidate if evidence materially contradicts this strategy."
-    );
-  }
-
-  // No per-turn classification@risk@complexity line, no repeated header,
-  // no skill inject. The agent reasons; WAM only checks boundaries when triggered.
   return inject;
 }
 
@@ -1825,10 +1802,7 @@ const waitAMinute = {
     );
     const validationLines = [
       `wait-a-minute: contrato ${contractStatus}${analysis.phase ? ` (fase ${analysis.phase})` : ""}`,
-      `rigor ${analysis.completionContract?.rigor || "NORMAL"} | req: ${(analysis.completionContract?.requirements || []).join("; ") || "—"}`,
-      `ver: ${(analysis.completionContract?.verification || []).join("; ") || "—"}`,
-      `riesgo ${analysis.risk} | compl ${analysis.complexity} | amb ${analysis.ambiguity}`,
-      `skills: ${skillsLine}`,
+      `req: ${(analysis.completionContract?.requirements || []).join("; ") || "—"}`,
       ...(blockingUnknowns.length
         ? [`blocking: ${blockingUnknowns.map((u) => `${u.id} ${u.question}`).join(" | ")}`]
         : []),
@@ -1836,7 +1810,8 @@ const waitAMinute = {
         ? [`assumptions blocking: ${blockingAssumptions.map((a) => `${a.id} ${a.statement}`).join(" | ")}`]
         : []),
       "",
-      "continuar → ejecutar | /wam contract approve → aprobar | /wam compress → resumen terse",
+      "Ejecutar lo pedido. Si la instrucción es ambigua, preguntar.",
+      "/wam contract approve → aprobar | /wam compress → resumen terse",
     ];
 
     if (ctx) {
@@ -1872,7 +1847,7 @@ const waitAMinute = {
       advice:
         mode === "FAST"
           ? "Tarea trivial - análisis mostrado, proceder directamente"
-          : "Esperando respuesta del agente/usuario",
+          : "Proceder con la implementación",
     };
   },
 };
