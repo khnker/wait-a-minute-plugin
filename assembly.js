@@ -10,11 +10,12 @@
  *   budget = reserved (N0 + N2) + flex (N1 + N3)
  *   N0 y N2 se reservan primero; violation si reserved > budget (N0 igual se emite).
  *
- * 4 niveles con fuente canónica, obligación y prohibición:
+ * 5 niveles con fuente canónica, obligación y prohibición:
  *   N0 Global/Policy  — obligatorio, tiny (reservado)
  *   N1 Project        — selectivo por dominio (secciones matcheadas) (flex)
  *   N2 Task           — obligatorio (live task state) (reservado)
  *   N3 Session        — capsules por utility (delegado a context.js) (flex)
+ *   N4 Skills         — contenido de skills seleccionadas (flex, inyectado)
  *
  * Prohibido: L4 ephemeral, superseded, transcript, docs/dominios sin match.
  */
@@ -69,8 +70,10 @@ export function assembleContext({
   projectPath = process.cwd(),
   budget = 4000,
   taskState = null,
+  skillRegistry = null,
+  selectedSkills = [],
 } = {}) {
-  const levels = { N0: [], N1: [], N2: [], N3: [] };
+  const levels = { N0: [], N1: [], N2: [], N3: [], N4: [] };
   const rationale = [];
   const taskTokens = tokenize(prompt);
   const isTrivial = classification === "trivial" || mode === "FAST";
@@ -89,10 +92,11 @@ export function assembleContext({
     const t = estTokens(text);
     if (t > flex) {
       rationale.push(`${level}: excede presupuesto (${t} tok, restante ${flex})`);
-      return;
+      return 0;
     }
     levels[level].push(text);
     flex -= t;
+    return t;
   };
 
   // -- N0 Global/Policy (reservado, obligatorio) ----------------------------
@@ -183,9 +187,48 @@ export function assembleContext({
         spend("N3", `[wam N3 warning] contexto insuficiente: ${pkg.missing.join(", ")} — /wam ctx get <q>`);
       }
     }
+
+    // -- N4 Skills (contenido de skills seleccionadas, consume flex) ---------
+    // Inyecta el contenido real de las skills seleccionadas para que el agente
+    // respete las restricciones y patrones de cada skill (layer responsibility).
+    // Lee directamente del registry sin importar engine.js (evita circular import).
+    if (!isTrivial && skillRegistry && selectedSkills.length > 0) {
+      const skillBudget = Math.floor(flex * 0.4); // 40% del flex restante para skills
+      let skillSpent = 0;
+      const skillContentMax = 1200; // max chars por skill
+      
+      for (const skill of selectedSkills) {
+        if (skillSpent >= skillBudget) {
+          rationale.push(`N4: budget agotado para skills (${skillSpent}/${skillBudget})`);
+          break;
+        }
+        
+        const skillData = skillRegistry[skill.id];
+        if (!skillData) {
+          rationale.push(`N4: ${skill.id} no encontrada en registry`);
+          continue;
+        }
+        
+        const content = skillData.content || "";
+        if (!content.trim()) {
+          rationale.push(`N4: ${skill.id} sin contenido embebido`);
+          continue;
+        }
+        
+        const truncated = content.length > skillContentMax
+          ? content.slice(0, skillContentMax) + `...[truncado]`
+          : content;
+        
+        const head = `[wam N4 skill] ${skill.id} — ${(skill.reason || "").slice(0, 100)}`;
+        const line = `${head}\n  content: ${truncated.replace(/\n+/g, " ").slice(0, skillContentMax)}`;
+        const cost = spend("N4", line);
+        skillSpent += cost;
+        rationale.push(`N4: ${skill.id} inyectada (${cost} tok, reason: ${skill.reason})`);
+      }
+    }
   }
 
-  const lines = [...levels.N0, ...levels.N1, ...levels.N2, ...levels.N3];
+  const lines = [...levels.N0, ...levels.N1, ...levels.N2, ...levels.N3, ...levels.N4];
   return {
     levels: Object.fromEntries(Object.entries(levels).map(([k, v]) => [k, v.length])),
     lines,

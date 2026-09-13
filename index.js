@@ -725,7 +725,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       const inject = prepareSystemInject(analysis, updatedState, cfg, wamRoot, waitAMinute, taskId, emitTextPart, input, output);
 
-      // Context Assembly Layer: paquete formal N0-N3 por tarea (ni más ni menos)
+      // Context Assembly Layer: paquete formal N0-N4 por tarea (ni más ni menos)
       try {
         initMemory(wamRoot);
         updateProjectMemo(analysis, wamRoot);
@@ -737,9 +737,11 @@ const WaitAMinutePlugin = async (pluginInput) => {
           projectPath: wamRoot,
           budget: cfg.contextBudget || 4000,
           taskState: updatedState,
+          skillRegistry: waitAMinute.loadBundledRegistry(),
+          selectedSkills: analysis.skills?.selected || [],
         });
         if (pack.lines.length) {
-          inject.push(pack.lines.join("\n") + `\n[wam pack ${pack.budget_used}/${pack.budget} tok ${pack.levels.N0 ? "N0" : ""}${pack.levels.N1 ? "+N1" : ""}${pack.levels.N2 ? "+N2" : ""}${pack.levels.N3 ? "+N3" : ""}]`);
+          inject.push(pack.lines.join("\n") + `\n[wam pack ${pack.budget_used}/${pack.budget} tok ${pack.levels.N0 ? "N0" : ""}${pack.levels.N1 ? "+N1" : ""}${pack.levels.N2 ? "+N2" : ""}${pack.levels.N3 ? "+N3" : ""}${pack.levels.N4 ? "+N4" : ""}]`);
         }
       } catch {}
 
