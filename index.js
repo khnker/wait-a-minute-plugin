@@ -1,6 +1,6 @@
-import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog } from "./engine.js";
+import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog, findDuplicateTask } from "./engine.js";
 
-import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext } from "./memory.js";
+import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext, compactDecisions } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot, migrateLegacyCapsules } from "./context.js";
 import { assembleContext } from "./assembly.js";
 import { evaluateRequirement as evaluateRequirementChecks } from "./verification.js";
@@ -639,6 +639,20 @@ const WaitAMinutePlugin = async (pluginInput) => {
       const state = waitAMinute.buildPersistedState(taskId, analysis, wamRoot);
       state.lastAction = promptText;
 
+      // Task Dedup: check if an active task with the same summary already exists.
+      // This prevents infinite loops where the same task is re-created repeatedly.
+      const existingTaskId = findDuplicateTask(promptText, wamRoot);
+      if (existingTaskId && existingTaskId !== taskId) {
+        console.log(`[wait-a-minute] Duplicate task detected: "${existingTaskId}" matches current prompt. Reusing existing task.`);
+        taskId = existingTaskId;
+        if (input.sessionID) sessionTasks.set(input.sessionID, taskId);
+        const existingState = getTaskState(taskId, wamRoot);
+        if (existingState) {
+          emitTextPart(output, `[wait-a-minute] Tarea existente detectada: ${taskId} (fase ${existingState.phase}). Continuando con la tarea existente.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+          return;
+        }
+      }
+
       // Assumption Gate (spec change 3): escalar asunciones con impacto material
       // → DECISION_CRITICAL/blocking + mirror a unknowns → ASKING (sin ejecución).
       try {
@@ -706,6 +720,8 @@ const WaitAMinutePlugin = async (pluginInput) => {
             source: highUncertainty ? "user-decided" : "observed",
             confidence: "high",
           }, wamRoot);
+          // Periodic compaction: clean blank lines from decisions.md
+          try { compactDecisions(wamRoot); } catch {}
         } catch {}
         const fresh = getTaskState(taskId, wamRoot);
         if (fresh) {
@@ -921,6 +937,17 @@ const WaitAMinutePlugin = async (pluginInput) => {
           const directive = `[wait-a-minute] RISK BLOCK (${tool}): ${risk.reason || "acción fuera del envelope de riesgo"}. Requiere autorización explícita del usuario.`;
           input.output = directive;
           throw new WamPolicyBlock(directive, { tool, reason: risk.reason, level: risk.level });
+        }
+
+        // Governance Enforcement: block mutating tools when contract is not APPROVED.
+        // This prevents user-explicit-execute bypass without proper contract approval.
+        if (MUTATING_TOOLS.has(tool) && st?.contract?.status !== "APPROVED" && st?.phase !== "DONE") {
+          const reqs = (st?.requirements || []).filter((r) => r.status !== "done" && r.status !== "verified");
+          const pendCount = reqs.length;
+          const phase = st?.phase || "PROPOSED";
+          const directive = `[wait-a-minute] GOVERNANCE BLOCK (${tool}): contrato no aprobado (fase ${phase}). ${pendCount} requisito(s) pendiente(s). Aprobar contrato primero: /wam contract approve o继续 con implementación legítima.`;
+          input.output = directive;
+          throw new WamPolicyBlock(directive, { tool, reason: "contract not approved", level: "BLOCKED", source: "governance-enforcement" });
         }
 
         if (st?.phase !== "ASKING") return;

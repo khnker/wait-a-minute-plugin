@@ -35,6 +35,42 @@ export function estimateTokens(text = "") {
 }
 
 
+// -- Task Deduplication --
+
+/**
+ * Finds an existing active task with the same summary to prevent infinite loops.
+ * Returns the taskId if found, null otherwise.
+ *
+ * @param {string} summary - The task summary to search for
+ * @param {string} root - The workspace root
+ * @returns {string|null} - Existing taskId or null
+ */
+export function findDuplicateTask(summary, root) {
+  if (!summary || summary.length < 10) return null;
+  const tasksDir = path.join(root || process.cwd(), ".wam", "tasks");
+  try {
+    const entries = fs.readdirSync(tasksDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const stateFile = path.join(tasksDir, entry.name, "state.yaml");
+      try {
+        const raw = fs.readFileSync(stateFile, "utf-8");
+        const state = JSON.parse(raw);
+        if (state?.phase === "DONE" || state?.phase === "VERIFIED") continue;
+        const taskSummary = state?.lastAction || state?.contract?.objective || "";
+        if (taskSummary && normalizeText(taskSummary) === normalizeText(summary)) {
+          return entry.name;
+        }
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+
+function normalizeText(text = "") {
+  return (text || "").toLowerCase().replace(/[^a-z0-9áéíóúñü\s]/g, "").replace(/\s+/g, " ").trim();
+}
+
 // -- Task State Management --
 
 import { ContextDecisionTracer } from "./context-decision-audit.js";

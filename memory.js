@@ -318,6 +318,29 @@ export function addConstraint(text, { source = "inferred", confidence = 0.5, las
   return updateContext("constraints", newBody, { source, confidence: confNum }, root);
 }
 
+/**
+ * Compacts decisions.md by removing excessive blank lines between entries.
+ * Call periodically or after recordDecision to keep file size manageable.
+ */
+export function compactDecisions(root) {
+  const { body } = readDoc("decisions", root);
+  if (!body) return { ok: false, reason: "no decisions file" };
+
+  const lines = body.split("\n");
+  const compacted = [];
+  let prevBlank = false;
+
+  for (const line of lines) {
+    const isBlank = line.trim() === "";
+    if (isBlank && prevBlank) continue;
+    compacted.push(line);
+    prevBlank = isBlank;
+  }
+
+  const newBody = compacted.join("\n").replace(/\n{3,}/g, "\n\n");
+  return updateContext("decisions", newBody, { source: "compaction", confidence: 1.0 }, root);
+}
+
 // -- task memory (espec §14, derivado de state.yaml — no duplica la fuente) --
 
 export function updateTaskMemory(taskId, { evidence = "", summary = "" } = {}, root) {
