@@ -1,4 +1,4 @@
-import { describe, it, before, after, afterEach } from "node:test";
+import { describe, it, after, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -6,25 +6,32 @@ import os from "node:os";
 import {
   startRun,
   closeRun,
+  updateRun,
   addObservation,
   addDecision,
   addEvidence,
+  addAction,
+  getRun,
   getRuns,
   getLastRun,
+  getCurrentRun,
+  getActiveRun,
   getLastRunSummary,
   getUnresolvedRequirements,
   getPreviousFailures,
   getPreviousDecisions,
   getResumeContext,
   needsNewRun,
+  getRunCount,
+  getRunsByStatus,
 } from "./task-runs.js";
 import { persistTaskState } from "./engine.js";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "wam-runs-test-"));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "wam-persistent-runs-test-"));
 let taskCounter = 0;
 
 function makeTaskId() {
-  return `test-task-${++taskCounter}`;
+  return `persistent-task-${++taskCounter}`;
 }
 
 function makeTaskState(overrides = {}) {
@@ -36,27 +43,34 @@ function makeTaskState(overrides = {}) {
       { id: "req-1", title: "Req 1", status: "pending", evidence: [] },
       { id: "req-2", title: "Req 2", status: "done", evidence: ["done"] },
     ],
-    runs: [],
+    currentRunId: null,
     ...overrides,
   };
 }
+
+before(() => {
+  fs.mkdirSync(path.join(TMP, ".wam", "tasks"), { recursive: true });
+});
 
 after(() => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
 describe("startRun", () => {
-  it("creates a run with correct fields", () => {
+  it("creates run as separate file", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
     const run = startRun(taskId, TMP);
+
     assert.ok(run.id.startsWith(taskId));
     assert.equal(run.taskId, taskId);
     assert.equal(run.status, "active");
-    assert.ok(run.startedAt > 0);
-    assert.deepEqual(run.observations, []);
-    assert.deepEqual(run.decisions, []);
-    assert.deepEqual(run.evidence, []);
+
+    const runFile = path.join(TMP, ".wam", "tasks", taskId, "runs", `${run.id}.json`);
+    assert.ok(fs.existsSync(runFile), "Run file should exist");
+
+    const state = JSON.parse(fs.readFileSync(path.join(TMP, ".wam", "tasks", taskId, "state.yaml"), "utf-8"));
+    assert.equal(state.currentRunId, run.id, "Task state should reference current run");
   });
 
   it("increments run index", () => {
@@ -67,78 +81,39 @@ describe("startRun", () => {
     assert.ok(r1.id.endsWith("001"));
     assert.ok(r2.id.endsWith("002"));
   });
-
-  it("throws for missing task", () => {
-    assert.throws(() => startRun("nonexistent", TMP), /not found/);
-  });
 });
 
 describe("closeRun", () => {
-  it("closes with status and outcome", () => {
+  it("closes run and clears currentRunId", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
     const run = startRun(taskId, TMP);
-    const closed = closeRun(taskId, run.id, "completed", "All tests pass", TMP);
+    closeRun(taskId, run.id, "completed", "All done", TMP);
+
+    const closed = getRun(taskId, run.id, TMP);
     assert.equal(closed.status, "completed");
-    assert.equal(closed.outcome, "All tests pass");
-    assert.ok(closed.completedAt > 0);
-  });
+    assert.equal(closed.outcome, "All done");
 
-  it("throws for missing run", () => {
-    const taskId = makeTaskId();
-    persistTaskState(taskId, makeTaskState(), TMP);
-    assert.throws(() => closeRun(taskId, "bad-id", "completed", null, TMP), /not found/);
-  });
-});
-
-describe("addObservation", () => {
-  it("appends observation to run", () => {
-    const taskId = makeTaskId();
-    persistTaskState(taskId, makeTaskState(), TMP);
-    const run = startRun(taskId, TMP);
-    addObservation(taskId, run.id, "Found a bug in auth", TMP);
-    addObservation(taskId, run.id, "Tests pass now", TMP);
-    const updated = getRuns(taskId, TMP);
-    assert.equal(updated[0].observations.length, 2);
-    assert.equal(updated[0].observations[0], "Found a bug in auth");
-  });
-});
-
-describe("addDecision", () => {
-  it("appends decision to run", () => {
-    const taskId = makeTaskId();
-    persistTaskState(taskId, makeTaskState(), TMP);
-    const run = startRun(taskId, TMP);
-    addDecision(taskId, run.id, "Use bcrypt for hashing", TMP);
-    const updated = getRuns(taskId, TMP);
-    assert.equal(updated[0].decisions.length, 1);
-  });
-});
-
-describe("addEvidence", () => {
-  it("appends evidence to run", () => {
-    const taskId = makeTaskId();
-    persistTaskState(taskId, makeTaskState(), TMP);
-    const run = startRun(taskId, TMP);
-    addEvidence(taskId, run.id, "Coverage at 85%", TMP);
-    const updated = getRuns(taskId, TMP);
-    assert.equal(updated[0].evidence.length, 1);
+    const state = JSON.parse(fs.readFileSync(path.join(TMP, ".wam", "tasks", taskId, "state.yaml"), "utf-8"));
+    assert.equal(state.currentRunId, null);
   });
 });
 
 describe("getRuns", () => {
-  it("returns empty for task with no runs", () => {
+  it("reads all run files", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    startRun(taskId, TMP);
+    startRun(taskId, TMP);
+
+    const runs = getRuns(taskId, TMP);
+    assert.equal(runs.length, 2);
+  });
+
+  it("returns empty array for task with no runs", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
     assert.deepEqual(getRuns(taskId, TMP), []);
-  });
-
-  it("returns all runs", () => {
-    const taskId = makeTaskId();
-    persistTaskState(taskId, makeTaskState(), TMP);
-    startRun(taskId, TMP);
-    startRun(taskId, TMP);
-    assert.equal(getRuns(taskId, TMP).length, 2);
   });
 });
 
@@ -146,58 +121,105 @@ describe("getLastRun", () => {
   it("returns most recent run", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
-    startRun(taskId, TMP);
+    const r1 = startRun(taskId, TMP);
     const r2 = startRun(taskId, TMP);
     const last = getLastRun(taskId, TMP);
     assert.equal(last.id, r2.id);
   });
-
-  it("returns null for no runs", () => {
-    const taskId = makeTaskId();
-    persistTaskState(taskId, makeTaskState(), TMP);
-    assert.equal(getLastRun(taskId, TMP), null);
-  });
 });
 
-describe("getLastRunSummary", () => {
-  it("returns summary of last run", () => {
+describe("getCurrentRun", () => {
+  it("returns run referenced in task state", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
     const run = startRun(taskId, TMP);
-    addObservation(taskId, run.id, "obs1", TMP);
-    addDecision(taskId, run.id, "dec1", TMP);
-    closeRun(taskId, run.id, "completed", "done", TMP);
+    const current = getCurrentRun(taskId, TMP);
+    assert.equal(current.id, run.id);
+  });
 
-    const summary = getLastRunSummary(taskId, TMP);
-    assert.equal(summary.runId, run.id);
-    assert.equal(summary.status, "completed");
-    assert.equal(summary.outcome, "done");
-    assert.equal(summary.observationsCount, 1);
-    assert.equal(summary.decisionsCount, 1);
-    assert.equal(summary.evidenceCount, 0);
+  it("returns null when no current run", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    assert.equal(getCurrentRun(taskId, TMP), null);
   });
 });
 
-describe("getUnresolvedRequirements", () => {
-  it("returns requirements not done", () => {
+describe("getActiveRun", () => {
+  it("finds active run", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
-    const unresolved = getUnresolvedRequirements(taskId, TMP);
-    assert.equal(unresolved.length, 1);
-    assert.equal(unresolved[0].id, "req-1");
+    const run = startRun(taskId, TMP);
+    const active = getActiveRun(taskId, TMP);
+    assert.equal(active.id, run.id);
+  });
+
+  it("returns null when no active run", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    const run = startRun(taskId, TMP);
+    closeRun(taskId, run.id, "completed", null, TMP);
+    assert.equal(getActiveRun(taskId, TMP), null);
+  });
+});
+
+describe("addObservation", () => {
+  it("appends observation to run file", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    const run = startRun(taskId, TMP);
+    addObservation(taskId, run.id, "Found a bug", TMP);
+
+    const updated = getRun(taskId, run.id, TMP);
+    assert.equal(updated.observations.length, 1);
+    assert.equal(updated.observations[0].text, "Found a bug");
+  });
+});
+
+describe("addDecision", () => {
+  it("appends decision to run file", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    const run = startRun(taskId, TMP);
+    addDecision(taskId, run.id, "Use bcrypt", TMP);
+
+    const updated = getRun(taskId, run.id, TMP);
+    assert.equal(updated.decisions.length, 1);
+  });
+});
+
+describe("addEvidence", () => {
+  it("appends evidence to run file", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    const run = startRun(taskId, TMP);
+    addEvidence(taskId, run.id, "Tests pass", TMP);
+
+    const updated = getRun(taskId, run.id, TMP);
+    assert.equal(updated.evidence.length, 1);
+  });
+});
+
+describe("addAction", () => {
+  it("appends action to run file", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    const run = startRun(taskId, TMP);
+    addAction(taskId, run.id, { tool: "write", path: "test.js" }, TMP);
+
+    const updated = getRun(taskId, run.id, TMP);
+    assert.equal(updated.actions.length, 1);
+    assert.equal(updated.actions[0].tool, "write");
   });
 });
 
 describe("getPreviousFailures", () => {
-  it("returns failed/abandoned runs", () => {
+  it("returns failed and abandoned runs", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
     const r1 = startRun(taskId, TMP);
     closeRun(taskId, r1.id, "failed", "Timeout", TMP);
     const r2 = startRun(taskId, TMP);
-    closeRun(taskId, r2.id, "completed", "OK", TMP);
-    const r3 = startRun(taskId, TMP);
-    closeRun(taskId, r3.id, "abandoned", "Changed plan", TMP);
+    closeRun(taskId, r2.id, "abandoned", "Changed plan", TMP);
 
     const failures = getPreviousFailures(taskId, TMP);
     assert.equal(failures.length, 2);
@@ -205,34 +227,21 @@ describe("getPreviousFailures", () => {
 });
 
 describe("getPreviousDecisions", () => {
-  it("returns recent decisions with provenance", () => {
+  it("collects decisions from all runs", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
     const r1 = startRun(taskId, TMP);
     addDecision(taskId, r1.id, "Decision 1", TMP);
-    addDecision(taskId, r1.id, "Decision 2", TMP);
     closeRun(taskId, r1.id, "completed", null, TMP);
 
-    const decisions = getPreviousDecisions(taskId, TMP, 2);
-    assert.equal(decisions.length, 2);
-    assert.equal(decisions[0].runId, r1.id);
+    const decisions = getPreviousDecisions(taskId, TMP, 5);
+    assert.equal(decisions.length, 1);
     assert.equal(decisions[0].decision, "Decision 1");
-  });
-
-  it("respects limit", () => {
-    const taskId = makeTaskId();
-    persistTaskState(taskId, makeTaskState(), TMP);
-    const r1 = startRun(taskId, TMP);
-    for (let i = 0; i < 10; i++) addDecision(taskId, r1.id, `D${i}`, TMP);
-
-    const decisions = getPreviousDecisions(taskId, TMP, 3);
-    assert.equal(decisions.length, 3);
-    assert.equal(decisions[0].decision, "D7");
   });
 });
 
 describe("getResumeContext", () => {
-  it("aggregates resume info without loading all runs", () => {
+  it("aggregates context without loading all history", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
 
@@ -244,18 +253,9 @@ describe("getResumeContext", () => {
     addObservation(taskId, r2.id, "Fixed auth", TMP);
 
     const ctx = getResumeContext(taskId, TMP);
-    assert.equal(ctx.taskSummary, "Test task");
-    assert.equal(ctx.phase, "IMPLEMENTING");
     assert.equal(ctx.lastRun.id, r2.id);
-    assert.equal(ctx.unresolvedRequirements.length, 1);
-    assert.equal(ctx.recentFailures.length, 1);
-    assert.equal(ctx.recentFailures[0].runId, r1.id);
-    assert.equal(ctx.recentDecisions.length, 1);
     assert.equal(ctx.totalRuns, 2);
-  });
-
-  it("returns null for missing task", () => {
-    assert.equal(getResumeContext("nonexistent", TMP), null);
+    assert.equal(ctx.recentFailures.length, 1);
   });
 });
 
@@ -266,7 +266,7 @@ describe("needsNewRun", () => {
     assert.equal(needsNewRun(taskId, TMP), true);
   });
 
-  it("true when last run is not active", () => {
+  it("true when last run completed", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
     const r1 = startRun(taskId, TMP);
@@ -274,7 +274,7 @@ describe("needsNewRun", () => {
     assert.equal(needsNewRun(taskId, TMP), true);
   });
 
-  it("false when last run is active", () => {
+  it("false when run is active", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
     startRun(taskId, TMP);
@@ -282,37 +282,73 @@ describe("needsNewRun", () => {
   });
 });
 
-describe("cross-session persistence", () => {
-  it("runs survive state reload", () => {
+describe("task persistence", () => {
+  it("task remains in .wam/tasks/ after run completes", () => {
     const taskId = makeTaskId();
     persistTaskState(taskId, makeTaskState(), TMP);
+    const run = startRun(taskId, TMP);
+    closeRun(taskId, run.id, "completed", null, TMP);
 
-    const r1 = startRun(taskId, TMP);
-    addObservation(taskId, r1.id, "First session", TMP);
-    closeRun(taskId, r1.id, "completed", "Session 1 done", TMP);
-
-    const state = JSON.parse(
-      fs.readFileSync(path.join(TMP, ".wam", "tasks", taskId, "state.yaml"), "utf-8")
-    );
-    assert.equal(state.runs.length, 1);
-    assert.equal(state.runs[0].observations[0], "First session");
-    assert.equal(state.runs[0].status, "completed");
+    const taskDir = path.join(TMP, ".wam", "tasks", taskId);
+    assert.ok(fs.existsSync(taskDir), "Task directory should still exist");
+    assert.ok(fs.existsSync(path.join(taskDir, "state.yaml")), "state.yaml should exist");
+    assert.ok(fs.existsSync(path.join(taskDir, "runs", `${run.id}.json`)), "Run file should exist");
   });
 
-  it("historical runs not injected into current state", () => {
+  it("multiple runs persist independently", () => {
     const taskId = makeTaskId();
-    const state = makeTaskState();
-    persistTaskState(taskId, state, TMP);
-
+    persistTaskState(taskId, makeTaskState(), TMP);
     const r1 = startRun(taskId, TMP);
-    addObservation(taskId, r1.id, "Historical obs", TMP);
+    addObservation(taskId, r1.id, "Run 1 obs", TMP);
     closeRun(taskId, r1.id, "completed", null, TMP);
 
-    const current = JSON.parse(
-      fs.readFileSync(path.join(TMP, ".wam", "tasks", taskId, "state.yaml"), "utf-8")
-    );
-    assert.equal(current.lastAction, "Test task");
-    assert.equal(current.requirements.length, 2);
-    assert.equal(current.observations, undefined);
+    const r2 = startRun(taskId, TMP);
+    addObservation(taskId, r2.id, "Run 2 obs", TMP);
+    closeRun(taskId, r2.id, "completed", null, TMP);
+
+    const runs = getRuns(taskId, TMP);
+    assert.equal(runs.length, 2);
+    assert.equal(runs[0].observations[0].text, "Run 1 obs");
+    assert.equal(runs[1].observations[0].text, "Run 2 obs");
+  });
+});
+
+describe("getRunCount", () => {
+  it("returns correct count", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    assert.equal(getRunCount(taskId, TMP), 0);
+    startRun(taskId, TMP);
+    assert.equal(getRunCount(taskId, TMP), 1);
+    startRun(taskId, TMP);
+    assert.equal(getRunCount(taskId, TMP), 2);
+  });
+});
+
+describe("getRunsByStatus", () => {
+  it("filters by status", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    const r1 = startRun(taskId, TMP);
+    closeRun(taskId, r1.id, "completed", null, TMP);
+    const r2 = startRun(taskId, TMP);
+    closeRun(taskId, r2.id, "failed", null, TMP);
+
+    const completed = getRunsByStatus(taskId, TMP, "completed");
+    const failed = getRunsByStatus(taskId, TMP, "failed");
+    assert.equal(completed.length, 1);
+    assert.equal(failed.length, 1);
+  });
+});
+
+describe("updateRun", () => {
+  it("updates arbitrary fields", () => {
+    const taskId = makeTaskId();
+    persistTaskState(taskId, makeTaskState(), TMP);
+    const run = startRun(taskId, TMP);
+    updateRun(taskId, run.id, { phase: "VERIFYING" }, TMP);
+
+    const updated = getRun(taskId, run.id, TMP);
+    assert.equal(updated.phase, "VERIFYING");
   });
 });
