@@ -8,6 +8,7 @@ import { ContextDecisionTracer } from "./context-decision-audit.js";
 import { guardAction } from "./runtime-guards.js";
 import { WamPolicyBlock } from "./risk-engine.js";
 import { getStatusReport } from "./execution-state.js";
+import { createSnapshot, checkContinuation, rebuildScope } from "./context-snapshot.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -602,29 +603,55 @@ const WaitAMinutePlugin = async (pluginInput) => {
         // Continuar al analyze() con el nuevo taskId — NO retornar
       }
 
-      // Continuation fast-path: contrato aprobado + sin claim de DONE → no inyectar nada,
-      // el agente fluye sin interrupción (ni contrato ni línea de progreso).
+      // Continuation fast-path: contrato aprobado + sin claim de DONE →
+      // verificar si el contexto sigue siendo válido antes de reutilizar.
       if (existingState?.contract?.status === "APPROVED") {
         const claim = waitAMinute.evaluateCompletionGate(existingState, promptText);
         if (!claim.blocked && !claim.allDone) {
-          input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
-          // Continuation: solo N2 (live task delta) — no reconstruir el pack.
-          // PERO la memoria de contexto se persiste SIEMPRE (sesión nueva o
-          // retomada): project.md con subproyectos detectados se genera aunque
-          // el mensaje no pase por el flujo completo.
-          try {
-            updateProjectMemo({}, wamRoot);
-          } catch {}
-          try {
-            persistLiveContext(taskId, existingState, wamRoot);
-            const live = readLiveContext(wamRoot, taskId);
-            if (live) {
-              const parts = [`[wam N2 task]\n${live}\n`];
-              parts.push(...delegationLines(existingState).map((l) => l + "\n"));
-              emitTextPart(output, parts.join("\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-            }
-          } catch {}
-          return;
+          // Snapshot check: ¿el contexto anterior sigue siendo válido?
+          const snapshotCheck = checkContinuation(taskId, existingState, wamRoot);
+
+          if (snapshotCheck.status === "VALID") {
+            // Fast-path: sin cambios → inyectar solo N2
+            input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
+            try {
+              updateProjectMemo({}, wamRoot);
+            } catch {}
+            try {
+              persistLiveContext(taskId, existingState, wamRoot);
+              const live = readLiveContext(wamRoot, taskId);
+              if (live) {
+                const parts = [`[wam N2 task]\n${live}\n`];
+                parts.push(...delegationLines(existingState).map((l) => l + "\n"));
+                emitTextPart(output, parts.join("\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+              }
+            } catch {}
+            return;
+          }
+
+          // STALE/INVALID: contexto obsoleto → rebuild parcial o completo
+          const scope = rebuildScope(snapshotCheck.changedSignals);
+          if (scope.rebuildN1 || scope.rebuildN3) {
+            // Rebuild parcial: mantener N2, reconstruir N1/N3
+            input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
+            try {
+              updateProjectMemo({}, wamRoot);
+            } catch {}
+            try {
+              persistLiveContext(taskId, existingState, wamRoot);
+              const live = readLiveContext(wamRoot, taskId);
+              if (live) {
+                const parts = [
+                  `[wam continuation] Contexto reconstruido (${snapshotCheck.changedSignals.join(", ")})`,
+                  `[wam N2 task]\n${live}\n`,
+                ];
+                parts.push(...delegationLines(existingState).map((l) => l + "\n"));
+                emitTextPart(output, parts.join("\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+              }
+            } catch {}
+            return;
+          }
+          // INVALID: rebuild completo → caer al flujo normal de analyze()
         }
       }
 
@@ -760,6 +787,10 @@ const WaitAMinutePlugin = async (pluginInput) => {
         if (pack.lines.length) {
           inject.push(pack.lines.join("\n") + `\n[wam pack ${pack.budget_used}/${pack.budget} tok ${pack.levels.N0 ? "N0" : ""}${pack.levels.N1 ? "+N1" : ""}${pack.levels.N2 ? "+N2" : ""}${pack.levels.N3 ? "+N3" : ""}${pack.levels.N4 ? "+N4" : ""}]`);
         }
+        // Snapshot: guardar estado del contexto para detectar cambios en continuaciones
+        try {
+          createSnapshot(taskId, updatedState, wamRoot);
+        } catch {}
       } catch {}
 
       if (gate.blocked) {
