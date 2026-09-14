@@ -1,0 +1,23 @@
+# Tasks
+
+- [ ] Implement ResolveContextOptions.
+- [ ] Implement ResolvedContext.
+- [ ] Implement resolveContext().
+- [ ] Resolve direct task requirements.
+- [ ] Resolve required outputs.
+- [ ] Traverse dependency edges.
+- [ ] Resolve supporting evidence.
+- [ ] Apply verification filtering.
+- [ ] Implement deterministic relevance scoring.
+- [ ] Estimate context token cost.
+- [ ] Detect missing dependencies.
+- [ ] Generate ContextGap results.
+- [ ] Detect contradictory evidence.
+- [ ] Ensure deterministic output ordering.
+- [ ] Add unit tests.
+- [ ] Add hidden-dependency test.
+- [ ] Add missing-dependency test.
+- [ ] Add contradictory-evidence test.
+- [ ] Add stale-context test.
+- [ ] Add noise-filtering test.
+- [ ] Do not connect to OpenCode yet.
