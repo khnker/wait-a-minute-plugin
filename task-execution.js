@@ -21,6 +21,8 @@ import {
   addDecision as addRunDecision,
   addEvidence as addRunEvidence,
   getRuns,
+  getRunsNormalized,
+  getRun,
   getLastRun,
   getLastRunSummary,
   getUnresolvedRequirements as getUnresolvedReqs,
@@ -108,7 +110,19 @@ export function hasLegacyExecutions(taskId, root) {
  * Delegates to startRun().
  */
 export function createExecution(taskId, root) {
-  return startRun(taskId, root);
+  const run = startRun(taskId, root);
+  // Seed legacy state.executions[] (cross-session compat)
+  syncExecToState(taskId, {
+    id: run.id,
+    taskId: run.taskId,
+    startedAt: run.startedAt,
+    status: run.status,
+    outcome: run.outcome,
+    observations: [],
+    decisions: [],
+    evidence: [],
+  }, root);
+  return run;
 }
 
 /**
@@ -116,7 +130,47 @@ export function createExecution(taskId, root) {
  * Delegates to closeRun().
  */
 export function closeExecution(taskId, execId, status, outcome, root) {
-  return closeRun(taskId, execId, status, outcome, root);
+  const run = closeRun(taskId, execId, status, outcome, root);
+  const state = getTaskState(taskId, root);
+  if (state?.executions) {
+    const legacy = {
+      id: run.id,
+      taskId: run.taskId,
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+      status: run.status,
+      outcome: run.outcome,
+      observations: (run.observations || []).map((o) =>
+        typeof o === "string" ? o : o.text
+      ),
+      decisions: (run.decisions || []).map((d) =>
+        typeof d === "string" ? d : d.text
+      ),
+      evidence: (run.evidence || []).map((e) =>
+        typeof e === "string" ? e : e.text
+      ),
+    };
+    syncExecToState(taskId, legacy, root);
+  }
+  return run;
+}
+
+function syncExecToState(taskId, exec, root) {
+  const state = getTaskState(taskId, root);
+  if (!state) return;
+  if (!Array.isArray(state.executions)) state.executions = [];
+  const idx = state.executions.findIndex((e) => e.id === exec.id);
+  if (idx >= 0) {
+    state.executions[idx] = exec;
+  } else {
+    state.executions.push(exec);
+  }
+  persistTaskState(taskId, state, root);
+}
+
+function readExecFromRuns(taskId, execId, root) {
+  // Lazy: read from runs/ directory via task-runs.js
+  return getRun(taskId, execId, root);
 }
 
 /**
@@ -124,7 +178,30 @@ export function closeExecution(taskId, execId, status, outcome, root) {
  * Delegates to addObservation() in task-runs.js.
  */
 export function addObservation(taskId, execId, text, root) {
-  return addRunObservation(taskId, execId, text, root);
+  const updated = addRunObservation(taskId, execId, text, root);
+  // Sync to legacy state.yaml executions[] for backward compat
+  const state = getTaskState(taskId, root);
+  if (state?.executions) {
+    const legacy = {
+      id: updated.id,
+      taskId: updated.taskId,
+      startedAt: updated.startedAt,
+      completedAt: updated.completedAt,
+      status: updated.status,
+      outcome: updated.outcome,
+      observations: (updated.observations || []).map((o) =>
+        typeof o === "string" ? o : o.text
+      ),
+      decisions: (updated.decisions || []).map((d) =>
+        typeof d === "string" ? d : d.text
+      ),
+      evidence: (updated.evidence || []).map((e) =>
+        typeof e === "string" ? e : e.text
+      ),
+    };
+    syncExecToState(taskId, legacy, root);
+  }
+  return updated;
 }
 
 /**
@@ -132,7 +209,29 @@ export function addObservation(taskId, execId, text, root) {
  * Delegates to addDecision() in task-runs.js.
  */
 export function addDecision(taskId, execId, text, root) {
-  return addRunDecision(taskId, execId, text, root);
+  const updated = addRunDecision(taskId, execId, text, root);
+  const state = getTaskState(taskId, root);
+  if (state?.executions) {
+    const legacy = {
+      id: updated.id,
+      taskId: updated.taskId,
+      startedAt: updated.startedAt,
+      completedAt: updated.completedAt,
+      status: updated.status,
+      outcome: updated.outcome,
+      observations: (updated.observations || []).map((o) =>
+        typeof o === "string" ? o : o.text
+      ),
+      decisions: (updated.decisions || []).map((d) =>
+        typeof d === "string" ? d : d.text
+      ),
+      evidence: (updated.evidence || []).map((e) =>
+        typeof e === "string" ? e : e.text
+      ),
+    };
+    syncExecToState(taskId, legacy, root);
+  }
+  return updated;
 }
 
 /**
@@ -140,7 +239,29 @@ export function addDecision(taskId, execId, text, root) {
  * Delegates to addEvidence() in task-runs.js.
  */
 export function addEvidence(taskId, execId, text, root) {
-  return addRunEvidence(taskId, execId, text, root);
+  const updated = addRunEvidence(taskId, execId, text, root);
+  const state = getTaskState(taskId, root);
+  if (state?.executions) {
+    const legacy = {
+      id: updated.id,
+      taskId: updated.taskId,
+      startedAt: updated.startedAt,
+      completedAt: updated.completedAt,
+      status: updated.status,
+      outcome: updated.outcome,
+      observations: (updated.observations || []).map((o) =>
+        typeof o === "string" ? o : o.text
+      ),
+      decisions: (updated.decisions || []).map((d) =>
+        typeof d === "string" ? d : d.text
+      ),
+      evidence: (updated.evidence || []).map((e) =>
+        typeof e === "string" ? e : e.text
+      ),
+    };
+    syncExecToState(taskId, legacy, root);
+  }
+  return updated;
 }
 
 // -- Query (delegated) --
@@ -150,7 +271,7 @@ export function addEvidence(taskId, execId, text, root) {
  * Delegates to getRuns().
  */
 export function getExecutions(taskId, root) {
-  return getRuns(taskId, root);
+  return getRunsNormalized(taskId, root);
 }
 
 /**

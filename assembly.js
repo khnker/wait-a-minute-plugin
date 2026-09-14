@@ -33,19 +33,12 @@ import { getOperationalContext, summarizeOperationalContext, normalizeConfidence
 import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
 import { loadCognitiveState, compactCognitiveState } from "./cognitive-state.js";
 import { routeAndAdapt, buildGraphFromTaskState } from "./router-adapter.js";
+import { ADMISSION } from "./context-router.js";
 
 /**
- * Admission classes for context budget policy.
- *
- * MANDATORY: Never dropped. Preserved even if exceeding budget.
- * CONDITIONAL: Dropped after OPTIONAL items are exhausted.
- * OPTIONAL: Dropped first when budget is tight.
+ * Admission classes are sourced from Context Router.
+ * Assembly must not reinterpret or reclassify admission decisions.
  */
-export const ADMISSION = {
-  MANDATORY: "MANDATORY",
-  CONDITIONAL: "CONDITIONAL",
-  OPTIONAL: "OPTIONAL",
-};
 
 /**
  * @typedef {Object} AdmissionItem
@@ -106,6 +99,8 @@ export function assembleContext({
   const levels = { N0: [], N1: [], N2: [], N3: [], N4: [] };
   const rationale = [];
   const taskTokens = tokenize(prompt);
+  let routerSufficiency = null;
+  let selectionSource = "legacy";
   const isTrivial = classification === "trivial" || mode === "FAST";
   const isArch = classification === "architectural" || mode === "STRICT";
 
@@ -175,11 +170,10 @@ export function assembleContext({
       `req: ${pend}/${reqs.length} pend | next: ${nextActionTruncated}`,
     ].join("\n") || liveBody;
   }
-  const n2Text = liveBody ? `[wam N2 task]\n${liveBody}` : "";
-  const n2Spent = liveBody ? reserve("N2", n2Text, ADMISSION.MANDATORY, "task state") : 0;
-  let reserved = n0Spent + n2Spent;
+  const n2TaskSpent = liveBody ? reserve("N2", liveBody, ADMISSION.MANDATORY, "live task state") : 0;
+  let reserved = n0Spent + n2TaskSpent;
 
-  // Cognitive state injection (compact, only if cognition exists)
+  // Cognitive state injection (compact, only if cognition exists) - also conditional, but handled by router
   const cognitionRaw = loadCognitiveState(projectPath);
   const hasCognition =
     cognitionRaw.activeHypotheses.length > 0 ||
@@ -190,7 +184,7 @@ export function assembleContext({
     const compact = compactCognitiveState(cognitionRaw);
     const cogText = `[wam N2 cognition] ${JSON.stringify(compact)}`;
     const cogTokens = estTokens(cogText);
-    // Cognition is CONDITIONAL — can be dropped if budget is tight
+    // Cognition is CONDITIONAL — can be dropped if budget is tight, but router should have accounted for this
     admissionItems.push({ level: "N2", admission: ADMISSION.CONDITIONAL, reason: "cognitive state", tokenCost: cogTokens, text: cogText });
     reserved += cogTokens;
     levels.N2.push(cogText);
@@ -249,16 +243,18 @@ export function assembleContext({
         root: projectPath,
       });
 
-      // Use router result if available, otherwise fallback to legacy selector
+      // Use router result if available, otherwise fallback to legacy selector.
+      // Router is canonical authority for admission/sufficiency; Assembly respects it.
       let pkg;
-      let selectionSource;
       if (routerPkg.source === "router" && routerPkg.capsules.length > 0) {
         pkg = routerPkg;
         selectionSource = "router";
+        routerSufficiency = pkg.sufficiency || null;
         rationale.push("N3: using Context Router for selection");
       } else {
         pkg = selectContext(prompt, { budget: flex, root: projectPath, sessionId: getSessionId(projectPath) });
         selectionSource = "legacy";
+        routerSufficiency = "insufficient";
         rationale.push("N3: using legacy selector (router fallback)");
       }
 
@@ -270,6 +266,13 @@ export function assembleContext({
           : (c.content || "");
         const line = truncated ? `${head}\n  content: ${truncated.replace(/\n+/g, " ").slice(0, contentMax)}` : head;
         spend("N3", line, ADMISSION.OPTIONAL, `capsule ${c.context_id} (${selectionSource})`);
+      }
+
+      // Router mandatory omissions: explicitly report as admission failures, never silently drop
+      for (const omitted of pkg.omitted || []) {
+        if (omitted.admission === ADMISSION.MANDATORY) {
+          rationale.push(`admission: MANDATORY omitted by router — ${omitted.id}: ${omitted.reason}`);
+        }
       }
 
       if (pkg.sufficiency === "insufficient") {
@@ -325,10 +328,18 @@ export function assembleContext({
 
   const lines = [...levels.N0, ...levels.N1, ...levels.N2, ...levels.N3, ...levels.N4];
 
-  // Admission report
+  // Admission report — Router is canonical authority for sufficiency when available.
   const mandatoryItems = admissionItems.filter((i) => i.admission === ADMISSION.MANDATORY);
   const mandatoryTokens = mandatoryItems.reduce((sum, i) => sum + i.tokenCost, 0);
-  const sufficiency = budget_violation && mandatoryTokens > budget ? "insufficient" : "sufficient";
+
+  let sufficiency;
+  if (routerSufficiency) {
+    sufficiency = routerSufficiency === "ok" ? "sufficient" : "insufficient";
+  } else if (budget_violation && mandatoryTokens > budget) {
+    sufficiency = "insufficient";
+  } else {
+    sufficiency = "sufficient";
+  }
 
   return {
     levels: Object.fromEntries(Object.entries(levels).map(([k, v]) => [k, v.length])),
@@ -340,6 +351,7 @@ export function assembleContext({
     flex,
     rationale,
     continuation,
+    source: selectionSource || "legacy",
     admission: {
       sufficiency,
       mandatoryCount: mandatoryItems.length,
@@ -349,4 +361,4 @@ export function assembleContext({
   };
 }
 
-export { estimateCapsuleTokens };
+export { estimateCapsuleTokens, ADMISSION };

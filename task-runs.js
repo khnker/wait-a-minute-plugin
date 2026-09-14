@@ -122,6 +122,20 @@ export function updateRun(taskId, runId, updates, root) {
   return run;
 }
 
+function syncRunToState(taskId, run, root) {
+  const state = getTaskState(taskId, root);
+  if (!state) return;
+  if (!Array.isArray(state.executions)) state.executions = [];
+  const normalized = normalizeRun(run);
+  const idx = state.executions.findIndex((e) => e.id === run.id);
+  if (idx >= 0) {
+    state.executions[idx] = normalized;
+  } else {
+    state.executions.push(normalized);
+  }
+  persistTaskState(taskId, state, root);
+}
+
 export function addObservation(taskId, runId, text, root) {
   const run = readRunFile(taskId, runId, root);
   if (!run) throw new Error(`Run ${runId} not found`);
@@ -205,6 +219,12 @@ export function getRuns(taskId, root) {
   return runs.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
 }
 
+// Legacy-compatible accessor: returns runs with observations/decisions/evidence
+// normalized to string[] form for the task-execution.js compatibility layer.
+export function getRunsNormalized(taskId, root) {
+  return getRuns(taskId, root).map(normalizeRun);
+}
+
 export function getLastRun(taskId, root) {
   const runs = getRuns(taskId, root);
   return runs.length > 0 ? runs[runs.length - 1] : null;
@@ -226,6 +246,7 @@ export function getLastRunSummary(taskId, root) {
   if (!last) return null;
 
   return {
+    executionId: last.id,
     runId: last.id,
     completedAt: last.completedAt,
     status: last.status,
@@ -254,9 +275,10 @@ export function getPreviousDecisions(taskId, root, limit = 5) {
   for (const run of runs) {
     for (const d of run.decisions || []) {
       allDecisions.push({
+        executionId: run.id,
         runId: run.id,
-        decision: d.text,
-        timestamp: d.timestamp,
+        decision: typeof d === "string" ? d : d.text,
+        timestamp: typeof d === "string" ? run.completedAt : d.timestamp,
         completedAt: run.completedAt,
       });
     }
@@ -265,6 +287,18 @@ export function getPreviousDecisions(taskId, root, limit = 5) {
   return allDecisions.slice(-limit);
 }
 
+// Normalize run fields to legacy string[] form (for task-execution.js compat)
+function normalizeRun(run) {
+  if (!run) return run;
+  const normalize = (arr) =>
+    Array.isArray(arr) ? arr.map((item) => (typeof item === "string" ? item : item.text)) : arr;
+  return {
+    ...run,
+    observations: normalize(run.observations),
+    decisions: normalize(run.decisions),
+    evidence: normalize(run.evidence),
+  };
+}
 export function getResumeContext(taskId, root) {
   const state = getTaskState(taskId, root);
   if (!state) return null;
@@ -278,6 +312,14 @@ export function getResumeContext(taskId, root) {
     taskSummary: state.lastAction || state.contract?.objective || "",
     phase: state.phase,
     currentRunId: state.currentRunId,
+    lastExecution: lastRun
+      ? {
+          id: lastRun.id,
+          status: lastRun.status,
+          outcome: lastRun.outcome,
+          completedAt: lastRun.completedAt,
+        }
+      : null,
     lastRun: lastRun
       ? {
           id: lastRun.id,
@@ -288,11 +330,13 @@ export function getResumeContext(taskId, root) {
       : null,
     unresolvedRequirements: unresolved.map((r) => ({ id: r.id, title: r.title })),
     recentFailures: failures.map((f) => ({
+      executionId: f.id,
       runId: f.id,
       outcome: f.outcome,
       completedAt: f.completedAt,
     })),
     recentDecisions,
+    totalExecutions: getRuns(taskId, root).length,
     totalRuns: getRuns(taskId, root).length,
   };
 }
