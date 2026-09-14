@@ -1,21 +1,28 @@
 /**
  * Context Assembly Layer — Context Pack Builder.
  *
- * OpenSpec changes: context-assembly-layer, refactor-context-engine.
+ * OpenSpec changes: context-assembly-layer, refactor-context-engine,
+ * wam-context-budget-admission.
  *
  * Rol: decide qué nivel (N0/N1/N2/N3) entra al pack y emite N0/N1/N2.
  * Capsule selection dentro de N3 se delega a context.js (Context Selection Engine).
  *
- * Budget partitioning (refactor-context-engine):
- *   budget = reserved (N0 + N2) + flex (N1 + N3)
- *   N0 y N2 se reservan primero; violation si reserved > budget (N0 igual se emite).
+ * Budget partitioning with admission policy:
+ *   budget = reserved (MANDATORY) + flex (CONDITIONAL + OPTIONAL)
+ *   MANDATORY items are preserved even if they exceed budget.
+ *   OPTIONAL items are dropped first when budget is tight.
+ *
+ * Admission classes:
+ *   MANDATORY  — N0, N2, required dependencies (never dropped)
+ *   CONDITIONAL — cognition, relevant sections (dropped after OPTIONAL)
+ *   OPTIONAL   — extra context, N4 skills (dropped first)
  *
  * 5 niveles con fuente canónica, obligación y prohibición:
- *   N0 Global/Policy  — obligatorio, tiny (reservado)
- *   N1 Project        — selectivo por dominio (secciones matcheadas) (flex)
- *   N2 Task           — obligatorio (live task state) (reservado)
- *   N3 Session        — capsules por utility (delegado a context.js) (flex)
- *   N4 Skills         — contenido de skills seleccionadas (flex, inyectado)
+ *   N0 Global/Policy  — obligatorio, tiny (MANDATORY)
+ *   N1 Project        — selectivo por dominio (CONDITIONAL)
+ *   N2 Task           — obligatorio (live task state) (MANDATORY)
+ *   N3 Session        — capsules por utility (OPTIONAL)
+ *   N4 Skills         — contenido de skills seleccionadas (OPTIONAL)
  *
  * Prohibido: L4 ephemeral, superseded, transcript, docs/dominios sin match.
  */
@@ -25,6 +32,28 @@ import path from "node:path";
 import { getOperationalContext, summarizeOperationalContext, normalizeConfidence, confidenceLabel } from "./memory.js";
 import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
 import { loadCognitiveState, compactCognitiveState } from "./cognitive-state.js";
+
+/**
+ * Admission classes for context budget policy.
+ *
+ * MANDATORY: Never dropped. Preserved even if exceeding budget.
+ * CONDITIONAL: Dropped after OPTIONAL items are exhausted.
+ * OPTIONAL: Dropped first when budget is tight.
+ */
+export const ADMISSION = {
+  MANDATORY: "MANDATORY",
+  CONDITIONAL: "CONDITIONAL",
+  OPTIONAL: "OPTIONAL",
+};
+
+/**
+ * @typedef {Object} AdmissionItem
+ * @property {string} level - Context level (N0, N1, N2, N3, N4)
+ * @property {string} admission - Admission class
+ * @property {string} reason - Why this item has this admission class
+ * @property {number} tokenCost - Estimated token cost
+ * @property {string} text - The actual content
+ */
 
 
 function tokenize(text = "") {
@@ -79,17 +108,22 @@ export function assembleContext({
   const isTrivial = classification === "trivial" || mode === "FAST";
   const isArch = classification === "architectural" || mode === "STRICT";
 
-  const reserve = (level, text) => {
+  /** @type {AdmissionItem[]} */
+  const admissionItems = [];
+
+  const reserve = (level, text, admission = ADMISSION.MANDATORY, reason = "required") => {
     const t = estTokens(text);
     levels[level].push(text);
+    admissionItems.push({ level, admission, reason, tokenCost: t, text });
     if (typeof globalThis.__wamReserveLines !== "undefined") {
       globalThis.__wamReserveLines.push({ level, text });
     }
     return t;
   };
 
-  const spend = (level, text) => {
+  const spend = (level, text, admission = ADMISSION.OPTIONAL, reason = "context") => {
     const t = estTokens(text);
+    admissionItems.push({ level, admission, reason, tokenCost: t, text });
     if (t > flex) {
       rationale.push(`${level}: excede presupuesto (${t} tok, restante ${flex})`);
       return 0;
@@ -99,9 +133,31 @@ export function assembleContext({
     return t;
   };
 
-  // -- N0 Global/Policy (reservado, obligatorio) ----------------------------
+  /** Drop OPTIONAL items first, then CONDITIONAL, to free budget for MANDATORY. */
+  const dropByAdmission = (minAdmission) => {
+    const order = [ADMISSION.OPTIONAL, ADMISSION.CONDITIONAL];
+    const minIdx = order.indexOf(minAdmission);
+    const droppable = order.slice(minIdx);
+
+    let freed = 0;
+    for (const admission of droppable) {
+      const items = admissionItems.filter((i) => i.admission === admission && levels[i.level].includes(i.text));
+      for (const item of items) {
+        const idx = levels[item.level].indexOf(item.text);
+        if (idx !== -1) {
+          levels[item.level].splice(idx, 1);
+          flex += item.tokenCost;
+          freed += item.tokenCost;
+          rationale.push(`admission: dropped ${item.level} (${admission}) — ${item.reason}`);
+        }
+      }
+    }
+    return freed;
+  };
+
+  // -- N0 Global/Policy (MANDATORY) -----------------------------------------
   const n0Text = "[wam N0 policy] autonomy loop | soft-archive only (U1)";
-  const n0Spent = reserve("N0", n0Text);
+  const n0Spent = reserve("N0", n0Text, ADMISSION.MANDATORY, "global policy");
 
   // -- N2 Task (reservado, obligatorio) -------------------------------------
   const liveFile = path.join(projectPath, ".wam", "tasks", taskId, "context.md");
@@ -119,7 +175,7 @@ export function assembleContext({
     ].join("\n") || liveBody;
   }
   const n2Text = liveBody ? `[wam N2 task]\n${liveBody}` : "";
-  const n2Spent = liveBody ? reserve("N2", n2Text) : 0;
+  const n2Spent = liveBody ? reserve("N2", n2Text, ADMISSION.MANDATORY, "task state") : 0;
   let reserved = n0Spent + n2Spent;
 
   // Cognitive state injection (compact, only if cognition exists)
@@ -132,12 +188,24 @@ export function assembleContext({
   if (hasCognition) {
     const compact = compactCognitiveState(cognitionRaw);
     const cogText = `[wam N2 cognition] ${JSON.stringify(compact)}`;
-    reserved += estTokens(cogText);
+    const cogTokens = estTokens(cogText);
+    // Cognition is CONDITIONAL — can be dropped if budget is tight
+    admissionItems.push({ level: "N2", admission: ADMISSION.CONDITIONAL, reason: "cognitive state", tokenCost: cogTokens, text: cogText });
+    reserved += cogTokens;
     levels.N2.push(cogText);
   }
   const budget_violation = reserved > budget;
   let flex = Math.max(0, budget - reserved);
-  if (budget_violation) rationale.push(`VIOLACIÓN: Reserva N0+N2 (${reserved}) excede budget (${budget})`);
+  if (budget_violation) {
+    rationale.push(`VIOLACIÓN: Reserva N0+N2 (${reserved}) excede budget (${budget})`);
+    // Admission policy: try to drop OPTIONAL and CONDITIONAL items to make room
+    const freed = dropByAdmission(ADMISSION.MANDATORY);
+    if (freed > 0) {
+      rationale.push(`admission: freed ${freed} tokens by dropping non-MANDATORY items`);
+    }
+    // Recalculate flex after dropping items
+    flex = Math.max(0, budget - reserved);
+  }
 
   // -- Continuation: solo N2 (ya reservado y emitido) -----------------------
   if (!continuation) {
@@ -148,26 +216,26 @@ export function assembleContext({
     if (!isTrivial) {
       // N1 solo si hay memoria operacional real — cero líneas vacías (rigor = ahorro de tokens)
       const n1summary = summarizeOperationalContext(projectPath);
-      if (n1summary) spend("N1", `[wam N1 project] ${n1summary}`);
-      if (recentSummary) spend("N1", `[wam N1 recent] ${recentSummary.slice(0, 500)}`);
+      if (n1summary) spend("N1", `[wam N1 project] ${n1summary}`, ADMISSION.CONDITIONAL, "project context");
+      if (recentSummary) spend("N1", `[wam N1 recent] ${recentSummary.slice(0, 500)}`, ADMISSION.CONDITIONAL, "recent changes");
 
       // Provenance: inferido ≠ hecho
       for (const [key, label] of [["project", "project.md"], ["architecture", "architecture.md"], ["decisions", "decisions.md"], ["constraints", "constraints.md"]]) {
         const meta = ctx[key]?.meta || {};
         const conf = normalizeConfidence(meta.confidence);
         if (meta.source === "inferred" && conf < 0.4) {
-          spend("N1", `[wam N1 WARNING] ${label} es INFERIDO (conf ${meta.confidence} ${confidenceLabel(conf)}) — no es decisión confirmada; validar antes de asumir`);
+          spend("N1", `[wam N1 WARNING] ${label} es INFERIDO (conf ${meta.confidence} ${confidenceLabel(conf)}) — no es decisión confirmada; validar antes de asumir`, ADMISSION.CONDITIONAL, "provenance warning");
         }
       }      
       const archDoc = ctx.architecture?.body || "";
       if (isArch && archDoc.trim()) {
         const arch = extractRelevantSections("architecture", archDoc, taskTokens, { base: true });
-        if (arch.trim()) spend("N1", `[wam N1 architecture] ${arch.slice(0, 600)}`);
+        if (arch.trim()) spend("N1", `[wam N1 architecture] ${arch.slice(0, 600)}`, ADMISSION.CONDITIONAL, "architecture context");
       }
       const decisions = extractRelevantSections("decisions", ctx.decisions?.body || "", taskTokens, { base: false });
-      if (decisions.trim()) spend("N1", `[wam N1 decisions] ${decisions.slice(0, 600)}`);
+      if (decisions.trim()) spend("N1", `[wam N1 decisions] ${decisions.slice(0, 600)}`, ADMISSION.CONDITIONAL, "decisions context");
       const constraints = extractRelevantSections("constraints", ctx.constraints?.body || "", taskTokens, { base: isArch });
-      if (constraints.trim()) spend("N1", `[wam N1 constraints] ${constraints.slice(0, 400)}`);
+      if (constraints.trim()) spend("N1", `[wam N1 constraints] ${constraints.slice(0, 400)}`, ADMISSION.CONDITIONAL, "constraints context");
     }
 
     // -- N3 Session (capsules por utility, consume flex) --------------------
@@ -180,11 +248,11 @@ export function assembleContext({
           ? c.content.slice(0, contentMax) + `...[truncado: ver /wam ctx get ${c.context_id}]`
           : (c.content || "");
         const line = truncated ? `${head}\n  content: ${truncated.replace(/\n+/g, " ").slice(0, contentMax)}` : head;
-        spend("N3", line);
+        spend("N3", line, ADMISSION.OPTIONAL, `capsule ${c.context_id}`);
       }
       if (pkg.sufficiency === "insufficient") {
         rationale.push(`N3: sufficiency insufficient — faltan ${pkg.missing.join(", ")}`);
-        spend("N3", `[wam N3 warning] contexto insuficiente: ${pkg.missing.join(", ")} — /wam ctx get <q>`);
+        spend("N3", `[wam N3 warning] contexto insuficiente: ${pkg.missing.join(", ")} — /wam ctx get <q>`, ADMISSION.MANDATORY, "sufficiency warning");
       }
     }
 
@@ -221,7 +289,7 @@ export function assembleContext({
         
         const head = `[wam N4 skill] ${skill.id} — ${(skill.reason || "").slice(0, 100)}`;
         const line = `${head}\n  content: ${truncated.replace(/\n+/g, " ").slice(0, skillContentMax)}`;
-        const cost = spend("N4", line);
+        const cost = spend("N4", line, ADMISSION.OPTIONAL, `skill ${skill.id}`);
         skillSpent += cost;
         rationale.push(`N4: ${skill.id} inyectada (${cost} tok, reason: ${skill.reason})`);
       }
@@ -229,6 +297,12 @@ export function assembleContext({
   }
 
   const lines = [...levels.N0, ...levels.N1, ...levels.N2, ...levels.N3, ...levels.N4];
+
+  // Admission report
+  const mandatoryItems = admissionItems.filter((i) => i.admission === ADMISSION.MANDATORY);
+  const mandatoryTokens = mandatoryItems.reduce((sum, i) => sum + i.tokenCost, 0);
+  const sufficiency = budget_violation && mandatoryTokens > budget ? "insufficient" : "sufficient";
+
   return {
     levels: Object.fromEntries(Object.entries(levels).map(([k, v]) => [k, v.length])),
     lines,
@@ -239,6 +313,12 @@ export function assembleContext({
     flex,
     rationale,
     continuation,
+    admission: {
+      sufficiency,
+      mandatoryCount: mandatoryItems.length,
+      mandatoryTokens,
+      droppedItems: rationale.filter((r) => r.startsWith("admission: dropped")),
+    },
   };
 }
 
