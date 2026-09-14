@@ -7,6 +7,7 @@ import { evaluateRequirement as evaluateRequirementChecks } from "./verification
 import { ContextDecisionTracer } from "./context-decision-audit.js";
 import { guardAction } from "./runtime-guards.js";
 import { WamPolicyBlock } from "./risk-engine.js";
+import { getStatusReport } from "./execution-state.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -1111,6 +1112,22 @@ function wamCli(args, cfg = {}, root = process.cwd(), taskId = readActiveTaskId(
     const evidence = rest.join(" ").trim();
     if (!aid || !evidence) return "Uso: /wam resolve <assumptionId> <evidencia>";
     return JSON.stringify(waitAMinute.resolveAssumption(taskId, aid, evidence, root));
+  }
+
+  if (sub === "status") {
+    const st = getTaskState(taskId, root);
+    if (!st) return "Sin estado de tarea";
+    const experiments = st.experiments || [];
+    const failures = experiments.filter(e => e.status === "failed");
+    const pendingUnknowns = (st.contract?.unknowns || []).filter(u => u.status === "blocking");
+    const pendingAuth = pendingUnknowns.length > 0 ? pendingUnknowns[0] : null;
+    const verifiedReqs = (st.requirements || []).filter(r => r.status === "verified");
+    const totalReqs = (st.requirements || []).length;
+    const verification = { status: `${verifiedReqs.length}/${totalReqs} verified` };
+    const completionEvidence = (st.requirements || [])
+      .filter(r => r.evidence && r.evidence.length > 0)
+      .map(r => ({ req: r.id, evidence: r.evidence.join("; ") }));
+    return getStatusReport(st, { experiments, failures, pendingAuth, verification, completionEvidence });
   }
 
   if (sub === "backlog") {
