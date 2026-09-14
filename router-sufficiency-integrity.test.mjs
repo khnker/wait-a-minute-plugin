@@ -80,12 +80,31 @@ describe("resolveContext admission", () => {
     assert.equal(typeof result.budgetOverflow, "boolean");
   });
 
+  it("includes status field", () => {
+    const graph = createMockGraph([
+      { id: "task-1", type: "task", content: "test task" },
+    ]);
+    const result = resolveContext(graph, { taskId: "task-1", maxTokens: 1000 });
+    assert.ok(["COMPLETE", "PARTIAL", "INSUFFICIENT", "CONFLICTED"].includes(result.status));
+  });
+
+  it("includes summary field", () => {
+    const graph = createMockGraph([
+      { id: "task-1", type: "task", content: "test task" },
+    ]);
+    const result = resolveContext(graph, { taskId: "task-1", maxTokens: 1000 });
+    assert.ok(result.summary);
+    assert.equal(typeof result.summary.required, "number");
+    assert.equal(typeof result.summary.selected, "number");
+  });
+
   it("marks sufficient when no missing and no omissions", () => {
     const graph = createMockGraph([
       { id: "task-1", type: "task", content: "test task" },
     ]);
     const result = resolveContext(graph, { taskId: "task-1", maxTokens: 1000 });
     assert.equal(result.sufficient, true);
+    assert.equal(result.status, "COMPLETE");
   });
 
   it("marks insufficient when missing dependencies", () => {

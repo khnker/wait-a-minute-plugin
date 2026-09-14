@@ -361,6 +361,18 @@ export function resolveContext(graph, options) {
   // Sufficient = complete + no mandatory omitted + no budget overflow + no contradictions
   const sufficient = complete && mandatoryOmitted.length === 0 && !budgetOverflow && contradictions.length === 0;
 
+  // Determine status
+  let status;
+  if (contradictions.length > 0) {
+    status = "CONFLICTED";
+  } else if (!complete || mandatoryOmitted.length > 0 || budgetOverflow) {
+    status = "INSUFFICIENT";
+  } else if (selectedNodes.length < required.size) {
+    status = "PARTIAL";
+  } else {
+    status = "COMPLETE";
+  }
+
   return {
     nodes: selectedNodes,
     edges,
@@ -368,7 +380,16 @@ export function resolveContext(graph, options) {
     omitted,
     complete,
     sufficient,
+    status,
     tokenEstimate: totalTokens,
     budgetOverflow,
+    mandatoryOmitted: mandatoryOmitted.length,
+    summary: {
+      required: required.size,
+      selected: selectedNodes.length,
+      omitted: omitted.length,
+      missing: missing.length,
+      contradictions: contradictions.length,
+    },
   };
 }
