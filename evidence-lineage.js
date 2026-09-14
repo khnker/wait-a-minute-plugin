@@ -35,12 +35,21 @@ function ensureLineageDir(taskId, root) {
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
-function generateEvidenceId(taskId) {
-  const dir = getLineageDir(taskId, process.cwd());
-  if (!fs.existsSync(dir)) return "ev-001";
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
-  return `ev-${String(files.length + 1).padStart(3, "0")}`;
+/**
+ * Generate a unique evidence ID.
+ * Uses timestamp + random suffix to avoid collisions.
+ * Never depends on file count (safe after deletions and concurrent access).
+ *
+ * @param {string} taskId
+ * @param {string} root - Project root (required, not process.cwd())
+ * @returns {string} Evidence ID like "ev-1789395644381-a1b2c3d4"
+ */
+function generateEvidenceId(taskId, root) {
+  const timestamp = Date.now();
+  const random = crypto.randomUUID().slice(0, 8);
+  return `ev-${timestamp}-${random}`;
 }
 
 function getEvidenceFile(taskId, evidenceId, root) {
@@ -101,7 +110,7 @@ export function createEvidence(taskId, data, root) {
   const state = getTaskState(taskId, root);
   if (!state) throw new Error(`Task ${taskId} not found`);
 
-  const evidenceId = generateEvidenceId(taskId);
+  const evidenceId = generateEvidenceId(taskId, root);
   const evidence = {
     id: evidenceId,
     requirementId: data.requirementId,
