@@ -32,6 +32,7 @@ import path from "node:path";
 import { getOperationalContext, summarizeOperationalContext, normalizeConfidence, confidenceLabel } from "./memory.js";
 import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
 import { loadCognitiveState, compactCognitiveState } from "./cognitive-state.js";
+import { routeAndAdapt, buildGraphFromTaskState } from "./router-adapter.js";
 
 /**
  * Admission classes for context budget policy.
@@ -238,21 +239,43 @@ export function assembleContext({
       if (constraints.trim()) spend("N1", `[wam N1 constraints] ${constraints.slice(0, 400)}`, ADMISSION.CONDITIONAL, "constraints context");
     }
 
-    // -- N3 Session (capsules por utility, consume flex) --------------------
+    // -- N3 Session (router-based selection, fallback to legacy) -------------
     if (!isTrivial) {
-      const pkg = selectContext(prompt, { budget: flex, root: projectPath, sessionId: getSessionId(projectPath) });
+      // Try router-based selection first
+      const graph = buildGraphFromTaskState(taskState, projectPath);
+      const routerPkg = routeAndAdapt(graph, {
+        taskId: taskState?.taskId,
+        budget: flex,
+        root: projectPath,
+      });
+
+      // Use router result if available, otherwise fallback to legacy selector
+      let pkg;
+      let selectionSource;
+      if (routerPkg.source === "router" && routerPkg.capsules.length > 0) {
+        pkg = routerPkg;
+        selectionSource = "router";
+        rationale.push("N3: using Context Router for selection");
+      } else {
+        pkg = selectContext(prompt, { budget: flex, root: projectPath, sessionId: getSessionId(projectPath) });
+        selectionSource = "legacy";
+        rationale.push("N3: using legacy selector (router fallback)");
+      }
+
       for (const c of pkg.capsules) {
-        const head = `[wam N3 ${c.level} ${c.provenance}] ${c.context_id} — ${(c.purpose || "").slice(0, 100)}`;
+        const head = `[wam N3 ${c.level || "N3"} ${c.provenance}] ${c.context_id} — ${(c.purpose || "").slice(0, 100)}`;
         const contentMax = 800;
         const truncated = (c.content || "").length > contentMax
           ? c.content.slice(0, contentMax) + `...[truncado: ver /wam ctx get ${c.context_id}]`
           : (c.content || "");
         const line = truncated ? `${head}\n  content: ${truncated.replace(/\n+/g, " ").slice(0, contentMax)}` : head;
-        spend("N3", line, ADMISSION.OPTIONAL, `capsule ${c.context_id}`);
+        spend("N3", line, ADMISSION.OPTIONAL, `capsule ${c.context_id} (${selectionSource})`);
       }
+
       if (pkg.sufficiency === "insufficient") {
         rationale.push(`N3: sufficiency insufficient — faltan ${pkg.missing.join(", ")}`);
-        const contractReport = pkg.contract.conditions
+        const conditions = pkg.contract?.conditions || [];
+        const contractReport = conditions
           .filter((c) => c.status !== "SATISFIED" && c.severity === "MANDATORY")
           .map((c) => `  - [${c.id}] ${c.type}: ${c.description} (${c.status})`)
           .join("\n");
