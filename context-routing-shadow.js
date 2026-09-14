@@ -6,7 +6,7 @@
  */
 
 import { ContextGraph } from "./context-graph.js";
-import { getResumeContext, getExecutions, getPreviousFailures, getPreviousDecisions } from "./task-execution.js";
+import { getResumeContext, getPreviousFailures, getPreviousDecisions } from "./task-runs.js";
 import { getDependencies, getUpstream, detectMissingDependencies, detectContextGaps } from "./task-dependencies.js";
 import { resolveContext } from "./context-router.js";
 import { getTaskState } from "./engine.js";
