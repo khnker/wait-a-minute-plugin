@@ -1,239 +1,210 @@
 /**
- * WAM Task Execution History
+ * WAM Task Execution History — DEPRECATED compatibility layer.
  *
- * Separates current task state from historical executions.
- * A task persists as the unit of identity.
- * An execution represents one concrete attempt/session against that objective.
+ * DEPRECATED: Use task-runs.js directly. This module is a thin wrapper
+ * that delegates to task-runs.js for backward compatibility.
+ *
+ * Canonical model: task-runs.js (separate run files in .wam/tasks/<taskId>/runs/)
+ * Legacy model: state.yaml executions[] array (deprecated, will be migrated)
+ *
+ * Migration: On first access, executions[] from state.yaml are migrated
+ * to runs/ directory and the legacy field is removed.
  */
 
-import { persistTaskState, getTaskState } from "./engine.js";
+import fs from "node:fs";
+import path from "node:path";
+import { getTaskState, persistTaskState } from "./engine.js";
+import {
+  startRun,
+  closeRun,
+  addObservation as addRunObservation,
+  addDecision as addRunDecision,
+  addEvidence as addRunEvidence,
+  getRuns,
+  getLastRun,
+  getLastRunSummary,
+  getUnresolvedRequirements as getUnresolvedReqs,
+  getPreviousFailures as getPrevFailures,
+  getPreviousDecisions as getPrevDecisions,
+  getResumeContext as getResumeCtx,
+  needsNewRun,
+} from "./task-runs.js";
 
-// -- Types --
+// -- Migration --
 
 /**
- * @typedef {Object} TaskExecution
- * @property {string} id
- * @property {string} taskId
- * @property {number} startedAt
- * @property {number} [completedAt]
- * @property {"active"|"completed"|"failed"|"blocked"|"abandoned"} status
- * @property {string[]} observations
- * @property {string[]} decisions
- * @property {string[]} evidence
- * @property {string} [outcome]
+ * Migrate legacy executions[] from state.yaml to runs/ directory.
+ * This is idempotent — safe to call multiple times.
  */
+export function migrateLegacyExecutions(taskId, root) {
+  const state = getTaskState(taskId, root);
+  if (!state?.executions || state.executions.length === 0) return 0;
 
-// -- Helpers --
+  const existingRuns = getRuns(taskId, root);
+  const existingRunIds = new Set(existingRuns.map((r) => r.id));
 
-function generateExecId(taskId, index) {
-  return `${taskId}-exec-${String(index).padStart(3, "0")}`;
+  let migrated = 0;
+
+  for (const exec of state.executions) {
+    // Skip if already migrated (by ID convention or content match)
+    if (existingRunIds.has(exec.id)) continue;
+
+    // Convert execution to run format
+    const run = {
+      id: exec.id,
+      taskId: exec.taskId || taskId,
+      startedAt: exec.startedAt,
+      completedAt: exec.completedAt,
+      status: exec.status || "active",
+      phase: "IMPLEMENTING",
+      observations: (exec.observations || []).map((text, i) => ({
+        id: `obs-${i + 1}`,
+        text: typeof text === "string" ? text : text.text || String(text),
+        timestamp: exec.startedAt || Date.now(),
+      })),
+      decisions: (exec.decisions || []).map((text, i) => ({
+        id: `dec-${i + 1}`,
+        text: typeof text === "string" ? text : text.text || String(text),
+        timestamp: exec.startedAt || Date.now(),
+      })),
+      evidence: (exec.evidence || []).map((text, i) => ({
+        id: `ev-${i + 1}`,
+        text: typeof text === "string" ? text : text.text || String(text),
+        timestamp: exec.startedAt || Date.now(),
+      })),
+      actions: [],
+      outcome: exec.outcome || null,
+    };
+
+    // Write to runs directory
+    const runsDir = path.join(root || process.cwd(), ".wam", "tasks", taskId, "runs");
+    if (!fs.existsSync(runsDir)) {
+      fs.mkdirSync(runsDir, { recursive: true });
+    }
+    fs.writeFileSync(path.join(runsDir, `${run.id}.json`), JSON.stringify(run, null, 2));
+
+    migrated++;
+  }
+
+  // Remove legacy executions[] from state
+  delete state.executions;
+  persistTaskState(taskId, state, root);
+
+  return migrated;
 }
 
-function now() {
-  return Date.now();
+/**
+ * Check if a task has legacy executions that need migration.
+ */
+export function hasLegacyExecutions(taskId, root) {
+  const state = getTaskState(taskId, root);
+  return state?.executions && state.executions.length > 0;
 }
 
-// -- Execution Management --
+// -- Delegated API (backward compatible) --
 
 /**
  * Create a new execution for an existing task.
- * Returns the created execution.
+ * Delegates to startRun().
  */
 export function createExecution(taskId, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) throw new Error(`Task ${taskId} not found`);
-
-  if (!state.executions) state.executions = [];
-
-  const index = state.executions.length + 1;
-  const exec = {
-    id: generateExecId(taskId, index),
-    taskId,
-    startedAt: now(),
-    status: "active",
-    observations: [],
-    decisions: [],
-    evidence: [],
-  };
-
-  state.executions.push(exec);
-  persistTaskState(taskId, state, root);
-  return exec;
+  return startRun(taskId, root);
 }
 
 /**
  * Close an execution with a status and optional outcome.
+ * Delegates to closeRun().
  */
 export function closeExecution(taskId, execId, status, outcome, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) throw new Error(`Task ${taskId} not found`);
-
-  const exec = (state.executions || []).find((e) => e.id === execId);
-  if (!exec) throw new Error(`Execution ${execId} not found`);
-
-  exec.completedAt = now();
-  exec.status = status;
-  if (outcome) exec.outcome = outcome;
-
-  persistTaskState(taskId, state, root);
-  return exec;
+  return closeRun(taskId, execId, status, outcome, root);
 }
 
 /**
  * Add an observation to an execution.
+ * Delegates to addObservation() in task-runs.js.
  */
 export function addObservation(taskId, execId, text, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) throw new Error(`Task ${taskId} not found`);
-
-  const exec = (state.executions || []).find((e) => e.id === execId);
-  if (!exec) throw new Error(`Execution ${execId} not found`);
-
-  exec.observations.push(text);
-  persistTaskState(taskId, state, root);
-  return exec;
+  return addRunObservation(taskId, execId, text, root);
 }
 
 /**
  * Add a decision to an execution.
+ * Delegates to addDecision() in task-runs.js.
  */
 export function addDecision(taskId, execId, text, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) throw new Error(`Task ${taskId} not found`);
-
-  const exec = (state.executions || []).find((e) => e.id === execId);
-  if (!exec) throw new Error(`Execution ${execId} not found`);
-
-  exec.decisions.push(text);
-  persistTaskState(taskId, state, root);
-  return exec;
+  return addRunDecision(taskId, execId, text, root);
 }
 
 /**
  * Add evidence to an execution.
+ * Delegates to addEvidence() in task-runs.js.
  */
 export function addEvidence(taskId, execId, text, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) throw new Error(`Task ${taskId} not found`);
-
-  const exec = (state.executions || []).find((e) => e.id === execId);
-  if (!exec) throw new Error(`Execution ${execId} not found`);
-
-  exec.evidence.push(text);
-  persistTaskState(taskId, state, root);
-  return exec;
+  return addRunEvidence(taskId, execId, text, root);
 }
 
-// -- Query --
+// -- Query (delegated) --
 
 /**
  * Get all executions for a task.
+ * Delegates to getRuns().
  */
 export function getExecutions(taskId, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) return [];
-  return state.executions || [];
+  return getRuns(taskId, root);
 }
 
 /**
  * Get the last (most recent) execution for a task.
+ * Delegates to getLastRun().
  */
 export function getLastExecution(taskId, root) {
-  const execs = getExecutions(taskId, root);
-  return execs.length > 0 ? execs[execs.length - 1] : null;
+  return getLastRun(taskId, root);
 }
 
 /**
  * Get the last known state of a task from its most recent execution.
- * Returns only what the last execution observed/decided/evidenced.
+ * Delegates to getLastRunSummary().
  */
 export function getLastExecutionSummary(taskId, root) {
-  const last = getLastExecution(taskId, root);
-  if (!last) return null;
-
-  return {
-    executionId: last.id,
-    completedAt: last.completedAt,
-    status: last.status,
-    outcome: last.outcome,
-    observationsCount: last.observations.length,
-    decisionsCount: last.decisions.length,
-    evidenceCount: last.evidence.length,
-  };
+  return getLastRunSummary(taskId, root);
 }
 
 /**
  * Get unresolved requirements from task state.
+ * Delegates to getUnresolvedRequirements() in task-runs.js.
  */
 export function getUnresolvedRequirements(taskId, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) return [];
-  return (state.requirements || []).filter((r) => r.status !== "done");
+  return getUnresolvedReqs(taskId, root);
 }
 
 /**
  * Get relevant previous failures.
+ * Delegates to getPreviousFailures() in task-runs.js.
  */
 export function getPreviousFailures(taskId, root) {
-  const execs = getExecutions(taskId, root);
-  return execs.filter((e) => e.status === "failed" || e.status === "abandoned");
+  return getPrevFailures(taskId, root);
 }
 
 /**
  * Get relevant previous decisions from execution history.
+ * Delegates to getPreviousDecisions() in task-runs.js.
  */
 export function getPreviousDecisions(taskId, root, limit = 5) {
-  const execs = getExecutions(taskId, root);
-  const allDecisions = [];
-  for (const exec of execs) {
-    for (const d of exec.decisions) {
-      allDecisions.push({ executionId: exec.id, decision: d, completedAt: exec.completedAt });
-    }
-  }
-  return allDecisions.slice(-limit);
+  return getPrevDecisions(taskId, root, limit);
 }
 
 /**
  * Resume context: aggregate what's needed to continue work.
- * Does NOT load all historical executions.
+ * Delegates to getResumeContext() in task-runs.js.
  */
 export function getResumeContext(taskId, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) return null;
-
-  const lastExec = getLastExecution(taskId, root);
-  const unresolved = getUnresolvedRequirements(taskId, root);
-  const failures = getPreviousFailures(taskId, root);
-  const recentDecisions = getPreviousDecisions(taskId, root, 3);
-
-  return {
-    taskSummary: state.lastAction || state.contract?.objective || "",
-    phase: state.phase,
-    lastExecution: lastExec
-      ? {
-          id: lastExec.id,
-          status: lastExec.status,
-          outcome: lastExec.outcome,
-          completedAt: lastExec.completedAt,
-        }
-      : null,
-    unresolvedRequirements: unresolved.map((r) => ({ id: r.id, title: r.title })),
-    recentFailures: failures.map((f) => ({
-      executionId: f.id,
-      outcome: f.outcome,
-      completedAt: f.completedAt,
-    })),
-    recentDecisions,
-    totalExecutions: (state.executions || []).length,
-  };
+  return getResumeCtx(taskId, root);
 }
 
 /**
  * Check if task needs a new execution (no active one).
+ * Delegates to needsNewRun().
  */
 export function needsNewExecution(taskId, root) {
-  const execs = getExecutions(taskId, root);
-  if (execs.length === 0) return true;
-  const last = execs[execs.length - 1];
-  return last.status !== "active";
+  return needsNewRun(taskId, root);
 }
