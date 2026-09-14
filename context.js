@@ -15,6 +15,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { generateContract, evaluateContract, mergeAssumptions } from "./sufficiency-contract.js";
 
 const LEVELS = ["L1", "L2", "L3", "L4"];
 const LIFECYCLE = ["candidate", "active", "superseded", "stale", "invalidated"];
@@ -409,10 +410,12 @@ export function selectContext(task, { budget = 8000, root, sessionId, log = true
     queue.push(...(dep.dependencies || []));
   }
 
-  // 4. sufficiency
-  const critical = ["test", "migra", "auth", "token", "security", "cache", "architect", "scrap"];
-  const missing = critical.filter((k) => new RegExp(k).test(task.toLowerCase()) && !selected.some((c) => new RegExp(k).test([c.purpose, c.scope, c.content].join(" "))));
-  const sufficiency = missing.length === 0 ? "ok" : "insufficient";
+  // 4. sufficiency — contract-based instead of lexical
+  let contract = generateContract(task, "contract-1");
+  contract = evaluateContract(contract, selected);
+  contract = mergeAssumptions(contract, []);
+  const missing = contract.missing;
+  const sufficiency = contract.sufficient ? "ok" : "insufficient";
 
   const pkg = {
     task,
@@ -423,6 +426,7 @@ export function selectContext(task, { budget = 8000, root, sessionId, log = true
     budget,
     sufficiency,
     missing,
+    contract,
   };
 
   if (log) {

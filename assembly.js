@@ -252,7 +252,11 @@ export function assembleContext({
       }
       if (pkg.sufficiency === "insufficient") {
         rationale.push(`N3: sufficiency insufficient — faltan ${pkg.missing.join(", ")}`);
-        spend("N3", `[wam N3 warning] contexto insuficiente: ${pkg.missing.join(", ")} — /wam ctx get <q>`, ADMISSION.MANDATORY, "sufficiency warning");
+        const contractReport = pkg.contract.conditions
+          .filter((c) => c.status !== "SATISFIED" && c.severity === "MANDATORY")
+          .map((c) => `  - [${c.id}] ${c.type}: ${c.description} (${c.status})`)
+          .join("\n");
+        spend("N3", `[wam N3 warning] contexto insuficiente:\n${contractReport}\n/wam ctx get <q>`, ADMISSION.MANDATORY, "sufficiency warning");
       }
     }
 
