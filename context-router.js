@@ -3,11 +3,29 @@
  *
  * Given an active task and a Context Graph, determines the minimum
  * sufficient context required for that task. Deterministic, no LLM.
+ *
+ * Admission classes:
+ *   MANDATORY — never dropped, even if exceeding budget
+ *   CONDITIONAL — dropped after OPTIONAL
+ *   OPTIONAL — dropped first when budget is tight
  */
 
 import { EDGE_TYPES } from "./context-graph.js";
 
+/**
+ * Admission classes for context budget policy.
+ */
+export const ADMISSION = {
+  MANDATORY: "MANDATORY",
+  CONDITIONAL: "CONDITIONAL",
+  OPTIONAL: "OPTIONAL",
+};
+
 // -- Types --
+
+/**
+ * @typedef {"MANDATORY" | "CONDITIONAL" | "OPTIONAL"} AdmissionClass
+ */
 
 /**
  * @typedef {Object} ResolveContextOptions
@@ -23,11 +41,20 @@ import { EDGE_TYPES } from "./context-graph.js";
  */
 
 /**
+ * @typedef {Object} OmittedNode
+ * @property {string} id - Node ID
+ * @property {string} reason - Why it was omitted
+ * @property {AdmissionClass} admission - Admission class
+ */
+
+/**
  * @typedef {Object} ResolvedContext
  * @property {import('./context-graph.js').ContextNode[]} nodes
  * @property {import('./context-graph.js').ContextEdge[]} edges
  * @property {ContextGap[]} missing
+ * @property {OmittedNode[]} omitted
  * @property {boolean} complete
+ * @property {boolean} sufficient
  * @property {number} tokenEstimate
  */
 
@@ -39,6 +66,39 @@ function estimateTokens(text = "") {
 
 function nodeTokens(node) {
   return estimateTokens(node.content) + 20; // overhead for metadata
+}
+
+/**
+ * Determine admission class for a node.
+ *
+ * MANDATORY: Task node, output nodes, direct dependencies of task
+ * CONDITIONAL: Evidence, decisions, constraints
+ * OPTIONAL: Everything else (subtasks, metadata, etc.)
+ */
+function getAdmissionClass(node, taskNode, graph) {
+  // Task node itself is always MANDATORY
+  if (node.id === taskNode?.id) {
+    return ADMISSION.MANDATORY;
+  }
+
+  // Output nodes are MANDATORY
+  if (node.type === "output") {
+    return ADMISSION.MANDATORY;
+  }
+
+  // Direct dependencies of the task (depth 1) are MANDATORY
+  const upstream = graph.getUpstream(node.id, 1);
+  if (upstream.some((n) => n.id === taskNode?.id)) {
+    return ADMISSION.MANDATORY;
+  }
+
+  // Evidence and decisions are CONDITIONAL
+  if (node.type === "evidence" || node.type === "decision") {
+    return ADMISSION.CONDITIONAL;
+  }
+
+  // Everything else is OPTIONAL
+  return ADMISSION.OPTIONAL;
 }
 
 // -- Relevance scoring --
@@ -193,27 +253,78 @@ export function resolveContext(graph, options) {
     }
   }
 
-  // Phase 6: Filter by token budget
+  // Phase 6: Filter by token budget with admission classes
   const nodes = [...required]
     .map((id) => graph.getNode(id))
     .filter(Boolean);
 
-  // Sort by relevance (deterministic)
-  nodes.sort((a, b) => {
+  // Assign admission class based on node type and relationship to task
+  const mandatory = [];
+  const conditional = [];
+  const optional = [];
+
+  for (const node of nodes) {
+    const admission = getAdmissionClass(node, taskNode, graph);
+    if (admission === ADMISSION.MANDATORY) {
+      mandatory.push(node);
+    } else if (admission === ADMISSION.CONDITIONAL) {
+      conditional.push(node);
+    } else {
+      optional.push(node);
+    }
+  }
+
+  // Sort each group by relevance (deterministic)
+  const sortByRelevance = (a, b) => {
     const ra = computeRelevance(a, taskNode, graph);
     const rb = computeRelevance(b, taskNode, graph);
     if (rb !== ra) return rb - ra;
-    return a.id.localeCompare(b.id); // tie-break by id for determinism
-  });
+    return a.id.localeCompare(b.id);
+  };
 
+  mandatory.sort(sortByRelevance);
+  conditional.sort(sortByRelevance);
+  optional.sort(sortByRelevance);
+
+  // Select MANDATORY first, then CONDITIONAL, then OPTIONAL
   let totalTokens = 0;
   const selectedNodes = [];
+  const omitted = [];
 
-  for (const node of nodes) {
+  // Phase 6a: Select all MANDATORY nodes (even if exceeding budget)
+  for (const node of mandatory) {
+    const tokens = nodeTokens(node);
+    selectedNodes.push(node);
+    totalTokens += tokens;
+  }
+
+  // Phase 6b: Select CONDITIONAL nodes within remaining budget
+  for (const node of conditional) {
     const tokens = nodeTokens(node);
     if (totalTokens + tokens <= maxTokens) {
       selectedNodes.push(node);
       totalTokens += tokens;
+    } else {
+      omitted.push({
+        id: node.id,
+        reason: "budget",
+        admission: ADMISSION.CONDITIONAL,
+      });
+    }
+  }
+
+  // Phase 6c: Select OPTIONAL nodes within remaining budget
+  for (const node of optional) {
+    const tokens = nodeTokens(node);
+    if (totalTokens + tokens <= maxTokens) {
+      selectedNodes.push(node);
+      totalTokens += tokens;
+    } else {
+      omitted.push({
+        id: node.id,
+        reason: "budget",
+        admission: ADMISSION.OPTIONAL,
+      });
     }
   }
 
@@ -228,10 +339,7 @@ export function resolveContext(graph, options) {
     }
   }
 
-  // Phase 8: Determine completeness
-  const complete = missing.length === 0;
-
-  // Phase 9: Add contradiction warnings to missing
+  // Phase 8: Add contradiction warnings to missing
   for (const contr of contradictions) {
     missing.push({
       requiredBy: contr.node1,
@@ -240,11 +348,27 @@ export function resolveContext(graph, options) {
     });
   }
 
+  // Phase 9: Determine completeness and sufficiency
+  const complete = missing.length === 0;
+
+  // Check if any MANDATORY nodes were omitted
+  const mandatoryOmitted = omitted.filter((o) => o.admission === ADMISSION.MANDATORY);
+
+  // Check if mandatory exceeded budget
+  const mandatoryTokens = mandatory.reduce((sum, n) => sum + nodeTokens(n), 0);
+  const budgetOverflow = mandatoryTokens > maxTokens;
+
+  // Sufficient = complete + no mandatory omitted + no budget overflow + no contradictions
+  const sufficient = complete && mandatoryOmitted.length === 0 && !budgetOverflow && contradictions.length === 0;
+
   return {
     nodes: selectedNodes,
     edges,
     missing,
+    omitted,
     complete,
+    sufficient,
     tokenEstimate: totalTokens,
+    budgetOverflow,
   };
 }
