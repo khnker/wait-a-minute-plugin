@@ -34,34 +34,36 @@ function makeState({ checks = [], reqStatus = "done", reqEvidence = ["manual"] }
   };
 }
 
-test("markRequirement rechaza `verified` textual cuando hay checks pendientes", () => {
-  const taskId = "test-verified-fail";
-  const state = makeState({ checks: [{ reqId: "R1", type: "command", status: "FAIL" }] });
-  persistTaskState(taskId, state, CWD);
-  const r = pluginDefault.markRequirement(taskId, "R1", "verified", "lo hice", CWD, null);
-  assert.equal(r.ok, false, "verify debería rechazar con checks FAIL");
-  assert.match(r.reason, /verificación máquina bloqueada/i);
-  cleanup(taskId);
-});
-
-test("markRequirement acepta `verified` cuando todos los checks están PASS", () => {
-  const taskId = "test-verified-pass";
-  const state = makeState({
-    checks: [{ reqId: "R1", type: "command", status: "PASS" }],
+test("markRequirement ejecuta checks automáticamente al marcar verified", async () => {
+  const taskId = "test-verified-auto";
+  const state = makeState({ 
+    checks: [{ id: "c1", reqId: "R1", type: "command", command: "node -e 'process.exit(0)'" }] 
   });
   persistTaskState(taskId, state, CWD);
-  const r = pluginDefault.markRequirement(taskId, "R1", "verified", "ejecutado", CWD, null);
+  const r = await pluginDefault.markRequirement(taskId, "R1", "verified", "ejecutado", CWD, null);
   assert.equal(r.ok, true, `markRequirement.ok esperado true, got: ${JSON.stringify(r)}`);
   cleanup(taskId);
 });
 
-test("markRequirement marca `done` cuando hay checks PASS pero ojo con credenciales", () => {
-  const taskId = "test-done-pass";
-  const state = makeState({
-    checks: [{ reqId: "R1", type: "command", status: "PASS" }],
+test("markRequirement rechaza verified cuando checks fallan", async () => {
+  const taskId = "test-verified-fail";
+  const state = makeState({ 
+    checks: [{ id: "c1", reqId: "R1", type: "command", command: "node -e 'process.exit(1)'" }] 
   });
   persistTaskState(taskId, state, CWD);
-  const r = pluginDefault.markRequirement(taskId, "R1", "done", "ok", CWD, null);
+  const r = await pluginDefault.markRequirement(taskId, "R1", "verified", "lo hice", CWD, null);
+  assert.equal(r.ok, false, "verify debería rechazar con checks FAIL");
+  assert.match(r.reason, /verificación falló/i);
+  cleanup(taskId);
+});
+
+test("markRequirement marca `done` sin ejecutar checks", async () => {
+  const taskId = "test-done-pass";
+  const state = makeState({
+    checks: [{ id: "c1", reqId: "R1", type: "command", command: "node -e 'process.exit(0)'" }],
+  });
+  persistTaskState(taskId, state, CWD);
+  const r = await pluginDefault.markRequirement(taskId, "R1", "done", "ok", CWD, null);
   assert.equal(r.ok, true);
   cleanup(taskId);
 });

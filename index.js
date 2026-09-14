@@ -3,7 +3,7 @@ import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDema
 import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext, compactDecisions } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot, migrateLegacyCapsules } from "./context.js";
 import { assembleContext } from "./assembly.js";
-import { evaluateRequirement as evaluateRequirementChecks } from "./verification.js";
+import { evaluateRequirement as evaluateRequirementChecks, verifyRequirement } from "./verification.js";
 import { ContextDecisionTracer } from "./context-decision-audit.js";
 import { guardAction } from "./runtime-guards.js";
 import { WamPolicyBlock } from "./risk-engine.js";
@@ -1694,7 +1694,7 @@ const waitAMinute = {
   },
 
   /** Marca requisito done/pending con evidencia. DONE exige evidencia (no "parece funcionar"). */
-  markRequirement: function(taskId, reqId, status, evidence, root) {
+  markRequirement: async function(taskId, reqId, status, evidence, root) {
     const state = getTaskState(taskId, root);
     if (!state) return { ok: false, reason: "Sin estado de tarea" };
     const req = (state.requirements || []).find((r) => r.id === reqId);
@@ -1707,10 +1707,12 @@ const waitAMinute = {
     }
     const checksForReq = (state.contract?.checks || []).filter((c) => c.reqId === reqId);
     if (status === "verified" && checksForReq.length > 0) {
-      const verdict = evaluateRequirementChecks(checksForReq, checksForReq);
-      if (verdict.status !== "VERIFIED") {
-        return { ok: false, reason: `Requisito ${reqId}: verificación máquina bloqueada (${verdict.reason || "checks pendientes"}). Ejecuta /wam verify ${reqId}.` };
+      const verdictResult = await verifyRequirement(checksForReq, { timeout_ms: 60000 });
+      if (verdictResult.status !== "VERIFIED") {
+        const failedChecks = verdictResult.results?.filter(r => r.status !== "PASS").map(r => `${r.check_id}: ${r.status}`).join(", ") || "unknown";
+        return { ok: false, reason: `Requisito ${reqId}: verificación falló (${failedChecks}).` };
       }
+      req.evidence.push(...verdictResult.evidence.map(e => `${e.check_type}:${e.check_id}`));
     }
     if (status === "done" && req.status === "verified" && checksForReq.length > 0) {
       return { ok: false, reason: `Requisito ${reqId}: ya está verificado, no se puede retroceder a done.` };

@@ -16,6 +16,11 @@ import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_TIMEOUT_MS = 30000;
 export const MAX_OUTPUT_BYTES = 64 * 1024;
@@ -74,18 +79,159 @@ export function captureRepositoryState(cwd) {
   return state;
 }
 
+export const VALID_CHECK_TYPES = new Set(["command", "service", "e2e"]);
+export { validateCheck };
+
+async function executeServiceCheck(check, timeout) {
+  const startedHr = Date.now();
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    const response = await fetch(check.url, { 
+      method: "GET",
+      signal: controller.signal,
+      headers: { "User-Agent": "WAM-Verification/1.0" }
+    });
+    clearTimeout(timeoutId);
+    
+    const text = await response.text();
+    return {
+      status: response.ok ? "PASS" : "FAIL",
+      exit_code: response.ok ? 0 : response.status,
+      diagnostic: `HTTP ${response.status} ${response.statusText} - ${text.slice(0, 500)}`,
+      output_hash: sha256(text),
+      output_truncated: text.length > MAX_OUTPUT_BYTES,
+      response_status: response.status,
+      response_status_text: response.statusText,
+    };
+  } catch (error) {
+    if (error.name === "AbortError") {
+      return { status: "TIMEOUT", exit_code: null, diagnostic: `timeout tras ${timeout}ms` };
+    }
+    return { status: "ERROR", exit_code: null, diagnostic: error.message };
+  }
+}
+
+async function executeE2eCheck(check, timeout, cwd) {
+  const startedHr = Date.now();
+  const playwrightScript = `
+import { chromium } from 'playwright';
+(async () => {
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  const results = [];
+  try {
+    await page.goto('${check.url}', { timeout: ${timeout} });
+    for (const selector of ${JSON.stringify(check.selectors)}) {
+      try {
+        const element = await page.locator(selector).first();
+        const isVisible = await element.isVisible();
+        const text = isVisible ? await element.textContent() : null;
+        results.push({ selector, found: true, visible: isVisible, text: text?.slice(0, 200) });
+      } catch (e) {
+        results.push({ selector, found: false, error: e.message });
+      }
+    }
+    await page.waitForLoadState('networkidle');
+  } catch (e) {
+    results.push({ error: e.message });
+  }
+  await browser.close();
+  console.log(JSON.stringify(results));
+})();
+`;
+  
+  const scriptPath = path.join(cwd || process.cwd(), ".wam", "temp-e2e-check.mjs");
+  
+  try {
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, playwrightScript);
+  } catch (e) {
+    return { status: "ERROR", exit_code: null, diagnostic: `No se pudo crear script: ${e.message}` };
+  }
+  
+  return new Promise((resolve) => {
+    execFile(
+      "node",
+      [scriptPath],
+      { cwd: cwd || process.cwd(), timeout: timeout + 10000 },
+      (error, stdout, stderr) => {
+        try { fs.unlinkSync(scriptPath); } catch {}
+        
+        const completed_at = nowIso();
+        let results = [];
+        let output = stdout || stderr;
+        
+        try {
+          results = JSON.parse(output);
+        } catch {
+          results = [{ error: "parse failed", raw: output.slice(0, 500) }];
+        }
+        
+        const allFound = results.every(r => r.found !== false && r.error == null);
+        const base = {
+          check_id: check.id,
+          requirement_id: check.requirement_id,
+          started_at: new Date(Date.now() - (Date.now() - startedHr)).toISOString(),
+          completed_at,
+          duration_ms: Date.now() - startedHr,
+          output_hash: sha256(output),
+          output_truncated: output.length > MAX_OUTPUT_BYTES,
+          repository_state: captureRepositoryState(cwd),
+        };
+        
+        if (error && (error.killed || error.code === "ETIMEDOUT")) {
+          return resolve({ ...base, status: "TIMEOUT", exit_code: null, diagnostic: "Playwright timeout" });
+        }
+        if (error) {
+          return resolve({ ...base, status: "FAIL", exit_code: error.code, diagnostic: output.slice(-500), e2e_results: results });
+        }
+        
+        return resolve({ 
+          ...base, 
+          status: allFound ? "PASS" : "FAIL", 
+          exit_code: allFound ? 0 : 1, 
+          diagnostic: JSON.stringify(results).slice(0, 500),
+          e2e_results: results 
+        });
+      }
+    );
+  });
+}
+
 function validateCheck(check) {
   if (!check || typeof check !== "object") return "check inválido";
-  if (check.type !== "command") return `tipo no soportado: ${check.type}`;
-  if (!check.command || typeof check.command !== "string" || !check.command.trim()) {
-    return "command vacío";
+  if (!VALID_CHECK_TYPES.has(check.type)) return `tipo no soportado: ${check.type}`;
+  
+  if (check.type === "command") {
+    if (!check.command || typeof check.command !== "string" || !check.command.trim()) {
+      return "command vacío";
+    }
+    const cwd = check.cwd || process.cwd();
+    try {
+      if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) return `cwd inexistente: ${cwd}`;
+    } catch {
+      return `cwd ilegible: ${cwd}`;
+    }
   }
-  const cwd = check.cwd || process.cwd();
-  try {
-    if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) return `cwd inexistente: ${cwd}`;
-  } catch {
-    return `cwd ilegible: ${cwd}`;
+  
+  if (check.type === "service") {
+    if (!check.url || typeof check.url !== "string") return "url vacía para check service";
+    try {
+      new URL(check.url);
+    } catch {
+      return `url inválida: ${check.url}`;
+    }
   }
+  
+  if (check.type === "e2e") {
+    if (!check.url || typeof check.url !== "string") return "url vacía para check e2e";
+    if (!check.selectors || !Array.isArray(check.selectors) || check.selectors.length === 0) {
+      return "selectors vacíos para check e2e";
+    }
+  }
+  
   return null;
 }
 
@@ -95,7 +241,7 @@ function validateCheck(check) {
  *   started_at, completed_at, duration_ms, output_hash, output_truncated,
  *   diagnostic, repository_state }.
  */
-export function executeCheck(check, { timeout_ms = DEFAULT_TIMEOUT_MS } = {}) {
+export async function executeCheck(check, { timeout_ms = DEFAULT_TIMEOUT_MS } = {}) {
   const started_at = nowIso();
   const startedHr = Date.now();
   const invalid = validateCheck(check);
@@ -115,6 +261,35 @@ export function executeCheck(check, { timeout_ms = DEFAULT_TIMEOUT_MS } = {}) {
       repository_state,
     };
   }
+  
+  if (check.type === "service") {
+    const timeout = Number(check.timeout_ms ?? timeout_ms);
+    const result = await executeServiceCheck(check, timeout);
+    return {
+      check_id: check.id || null,
+      requirement_id: check.requirement_id || null,
+      started_at,
+      completed_at: nowIso(),
+      duration_ms: Date.now() - startedHr,
+      ...result,
+      repository_state,
+    };
+  }
+  
+  if (check.type === "e2e") {
+    const timeout = Number(check.timeout_ms ?? timeout_ms);
+    const result = await executeE2eCheck(check, timeout, check.cwd);
+    return {
+      check_id: check.id || null,
+      requirement_id: check.requirement_id || null,
+      started_at,
+      completed_at: nowIso(),
+      duration_ms: Date.now() - startedHr,
+      ...result,
+      repository_state,
+    };
+  }
+  
   const timeout = Number(check.timeout_ms ?? timeout_ms);
   return new Promise((resolve) => {
     execFile(
@@ -154,13 +329,11 @@ export function executeCheck(check, { timeout_ms = DEFAULT_TIMEOUT_MS } = {}) {
  * Genera la Evidence machine-verifiable de un check ejecutado.
  */
 export function createEvidence(check, result) {
-  return {
+  const base = {
     id: `ev-${result.check_id || "unknown"}-${Date.now().toString(36)}`,
     requirement_id: result.requirement_id || check?.requirement_id || null,
     check_id: result.check_id,
-    type: "command",
-    command: check?.command || null,
-    cwd: check?.cwd || process.cwd(),
+    check_type: check?.type || "command",
     exit_code: result.exit_code,
     started_at: result.started_at,
     completed_at: result.completed_at,
@@ -168,6 +341,32 @@ export function createEvidence(check, result) {
     output_truncated: result.output_truncated,
     repository_state: result.repository_state,
   };
+  
+  if (check?.type === "command") {
+    return { ...base, type: "command", command: check?.command || null, cwd: check?.cwd || process.cwd() };
+  }
+  if (check?.type === "service") {
+    return { 
+      ...base, 
+      type: "service", 
+      url: check?.url || null,
+      response_status: result.response_status,
+      response_status_text: result.response_status_text,
+      diagnostic: result.diagnostic,
+    };
+  }
+  if (check?.type === "e2e") {
+    return { 
+      ...base, 
+      type: "e2e", 
+      url: check?.url || null,
+      selectors: check?.selectors || [],
+      e2e_results: result.e2e_results,
+      diagnostic: result.diagnostic,
+    };
+  }
+  
+  return { ...base, type: "command", command: check?.command || null, cwd: check?.cwd || process.cwd() };
 }
 
 /**
