@@ -121,3 +121,42 @@ export function invalidateVerification(requirement, invalidatingObservation) {
     previousStatus: requirement.status
   };
 }
+
+/**
+ * Before verifying a requirement, reject STALE evidence.
+ * If any linked evidence is STALE the requirement returns to PENDING
+ * and verification is skipped (caller must replan).
+ *
+ * @param {object} requirement
+ * @param {Array<{id?: string, status?: string}>} evidence
+ * @returns {{ canVerify: boolean, requirement: object, staleEvidence: Array, reason: string|null }}
+ */
+export function checkEvidenceFreshness(requirement, evidence = []) {
+  const staleEvidence = (evidence || []).filter(
+    (e) => e && (e.status === "stale" || e.status === "STALE")
+  );
+  if (staleEvidence.length === 0) {
+    return { canVerify: true, requirement, staleEvidence: [], reason: null };
+  }
+  const reverted = {
+    ...requirement,
+    status: "pending",
+    previousStatus: requirement.status,
+    replan: true,
+    staleEvidenceIds: staleEvidence.map((e) => e.id).filter(Boolean),
+  };
+  return {
+    canVerify: false,
+    requirement: reverted,
+    staleEvidence,
+    reason: "STALE evidence — requirement returned to PENDING, replan required",
+  };
+}
+
+/**
+ * Gate used immediately before verifying a requirement.
+ * Returns the requirement (possibly reset to PENDING) plus a verify flag.
+ */
+export function prepareRequirementVerification(requirement, evidence = []) {
+  return checkEvidenceFreshness(requirement, evidence);
+}

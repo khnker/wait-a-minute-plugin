@@ -20,8 +20,14 @@ import {
   getUnsatisfiedRequirements,
   getCompletionStatus,
   getEvidenceSummary,
-} from "./evidence-lineage.js";
-import { persistTaskState } from "./engine.js";
+  linkEvidenceToRequirement,
+  getLineage,
+  invalidateDependentEvidence,
+  hasStaleEvidence,
+} from "./evidence-lineage.js"; // Re-added for lineage tests
+import { persistTaskState, getTaskState } from "./engine.js";
+import { noteContradiction } from "./hypothesis-manager.js";
+import { checkEvidenceFreshness, prepareRequirementVerification } from "./verification-context.js";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "wam-ev-lineage-test-"));
 let taskCounter = 0;
@@ -296,5 +302,167 @@ describe("getEvidenceSummary", () => {
     assert.equal(summary.total, 2);
     assert.equal(summary.byStatus.valid, 1);
     assert.equal(summary.byStatus.unverified, 1);
+  });
+});
+
+describe("linkEvidenceToRequirement", () => {
+  it("links evidence to requirement, hypothesis, experiment, observation", () => {
+    const taskId = setupTask();
+    const ev = createEvidence(taskId, { requirementId: "req-1", content: "obs" }, TMP);
+    const linked = linkEvidenceToRequirement(
+      ev.id, "req-1", "hyp-1", "exp-1", "obs-1", taskId, TMP
+    );
+    assert.equal(linked.requirementId, "req-1");
+    assert.equal(linked.hypothesisId, "hyp-1");
+    assert.equal(linked.experimentId, "exp-1");
+    assert.equal(linked.observationId, "obs-1");
+
+    const stored = getEvidence(taskId, ev.id, TMP);
+    assert.equal(stored.hypothesisId, "hyp-1");
+    assert.equal(stored.experimentId, "exp-1");
+    assert.equal(stored.observationId, "obs-1");
+  });
+
+  it("returns in-memory chain when taskId is omitted", () => {
+    const linked = linkEvidenceToRequirement("ev-x", "req-1", "hyp-1", "exp-1", "obs-1");
+    assert.equal(linked.requirementId, "req-1");
+    assert.equal(linked.hypothesisId, "hyp-1");
+    assert.deepEqual(linked.chain, ["requirement", "hypothesis", "experiment", "observation", "evidence"]);
+  });
+});
+
+describe("getLineage", () => {
+  it("returns the full Requirement → Hypothesis → Experiment → Observation → Evidence chain", () => {
+    const taskId = setupTask();
+    const ev = createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
+      content: "pass",
+    }, TMP);
+    const lineage = getLineage(taskId, "req-1", TMP);
+    assert.equal(lineage.requirementId, "req-1");
+    assert.deepEqual(lineage.chain, ["requirement", "hypothesis", "experiment", "observation", "evidence"]);
+    assert.ok(lineage.hypotheses.includes("hyp-1"));
+    assert.ok(lineage.experiments.includes("exp-1"));
+    assert.ok(lineage.observations.includes("obs-1"));
+    assert.equal(lineage.evidence.length, 1);
+    assert.equal(lineage.evidence[0].id, ev.id);
+  });
+});
+
+describe("invalidateDependentEvidence", () => {
+  it("marks dependent evidence STALE by hypothesisId", () => {
+    const taskId = setupTask();
+    const ev = createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
+      content: "pass",
+    }, TMP);
+    verifyEvidence(taskId, ev.id, "ok", "PASS", TMP);
+
+    const stale = invalidateDependentEvidence(taskId, "hyp-1", "hypothesis rejected", TMP);
+    assert.equal(stale.length, 1);
+    assert.equal(stale[0].status, "stale");
+    assert.equal(stale[0].invalidationReason, "hypothesis rejected");
+
+    const stored = getEvidence(taskId, ev.id, TMP);
+    assert.equal(stored.status, "stale");
+    assert.equal(hasStaleEvidence(taskId, "req-1", TMP), true);
+  });
+
+  it("marks dependent evidence STALE by requirementId", () => {
+    const taskId = setupTask();
+    const ev = createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-2",
+      content: "pass",
+    }, TMP);
+    verifyEvidence(taskId, ev.id, "ok", "PASS", TMP);
+
+    const stale = invalidateDependentEvidence(taskId, "req-1", "requirement invalidated", TMP);
+    assert.equal(stale.length, 1);
+    assert.equal(stale[0].status, "stale");
+  });
+});
+
+describe("noteContradiction → STALE evidence → requirement PENDING", () => {
+  it("rejects hypothesis, stales dependent evidence, returns requirement to pending", () => {
+    const taskId = setupTask();
+    persistTaskState(taskId, makeTaskState({
+      requirements: [
+        { id: "req-1", title: "Req 1", status: "verified", evidence: [] },
+        { id: "req-2", title: "Req 2", status: "pending", evidence: [] },
+      ],
+    }), TMP);
+
+    const ev = createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
+      content: "pass",
+    }, TMP);
+    verifyEvidence(taskId, ev.id, "ok", "PASS", TMP);
+
+    const assessment = {
+      result: "CONTRADICTED",
+      reasoning: "observation does not match expected",
+      comparisons: [
+        { field: "output", status: "CONTRADICTED", expected: "green", actual: "red" },
+      ],
+    };
+
+    const contradiction = noteContradiction(
+      taskId, "hyp-1", { output: "red" }, assessment, TMP
+    );
+
+    assert.equal(contradiction.type, "CONTRADICTION");
+    assert.equal(contradiction.hypothesisStatus, "rejected");
+    assert.equal(contradiction.replan, true);
+    assert.ok(contradiction.staleEvidence.length >= 1);
+    assert.ok(contradiction.pendingRequirements.includes("req-1"));
+
+    const stored = getEvidence(taskId, ev.id, TMP);
+    assert.equal(stored.status, "stale");
+
+    const state = getTaskState(taskId, TMP);
+    const req = state.requirements.find((r) => r.id === "req-1");
+    assert.equal(req.status, "pending");
+    assert.equal(req.replan, true);
+  });
+
+  it("keeps the 3-arg signature used by execution-engine callers", () => {
+    const assessment = {
+      result: "CONTRADICTED",
+      reasoning: "mismatch",
+      comparisons: [],
+    };
+    const contradiction = noteContradiction("hyp-x", { foo: 1 }, assessment);
+    assert.equal(contradiction.type, "CONTRADICTION");
+    assert.equal(contradiction.hypothesisId, "hyp-x");
+    assert.equal(contradiction.replan, true);
+  });
+});
+
+describe("verification freshness gate", () => {
+  it("blocks verification and returns requirement to PENDING when evidence is STALE", () => {
+    const requirement = { id: "req-1", status: "verified" };
+    const evidence = [{ id: "ev-1", status: "stale" }];
+    const result = checkEvidenceFreshness(requirement, evidence);
+    assert.equal(result.canVerify, false);
+    assert.equal(result.requirement.status, "pending");
+    assert.equal(result.requirement.replan, true);
+    assert.ok(result.reason.includes("STALE"));
+  });
+
+  it("allows verification when evidence is fresh", () => {
+    const requirement = { id: "req-1", status: "verified" };
+    const result = prepareRequirementVerification(requirement, [{ id: "ev-1", status: "valid" }]);
+    assert.equal(result.canVerify, true);
+    assert.equal(result.requirement.status, "verified");
   });
 });
