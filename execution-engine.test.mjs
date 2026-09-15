@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 
 import { startExperiment, noteFailure, noteSuccess } from "./execution-engine.js";
-import { listHypotheses, listExperiments, DELETION_POLICY } from "./cognition-store.js";
+import { listHypotheses, listExperiments, DELETION_POLICY, HYPOTHESIS_STATUS } from "./cognition-store.js";
 import { guardAction } from "./runtime-guards.js";
 
 function setup() {
@@ -67,7 +67,7 @@ test("loop: failure archives hypothesis, repeat blocked, cognition file kept", a
     assert.equal(DELETION_POLICY, "soft-archive");
 
     const hyps = listHypotheses(root, taskId);
-    assert.ok(hyps.some((h) => h.status === "archived" || h.status === "rejected"));
+    assert.ok(hyps.some((h) => h.status === HYPOTHESIS_STATUS.ARCHIVED || h.status === HYPOTHESIS_STATUS.REJECTED));
   } finally {
     cleanup();
   }

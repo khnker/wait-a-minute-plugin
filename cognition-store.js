@@ -6,6 +6,9 @@
  * Almacena hipótesis, experimentos y observaciones como append-only JSONL
  * bajo `.wam/tasks/<taskId>/cognition/`. Permite continuar tras compaction
  * sin re-intentar estrategias fallidas.
+ *
+ * Source of truth para datos cognitivos del task. Cualquier lectura/escritura
+ * de hipótesis, experimentos u observaciones debe pasar por este módulo.
  */
 
 import fs from "node:fs";
@@ -21,12 +24,29 @@ const FILES = {
 /** U1: never unlink cognition records. Archive via status append. */
 export const DELETION_POLICY = "soft-archive";
 
+// -- Status constants (single source of truth) --
+// Hypotheses lifecycle: PROPOSED → TESTING → CONFIRMED | REJECTED → ARCHIVED
+export const HYPOTHESIS_STATUS = Object.freeze({
+  PROPOSED: "PROPOSED",
+  TESTING: "TESTING",
+  CONFIRMED: "CONFIRMED",
+  REJECTED: "REJECTED",
+  ARCHIVED: "ARCHIVED",
+});
+
+// Experiment lifecycle: PROPOSED → COMPLETED | FAILED
+export const EXPERIMENT_STATUS = Object.freeze({
+  PROPOSED: "PROPOSED",
+  COMPLETED: "COMPLETED",
+  FAILED: "FAILED",
+});
+
 export function archiveHypothesis(taskRoot, taskId, hypothesisId, reason = "archived") {
   const dir = cognitionRoot(taskRoot, taskId);
   const file = path.join(dir, FILES.hypotheses);
   appendLine(file, {
     id: hypothesisId,
-    status: "archived",
+    status: HYPOTHESIS_STATUS.ARCHIVED,
     reason,
     archivedAt: Date.now(),
   });
@@ -38,7 +58,7 @@ export function hasRepetitiveFailure(taskRoot, taskId, { hypothesisId, actionDes
     (e) =>
       e.hypothesisId === hypothesisId &&
       e.actionDescription === actionDescription &&
-      (e.status === "failed" || e.status === "error" || e.status === "rejected"),
+      (e.status === EXPERIMENT_STATUS.FAILED),
   );
 }
 
@@ -80,7 +100,7 @@ export function createHypothesis(taskRoot, taskId, { statement, confidence = 0.5
     id: genId("H"),
     statement,
     confidence,
-    status: "proposed",
+    status: HYPOTHESIS_STATUS.PROPOSED,
   };
   appendLine(file, h);
   return h;
@@ -105,12 +125,15 @@ export function updateHypothesisStatus(taskRoot, taskId, id, status) {
 
 export function getActiveHypotheses(taskRoot, taskId) {
   return listHypotheses(taskRoot, taskId)
-    .filter((h) => h.status === "proposed" || h.status === "testing" || h.status === "supported");
+    .filter((h) =>
+      h.status === HYPOTHESIS_STATUS.PROPOSED ||
+      h.status === HYPOTHESIS_STATUS.TESTING
+    );
 }
 
 // -- Experiments --
 
-export function createExperiment(taskRoot, taskId, { hypothesisId, actionDescription, risk = "SAFE", reversible = true }) {
+export function createExperiment(taskRoot, taskId, { hypothesisId, actionDescription, risk = "SAFE", reversible = true, expectedObservation }) {
   const dir = cognitionRoot(taskRoot, taskId);
   const file = path.join(dir, FILES.experiments);
   const e = {
@@ -119,7 +142,8 @@ export function createExperiment(taskRoot, taskId, { hypothesisId, actionDescrip
     actionDescription,
     risk,
     reversible,
-    status: "proposed",
+    expectedObservation,
+    status: EXPERIMENT_STATUS.PROPOSED,
   };
   appendLine(file, e);
   return e;
@@ -131,11 +155,11 @@ export function listExperiments(taskRoot, taskId) {
 }
 
 export function completeExperiment(taskRoot, taskId, id, { result = "ok" } = {}) {
-  return updateExperiment(taskRoot, taskId, id, { status: "completed", result });
+  return updateExperiment(taskRoot, taskId, id, { status: EXPERIMENT_STATUS.COMPLETED, result });
 }
 
 export function failExperiment(taskRoot, taskId, id, reason = "") {
-  return updateExperiment(taskRoot, taskId, id, { status: "failed", reason });
+  return updateExperiment(taskRoot, taskId, id, { status: EXPERIMENT_STATUS.FAILED, reason });
 }
 
 function updateExperiment(taskRoot, taskId, id, patch) {
@@ -154,34 +178,19 @@ export function findRepeatedExperiment(taskRoot, taskId, { hypothesisId, actionD
   return all.filter((e) =>
     e.hypothesisId === hypothesisId &&
     e.actionDescription === actionDescription &&
-    (e.status === "completed" || e.status === "failed")
+    (e.status === EXPERIMENT_STATUS.COMPLETED || e.status === EXPERIMENT_STATUS.FAILED)
   );
 }
 
 // -- Observations --
 
-export function recordObservation(taskRoot, taskId, {
-  experimentId,
-  result,
-  facts = [],
-  unexpected = [],
-  source = { type: "runtime", reference: "" },
-}) {
+export function recordObservation(taskRoot, taskId, { experimentId, result, facts = [], actual, unexpected, provenance }) {
   const dir = cognitionRoot(taskRoot, taskId);
   const file = path.join(dir, FILES.observations);
-  // Enforce provenance: every observation must have a source.type.
-  const provenance = source?.type
-    ? source
-    : { type: "runtime", reference: "" };
-  const o = {
-    id: genId("O"),
-    experimentId,
-    result,
-    facts,
-    unexpected,
-    source: provenance,
-    kind: "FACT", // FACT | INTERPRETATION | VERIFIED_EVIDENCE (runtime defaults to FACT)
-  };
+  const o = { id: genId("O"), experimentId, result, facts };
+  if (actual !== undefined) o.actual = actual;
+  if (unexpected !== undefined) o.unexpected = unexpected;
+  if (provenance !== undefined) o.provenance = provenance;
   appendLine(file, o);
   return o;
 }
@@ -195,20 +204,19 @@ export function getObservationsForExperiment(taskRoot, taskId, experimentId) {
   return listObservations(taskRoot, taskId).filter((o) => o.experimentId === experimentId);
 }
 
-// -- Compact cognitive state for context --
+// -- Compact state (for context packs) --
 
 export function buildCompactState(taskRoot, taskId) {
   const hypotheses = listHypotheses(taskRoot, taskId);
-  const experiments = listExperiments(taskRoot, taskId);
-  const observations = listObservations(taskRoot, taskId);
-
   return {
     activeHypotheses: hypotheses.filter((h) =>
-      h.status === "proposed" || h.status === "testing" || h.status === "supported"
+      h.status === HYPOTHESIS_STATUS.PROPOSED ||
+      h.status === HYPOTHESIS_STATUS.TESTING
     ),
-    supportedHypotheses: hypotheses.filter((h) => h.status === "supported"),
-    rejectedHypotheses: hypotheses.filter((h) => h.status === "rejected"),
-    recentExperiments: experiments.slice(-5),
-    recentObservations: observations.slice(-5),
+    confirmedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.CONFIRMED),
+    rejectedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.REJECTED),
+    archivedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.ARCHIVED),
+    recentExperiments: listExperiments(taskRoot, taskId).slice(-5),
+    recentObservations: listObservations(taskRoot, taskId).slice(-5),
   };
 }

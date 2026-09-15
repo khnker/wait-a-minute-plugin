@@ -1,13 +1,23 @@
 
-import fs from "node:fs";
-import path from "node:path";
+import {
+  createHypothesis,
+  listHypotheses,
+  updateHypothesisStatus,
+  archiveHypothesis,
+  HYPOTHESIS_STATUS,
+} from "./cognition-store.js";
 
 /**
- * Cognitive State persistence — autoload/autosave for hypotheses,
- * rejected approaches, experiments and critical observations.
+ * Cognitive State facade — delegates to cognition-store.js (single source of truth).
+ *
+ * Mantiene compatibilidad con la API previa (loadCognitiveState, saveCognitiveState,
+ * addActiveHypothesis, rejectHypothesis, recordExperiment, recordObservation,
+ * compactCognitiveState) pero toda persistencia se redirige a
+ * `.wam/tasks/<taskId>/cognition/*.jsonl` vía cognition-store.
+ *
+ * Si el caller no provee taskId, se intenta derivar de la convención:
+ * taskRoot/.wam/tasks/<taskId>/  →  primer taskId encontrado.
  */
-
-const COGNITION_FILE = ".wam/task/cognition.json";
 
 const DEFAULT_STATE = {
   activeHypotheses: [],
@@ -17,59 +27,78 @@ const DEFAULT_STATE = {
   lastUpdated: null,
 };
 
-function ensureDir(filePath) {
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-}
-
-export function loadCognitiveState(taskRoot) {
-  const filePath = path.join(taskRoot, COGNITION_FILE);
-  if (!fs.existsSync(filePath)) return { ...DEFAULT_STATE };
+function resolveTaskId(taskRoot, explicitTaskId) {
+  if (explicitTaskId) return explicitTaskId;
+  // Convención: el primer directorio bajo .wam/tasks/
+  const tasksRoot = `${taskRoot}/.wam/tasks`;
   try {
-    const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    return { ...DEFAULT_STATE, ...data };
+    const entries = require("node:fs").readdirSync(tasksRoot, { withFileTypes: true });
+    const dir = entries.find((e) => e.isDirectory());
+    return dir ? dir.name : "default";
   } catch {
-    return { ...DEFAULT_STATE };
+    return "default";
   }
 }
 
-export function saveCognitiveState(taskRoot, state) {
-  const filePath = path.join(taskRoot, COGNITION_FILE);
-  ensureDir(filePath);
-  const payload = { ...state, lastUpdated: Date.now() };
-  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2));
+function buildStateFromStore(taskRoot, taskId) {
+  const all = listHypotheses(taskRoot, taskId);
+  const active = all.filter((h) =>
+    h.status === HYPOTHESIS_STATUS.PROPOSED || h.status === HYPOTHESIS_STATUS.TESTING
+  );
+  const rejected = all.filter((h) => h.status === HYPOTHESIS_STATUS.REJECTED);
+  const archived = all.filter((h) => h.status === HYPOTHESIS_STATUS.ARCHIVED);
+  const rejectedHypotheses = [...rejected, ...archived];
+  return {
+    activeHypotheses: active,
+    rejectedHypotheses,
+    recentExperiments: [],
+    criticalObservations: [],
+    lastUpdated: Date.now(),
+  };
 }
 
-export function addActiveHypothesis(taskRoot, hypothesis) {
-  const state = loadCognitiveState(taskRoot);
-  state.activeHypotheses.push(hypothesis);
-  saveCognitiveState(taskRoot, state);
+export function loadCognitiveState(taskRoot, taskId) {
+  const tid = resolveTaskId(taskRoot, taskId);
+  return buildStateFromStore(taskRoot, tid);
 }
 
-export function rejectHypothesis(taskRoot, hypothesisId, reason) {
-  const state = loadCognitiveState(taskRoot);
-  const idx = state.activeHypotheses.findIndex((h) => h.id === hypothesisId);
-  if (idx === -1) return;
-  const [h] = state.activeHypotheses.splice(idx, 1);
-  state.rejectedHypotheses.push({ ...h, reason, rejectedAt: Date.now() });
-  saveCognitiveState(taskRoot, state);
+/**
+ * @deprecated La persistencia ahora vive en cognition-store.js.
+ * Esta función queda como no-op para no romper callers que aún la invocan.
+ */
+export function saveCognitiveState(_taskRoot, _state) {
+  // no-op: cognition-store es la única fuente de verdad.
 }
 
-export function recordExperiment(taskRoot, experiment) {
-  const state = loadCognitiveState(taskRoot);
-  state.recentExperiments.push(experiment);
-  if (state.recentExperiments.length > 10) {
-    state.recentExperiments = state.recentExperiments.slice(-10);
-  }
-  saveCognitiveState(taskRoot, state);
+export function addActiveHypothesis(taskRoot, hypothesis, taskId) {
+  const tid = resolveTaskId(taskRoot, taskId);
+  createHypothesis(taskRoot, tid, {
+    statement: hypothesis.statement,
+    confidence: hypothesis.confidence ?? 0.5,
+  });
 }
 
-export function recordObservation(taskRoot, observation) {
-  const state = loadCognitiveState(taskRoot);
-  if (observation.relevance === "high") {
-    state.criticalObservations.push(observation);
-  }
-  saveCognitiveState(taskRoot, state);
+export function rejectHypothesis(taskRoot, hypothesisId, reason, taskId) {
+  const tid = resolveTaskId(taskRoot, taskId);
+  updateHypothesisStatus(taskRoot, tid, hypothesisId, HYPOTHESIS_STATUS.REJECTED);
+  // reason se preserva como entrada archivada para trazabilidad.
+  archiveHypothesis(taskRoot, tid, hypothesisId, reason || "rejected");
+}
+
+/**
+ * @deprecated Los experimentos se persisten vía cognition-store.createExperiment().
+ * Esta función queda como no-op.
+ */
+export function recordExperiment(_taskRoot, _experiment, _taskId) {
+  // no-op
+}
+
+/**
+ * @deprecated Las observaciones se persisten vía cognition-store.recordObservation().
+ * Esta función queda como no-op.
+ */
+export function recordObservation(_taskRoot, _observation, _taskId) {
+  // no-op
 }
 
 /**

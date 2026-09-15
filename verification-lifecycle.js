@@ -12,7 +12,8 @@ const VALID_TRANSITIONS = {
   UNVERIFIED: new Set(["VERIFYING"]),
   VERIFYING: new Set(["VERIFIED", "FAILED"]),
   FAILED: new Set(["VERIFYING"]),
-  VERIFIED: new Set(),
+  VERIFIED: new Set(["INVALIDATED"]),
+  INVALIDATED: new Set(["VERIFYING"]),
 };
 
 export function isValidVerificationState(state) {
