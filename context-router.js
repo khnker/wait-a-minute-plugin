@@ -69,35 +69,30 @@ function nodeTokens(node) {
 }
 
 /**
- * Determine admission class for a node.
+ * Determine admission class for a node based on causal necessity.
  *
- * MANDATORY: Task node, output nodes, direct dependencies of task
- * CONDITIONAL: Evidence, decisions, constraints
- * OPTIONAL: Everything else (subtasks, metadata, etc.)
+ * MANDATORY: Required to continue execution or satisfy completion.
+ * CONDITIONAL: Evidence/Decisions required for verification.
+ * OPTIONAL: Extra context.
  */
 function getAdmissionClass(node, taskNode, graph) {
-  // Task node itself is always MANDATORY
-  if (node.id === taskNode?.id) {
+  // 1. Mandatory: Task/Completion requirements
+  if (node.id === taskNode?.id || node.type === "task" || node.type === "requirement") {
     return ADMISSION.MANDATORY;
   }
 
-  // Output nodes are MANDATORY
-  if (node.type === "output") {
-    return ADMISSION.MANDATORY;
-  }
+  // 2. Mandatory: Execution dependencies
+  // If it's required for the task to proceed, it's MANDATORY
+  const edgesToTask = graph.getEdgesTo(taskNode?.id);
+  const isDirectDep = edgesToTask.some(e => e.from === node.id || e.to === node.id);
+  if (isDirectDep) return ADMISSION.MANDATORY;
 
-  // Direct dependencies of the task (depth 1) are MANDATORY
-  const upstream = graph.getUpstream(node.id, 1);
-  if (upstream.some((n) => n.id === taskNode?.id)) {
-    return ADMISSION.MANDATORY;
-  }
-
-  // Evidence and decisions are CONDITIONAL
-  if (node.type === "evidence" || node.type === "decision") {
+  // 3. Conditional: Evidence/Decisions for verification
+  if (node.type === "evidence" || node.type === "decision" || node.type === "constraint") {
     return ADMISSION.CONDITIONAL;
   }
 
-  // Everything else is OPTIONAL
+  // 4. Everything else is OPTIONAL
   return ADMISSION.OPTIONAL;
 }
 
@@ -138,7 +133,44 @@ function computeRelevance(node, taskNode, graph) {
   return Math.min(score, 2.0);
 }
 
-// -- Main router --
+/**
+ * Get executable requirements based on causal dependencies.
+ */
+export function getExecutableRequirements(graph) {
+  const reqs = graph.getNodes("requirement");
+  const executable = [];
+
+  for (const req of reqs) {
+    if (req.verified || req.status === "done") continue;
+
+    // Traverse upstream to find causal blockers
+    const deps = graph.getUpstream(req.id, 5);
+    const blockers = deps.filter(d => 
+      !d.verified && 
+      (d.type === "requirement" || d.type === "decision" || d.type === "constraint")
+    );
+
+    if (blockers.length === 0) {
+      executable.push({
+        requirementId: req.id,
+        action: req.content,
+        blockers: [],
+        dependencies: deps.map(d => d.id),
+        rationale: "All causal dependencies satisfied"
+      });
+    } else {
+      executable.push({
+        requirementId: req.id,
+        action: req.content,
+        blockers: blockers.map(b => b.id),
+        dependencies: deps.map(d => d.id),
+        rationale: "Blocked by unresolved causal dependencies"
+      });
+    }
+  }
+  // Sort: executable first
+  return executable.sort((a, b) => (a.blockers.length === 0 ? -1 : 1));
+}
 
 /**
  * Resolve minimum sufficient context for a task.

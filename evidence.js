@@ -72,6 +72,45 @@ export function canCloseRequirement(evidence, isCritical = false) {
   return evidence.every(e => e.supports !== false);
 }
 
+export const EVIDENCE_VOLATILITY = {
+  STABLE: "stable",
+  SEMI_STABLE: "semi-stable",
+  VOLATILE: "volatile",
+  HIGHLY_VOLATILE: "highly_volatile"
+};
+
+export function getEvidenceVolatility(type) {
+  const map = {
+    "file_exists": EVIDENCE_VOLATILITY.STABLE,
+    "package_version": EVIDENCE_VOLATILITY.SEMI_STABLE,
+    "process_running": EVIDENCE_VOLATILITY.VOLATILE,
+    "network_response": EVIDENCE_VOLATILITY.HIGHLY_VOLATILE,
+    "test_result": EVIDENCE_VOLATILITY.SEMI_STABLE
+  };
+  return map[type] || EVIDENCE_VOLATILITY.STABLE;
+}
+
+export function detectEvidenceConflict(evidenceA, evidenceB) {
+  if (evidenceA.requirementId !== evidenceB.requirementId) return null;
+  if (evidenceA.supports === evidenceB.supports) return null;
+
+  return {
+    type: "CONFLICT",
+    evidenceA: { id: evidenceA.id, supports: evidenceA.supports },
+    evidenceB: { id: evidenceB.id, supports: evidenceB.supports },
+    resolved: false
+  };
+}
+
+export function resolveEvidenceConflict(conflict, resolution) {
+  return {
+    ...conflict,
+    resolved: true,
+    resolution,
+    resolvedAt: Date.now()
+  };
+}
+
 // Detect conflicts in evidence
 export function findConflicts(evidence) {
   if (!evidence || evidence.length === 0) return [];

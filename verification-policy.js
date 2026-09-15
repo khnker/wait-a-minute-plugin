@@ -30,6 +30,35 @@ export function selectMinimalVerification(gap, availableChecks = []) {
   return { strategy: VERIFICATION_STRATEGY.MANUAL_VALIDATION, check: null };
 }
 
+// Change 28 — Verification-strategy: ordered strategy with cost estimation
+export const VERIFICATION_STRATEGY_ORDER = [
+  VERIFICATION_STRATEGY.EXISTING_TEST,
+  VERIFICATION_STRATEGY.TARGETED_COMMAND,
+  VERIFICATION_STRATEGY.TARGETED_INSPECTION,
+  VERIFICATION_STRATEGY.MINIMAL_REPRODUCTION,
+  VERIFICATION_STRATEGY.BROADER_TEST,
+  VERIFICATION_STRATEGY.MANUAL_VALIDATION
+];
+
+export function rankVerificationStrategies(strategies, context) {
+  // Always prefer cheaper strategies first
+  return strategies
+    .filter(s => VERIFICATION_STRATEGY_ORDER.includes(s))
+    .sort((a, b) => VERIFICATION_STRATEGY_ORDER.indexOf(a) - VERIFICATION_STRATEGY_ORDER.indexOf(b));
+}
+
+export function estimateStrategyCost(strategy) {
+  const costs = {
+    [VERIFICATION_STRATEGY.EXISTING_TEST]: 1,
+    [VERIFICATION_STRATEGY.TARGETED_COMMAND]: 2,
+    [VERIFICATION_STRATEGY.TARGETED_INSPECTION]: 3,
+    [VERIFICATION_STRATEGY.MINIMAL_REPRODUCTION]: 4,
+    [VERIFICATION_STRATEGY.BROADER_TEST]: 5,
+    [VERIFICATION_STRATEGY.MANUAL_VALIDATION]: 10
+  };
+  return costs[strategy] || 10;
+}
+
 // Policy coordination: validate that policy transitions are legal
 export function validatePolicyFlow(currentPolicy, nextPolicy) {
   const validTransitions = {

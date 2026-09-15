@@ -57,6 +57,52 @@ export function createVerificationBudget(overrides = {}) {
   return { ...DEFAULT_VERIFICATION_BUDGET, ...overrides };
 }
 
+// Change 32 — verification-invalidation
+export function createVerificationInvalidation(requirement, reason, relatedEvidence = []) {
+  return {
+    requirementId: requirement.id,
+    previousStatus: requirement.status,
+    newStatus: "UNKNOWN",
+    reason,
+    relatedEvidence: relatedEvidence.map(e => e.id),
+    invalidatedAt: Date.now(),
+    invalidatedBy: "verificationEngine"
+  };
+}
+
+export function checkVerificationDependencies(requirement, currentContext) {
+  const dependencies = requirement.dependencies || [];
+  const changes = [];
+
+  for (const dep of dependencies) {
+    const currentValue = currentContext[dep.key];
+    const previousValue = dep.value;
+
+    if (currentValue !== previousValue) {
+      changes.push({
+        dependency: dep.key,
+        previous: previousValue,
+        current: currentValue
+      });
+    }
+  }
+
+  return {
+    stable: changes.length === 0,
+    changes
+  };
+}
+
+export function shouldInvalidate(requirement, currentContext, stalenessThreshold = 3600000) {
+  if (!requirement.verifiedAt) return false;
+
+  const age = Date.now() - requirement.verifiedAt;
+  if (age > stalenessThreshold) return true;
+
+  const deps = checkVerificationDependencies(requirement, currentContext);
+  return !deps.stable;
+}
+
 export function isBudgetExhausted(budget, usage) {
   return (
     usage.actions >= budget.maxActions ||

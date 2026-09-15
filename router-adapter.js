@@ -9,7 +9,7 @@
  */
 
 import { resolveContext, ADMISSION } from "./context-router.js";
-import { traverseUpstream, computeDependencyClosure } from "./dependency-closure.js";
+import { buildContextGraph } from "./context-graph-builder.js";
 
 /**
  * @typedef {Object} RouterAdapterOptions
@@ -27,6 +27,7 @@ import { traverseUpstream, computeDependencyClosure } from "./dependency-closure
  * @property {Object} contract
  * @property {Object} routerResult - Raw router output
  * @property {string} source - "router" | "fallback"
+ * @property {string} status - "READY" | "EMPTY" | "INSUFFICIENT" | "CONFLICTED" | "ERROR"
  */
 
 /**
@@ -99,6 +100,14 @@ export function adaptRouterResult(routerResult, options = {}) {
 
   const sufficiency = routerResult.sufficient ? "ok" : "insufficient";
 
+  // Map router results to status
+  let status = "READY";
+  if (!routerResult) status = "ERROR";
+  else if (!routerResult.nodes.length) status = "EMPTY";
+  else if (!routerResult.sufficient) status = "INSUFFICIENT";
+  else if (routerResult.budgetOverflow) status = "INSUFFICIENT";
+  else if ((routerResult.omitted || []).some((o) => o.admission === ADMISSION.MANDATORY)) status = "INSUFFICIENT";
+
   return {
     capsules,
     sufficiency,
@@ -106,6 +115,7 @@ export function adaptRouterResult(routerResult, options = {}) {
     contract: { conditions },
     routerResult,
     source: "router",
+    status
   };
 }
 
