@@ -130,21 +130,17 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
   }, taskRoot);
 
   // 2. Recordar observación primero para obtener ID real de observación
-  let observationId;
-  try {
-    const obs = recordObservation(taskRoot, taskId, {
-      experimentId,
-      hypothesisId,
-      result: assessment.result,
-      facts: [evidence.id],
-      actual,
-      unexpected,
-      provenance,
-    });
-    observationId = obs?.id ?? "obs-id-stub";
-  } catch {
-    observationId = "obs-id-stub";
-  }
+  const obs = recordObservation(taskRoot, taskId, {
+    experimentId,
+    hypothesisId,
+    result: assessment.result,
+    facts: [evidence.id],
+    actual,
+    unexpected,
+    provenance,
+  });
+  const observationId = obs?.id;
+  if (!observationId) throw new Error("recordObservation did not return an id");
 
   // 3. Vincular en la cadena causal con el ID real de observación
   if (requirementId) {

@@ -1,4 +1,4 @@
-import { analyze, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog, findDuplicateTask } from "./engine.js";
+import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog, findDuplicateTask } from "./engine.js";
 import { startExperiment, noteSuccess, noteFailure } from "./execution-engine.js";
 import { migrateLegacyCognition } from "./cognition-store.js";
 import { handleMessage } from "./runtime/message-handler.js";
@@ -743,6 +743,14 @@ const WaitAMinutePlugin = async (pluginInput) => {
         await bridgeExecution(input);
       } catch (bridgeError) {
         console.log("[wait-a-minute] Bridge execution non-blocking error:", bridgeError.message);
+      }
+    },
+
+    "tool.execute.after": async (input, output) => {
+      try {
+        await postToolExecution(input, output);
+      } catch (e) {
+        console.log(`[wait-a-minute] tool.execute.after non-blocking error:`, e.message);
       }
     },
   };
