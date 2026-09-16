@@ -1,4 +1,5 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog, findDuplicateTask } from "./engine.js";
+import { startExperiment, noteSuccess, noteFailure } from "./execution-engine.js";
 
 import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext, compactDecisions } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot, migrateLegacyCapsules } from "./context.js";
@@ -508,6 +509,57 @@ const WaitAMinutePlugin = async (pluginInput) => {
     "chat.message": async (input, output) => {
       try {
       if (bypassed) return;
+      const promptText = extractPrompt(input, output);
+      if (!promptText.trim()) return;
+
+      // --- WAIT-A-MINUTE EXECUTION ENGINE INTEGRATION ---
+      // Intercept agent tool executions to record cognitive state in cognition-store
+      // This is passive integration for state preservation, not workflow interference.
+      
+      if (input?.tool && output?.result !== undefined) {
+        const toolName = input.tool;
+        const wamRoot = await ensureWamMemory(input.sessionID, promptText);
+        const taskId = effectiveTaskId(input, sessionTasks, wamRoot);
+        
+        // Log successful agent execution (noteSuccess)
+        // This preserves cognitive trace without blocking or affecting agent behavior
+        try {
+          await noteSuccess(wamRoot, taskId, {
+            hypothesisId: input.hypothesisId,
+            experimentId: input.experimentId,
+            result: output.result,
+            actual: output.actual,
+            unexpected: output.unexpected,
+            provenance: `agent-tool-${toolName}-success`,
+            requirementId: input.requirementId
+          });
+        } catch (e) {
+          // Log failure but don't break the agent workflow
+          console.log(`[wait-a-minute] noteSuccess integration error:`, e.message);
+        }
+      }
+      
+      if (input?.tool && output?.error) {
+        const toolName = input.tool;
+        const wamRoot = await ensureWamMemory(input.sessionID, promptText);
+        const taskId = effectiveTaskId(input, sessionTasks, wamRoot);
+        
+        // Log agent tool execution failure (noteFailure)
+        // This preserves cognitive trace for failed attempts
+        try {
+          await noteFailure(wamRoot, taskId, {
+            hypothesisId: input.hypothesisId,
+            experimentId: input.experimentId,
+            reason: output.error || "tool execution failed",
+            actual: output.actual,
+            unexpected: output.unexpected,
+            provenance: `agent-tool-${toolName}-failure`
+          });
+        } catch (e) {
+          console.log(`[wait-a-minute] noteFailure integration error:`, e.message);
+        }
+      }
+      }
 
       const promptText = extractPrompt(input, output);
       if (!promptText.trim()) return;

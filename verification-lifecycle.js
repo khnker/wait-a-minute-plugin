@@ -6,7 +6,7 @@
  * Evidence: method (test/lint/build/other), result (pass/fail), details
  */
 
-const VERIFICATION_STATES = new Set(["UNVERIFIED", "VERIFYING", "VERIFIED", "FAILED"]);
+const VERIFICATION_STATES = new Set(["UNVERIFIED", "VERIFYING", "VERIFIED", "FAILED", "INVALIDATED"]);
 
 const VALID_TRANSITIONS = {
   UNVERIFIED: new Set(["VERIFYING"]),
