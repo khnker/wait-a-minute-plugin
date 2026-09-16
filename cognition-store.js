@@ -41,6 +41,28 @@ export const EXPERIMENT_STATUS = Object.freeze({
   FAILED: "FAILED",
 });
 
+export function migrateLegacyCognition(taskRoot, taskId) {
+  const legacyFile = path.join(taskRoot, ".wam", "tasks", taskId, "cognition.json");
+  if (!fs.existsSync(legacyFile)) return false;
+
+  const data = JSON.parse(fs.readFileSync(legacyFile, "utf-8"));
+  const dir = cognitionRoot(taskRoot, taskId);
+  ensureDir(dir);
+
+  if (data.hypotheses) {
+    data.hypotheses.forEach(h => appendLine(path.join(dir, FILES.hypotheses), h));
+  }
+  if (data.experiments) {
+    data.experiments.forEach(e => appendLine(path.join(dir, FILES.experiments), e));
+  }
+  if (data.observations) {
+    data.observations.forEach(o => appendLine(path.join(dir, FILES.observations), o));
+  }
+
+  fs.unlinkSync(legacyFile);
+  return true;
+}
+
 export function archiveHypothesis(taskRoot, taskId, hypothesisId, reason = "archived") {
   const dir = cognitionRoot(taskRoot, taskId);
   const file = path.join(dir, FILES.hypotheses);

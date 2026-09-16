@@ -1,5 +1,6 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog, findDuplicateTask } from "./engine.js";
 import { startExperiment, noteSuccess, noteFailure } from "./execution-engine.js";
+import { migrateLegacyCognition } from "./cognition-store.js";
 
 import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext, compactDecisions } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot, migrateLegacyCapsules } from "./context.js";
@@ -521,7 +522,11 @@ const WaitAMinutePlugin = async (pluginInput) => {
         const wamRoot = await ensureWamMemory(input.sessionID, promptText);
         const taskId = effectiveTaskId(input, sessionTasks, wamRoot);
         
+        // Ensure legacy cognition is migrated before any operations
+        try { migrateLegacyCognition(wamRoot, taskId); } catch (e) { console.log(`[wait-a-minute] migration error:`, e.message); }
+
         // Log successful agent execution (noteSuccess)
+
         // This preserves cognitive trace without blocking or affecting agent behavior
         try {
           await noteSuccess(wamRoot, taskId, {
