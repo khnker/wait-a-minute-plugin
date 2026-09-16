@@ -12,6 +12,15 @@ const os = await import("node:os");
 import { logger } from "./logger.js";
 const tmpdir = os.tmpdir();
 
+// Pre-flight modules (facade)
+import { classifyRequest } from "./preflight/request-classifier.js";
+import { detectStack } from "./preflight/project-inspector.js";
+import { classifyUncertainty, buildUncertainties, buildAssumptions } from "./preflight/uncertainty.js";
+import { discoverSkills } from "./preflight/skill-routing.js";
+
+// Re-export for backward compatibility
+export { classifyRequest, detectStack, classifyUncertainty, buildUncertainties, buildAssumptions, discoverSkills };
+
 
 // -- Caveman compression (terse, para headroom de contexto) ----------------
 
@@ -231,53 +240,7 @@ function getDependencies(pkgJson) {
   };
 }
 
-/**
- * Detecta el stack tecnológico del proyecto
- */
-function detectStack(projectPath) {
-  const signals = [];
 
-  if (!fileExists(path.join(projectPath, "package.json"))) {
-    return { stack: "unknown", languages: [] };
-  }
-
-  const pkg = getPackageJson(projectPath);
-  if (!pkg) return { stack: "unknown", languages: [] };
-
-  const deps = getDependencies(pkg);
-  const languages = [];
-
-  // Node/TypeScript/JavaScript
-  if (deps.typescript || deps.ts) languages.push("typescript");
-  if (deps.vue || deps["vue-template-compiler"]) languages.push("vue");
-  if (deps.react || deps["react-dom"]) languages.push("react");
-  if (deps.svelte) languages.push("svelte");
-
-  // Python
-  if (deps.flask || deps.django) {
-    languages.push("python");
-  }
-
-  // Go
-  if (deps.go || deps["go.mod"]) languages.push("go");
-
-  // Rust
-  if (deps.rust || deps["Cargo.toml"]) languages.push("rust");
-
-  // Java
-  if (deps.java || deps["javax"]) languages.push("java");
-
-  // PHP
-  if (deps.laravel || deps.symfony || deps.woocommerce) languages.push("php");
-
-  // Ruby
-  if (deps.ruby || deps["rake"]) languages.push("ruby");
-
-  // Determine primary stack
-  const primary = languages.length > 0 ? languages[0] : "other";
-
-  return { stack: primary, languages };
-}
 
 /**
  * Obtiene la configuración de OpenCode (agents.md equivalents)
@@ -305,40 +268,6 @@ function getOpenCodeConfig(projectPath) {
 /**
  * Busca skills relevantes en las directories conocidas
  */
-function discoverSkills() {
-  const skillDirs = [
-    "/home/nicolas/.config/opencode/skills",
-    "/home/nicolas/.config/opencode/.skills",
-    "/home/nicolas/.claude/skills",
-    "/home/nicolas/.agents/skills",
-    "/home/nicolas/.opencode/skills",
-  ];
-
-  const candidates = {};
-
-  for (const skillDir of skillDirs) {
-    if (!fileExists(skillDir)) continue;
-
-    const entries = fs.readdirSync(skillDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const skillPath = path.join(skillDir, entry.name, "SKILL.md");
-      if (fileExists(skillPath)) {
-        // Avoid duplicates
-        if (!candidates[entry.name]) {
-          candidates[entry.name] = {
-            name: entry.name,
-            path: skillPath,
-            dir: skillDir,
-          };
-        }
-      }
-    }
-  }
-
-  return candidates;
-}
-
 // ---------------------------------------------------------------------------
 // PERSISTENT POLICIES — reglas transversales del Policy Engine.
 // Siempre aplicables. NO son skills; no requieren carga bajo demanda.
@@ -966,85 +895,7 @@ export function loadSkillOnDemand(skillId, registry, baseDir) {
   };
 }
 
-/**
- * Clasifica la petición del usuario
- */
-function classifyRequest(prompt) {
-  const lower = prompt.toLowerCase();
 
-  // Trivial patterns - bypass wait-a-minute
-  const trivialPatterns = [
-    /^\s*rename\s+/i,
-    /^\s*renombra\s+/i,
-    /^\s*cambia\s+\w+/i,
-    /^\s*change\s+\w+/i,
-    /^\s*what(is|are)\s+/i,
-    /^\s*qué\s+es\s+/i,
-    /^\s*que\s+es\s+/i,
-    /^\s*explain\s+/i,
-    /^\s*explica\s+/i,
-    /^\s*how\s+to\s+/i,
-    /^\s*cómo\s+/i,
-    /^\s*como\s+hago\s+/i,
-    /^\s*list\s+/i,
-    /^\s*lista\s+/i,
-    /^\s*listar\s+/i,
-    /^\s*show\s+/i,
-    /^\s*muestra\s+/i,
-    /^\s*get\s+\w+/i,
-  ];
-
-  for (const pattern of trivialPatterns) {
-    if (pattern.test(prompt)) {
-      return { type: "trivial", ambiguity: "low", confidence: 95 };
-    }
-  }
-
-  // Architecture/security/high-risk patterns -> STRICT
-  const strictPatterns = [
-    /(migra|migrate)/i,
-    /(seguridad|security)/i,
-    /(arquitectura|architecture)/i,
-    /(provee(?:r|ndase)|provide)/i,
-    /(alto impacto|high impact)/i,
-    /(producción|production)/i,
-    /(destructivo|destructive)/i,
-  ];
-
-  let strictMatch = null;
-  for (const pattern of strictPatterns) {
-    if (pattern.test(prompt)) {
-      strictMatch = pattern;
-      break;
-    }
-  }
-
-  if (strictMatch) {
-    return {
-      type: "architectural",
-      ambiguity: "medium",
-      confidence: 60,
-      mode: "STRICT",
-    };
-  }
-
-  // Research/exploration patterns
-  const researchPatterns = [
-    /(buscar|research)/i,
-    /(comparar|compare)/i,
-    /(opciones|options)/i,
-    /(alternativas|alternatives)/i,
-  ];
-
-  for (const pattern of researchPatterns) {
-    if (pattern.test(prompt)) {
-      return { type: "research", ambiguity: "medium", confidence: 70 };
-    }
-  }
-
-  // Default: normal ambiguity
-  return { type: "normal", ambiguity: "medium", confidence: 50 };
-}
 
 /**
  * Inspecciona el proyecto para Known/Inferred/Assumed/Unknown
@@ -1295,47 +1146,6 @@ function determineMode(classification, projectInfo, riskLevel) {
 /**
  * Main analysis function - entry point for the plugin
  */
-/**
- * Clasifica una incertidumbre/supuesto en DECISION_CRITICAL | RESOLVABLE | NON_BLOCKING.
- * Rule-based, determinista (sin LLM). Prioridad de seguridad: critical > resolvable > non-blocking.
- */
-export function classifyUncertainty(item = "") {
-  const text = String(item);
-  const CRITICAL = [
-    /migra|migrate|migraci[oó]n|refresh.?token|rotar|dele|destructiv|borr|elim|data loss|p[ée]rdida de datos/i,
-    /seguridad|security|auth|oauth|token|api.?key|secret|password/i,
-    /schema|esquema|api contract|formato de respuesta|response shape|compatibil/i,
-    /arquitectura|architecture|scope|alcance|comportamiento|behavior|user.?visible|aceptaci[oó]n/i,
-  ];
-  const RESOLVABLE = [
-    /c[oó]mo se maneja|c[oó]mo funciona|c[oó]mo est[áa]|existe|hay |d[oó]nde est|qu[ée] herramienta|formato de|qu[ée] framework|qu[ée] versi[oó]n|config|tests?|documentaci[oó]n|endpoint existente|api existente/i,
-  ];
-  if (CRITICAL.some((p) => p.test(text))) return "DECISION_CRITICAL";
-  if (RESOLVABLE.some((p) => p.test(text))) return "RESOLVABLE";
-  return "NON_BLOCKING";
-}
-
-/** Convierte assumed/unknown del pre-flight en uncertainties clasificadas. */
-export function buildUncertainties(assumed = [], unknown = []) {
-  const seen = new Set();
-  const uncertainties = [];
-  const entries = [
-    ...(assumed || []).map((a) => ({ kind: "ASSUMED", text: String(a) })),
-    ...(unknown || []).map((u) => ({ kind: "UNKNOWN", text: String(u) })),
-  ];
-  for (const { kind, text } of entries) {
-    if (!text || seen.has(text)) continue;
-    seen.add(text);
-    uncertainties.push({
-      id: `U${uncertainties.length + 1}`,
-      question: text,
-      kind,
-      classification: classifyUncertainty(text),
-      status: "active",
-    });
-  }
-  return uncertainties;
-}
 
 /**
  * Detecta incertidumbres DECISION_CRITICAL expresadas en el prompt mismo,
@@ -1375,31 +1185,11 @@ const ASSUMPTION_IMPACT =
  */
 export function classifyAssumption(statement = "") {
   return ASSUMPTION_IMPACT.test(statement) ? "DECISION_CRITICAL" : "NON_BLOCKING";
-}
-
-/**
+}/**
  * Convierte asunciones textuales del análisis en objetos de estado
  * {id, statement, classification, status} (spec assumption-gate R1).
  */
-export function buildAssumptions(assumed = []) {
-  const seen = new Set();
-  const out = [];
-  for (const s of assumed || []) {
-    if (!s || typeof s !== "string") continue;
-    if (seen.has(s)) continue;
-    seen.add(s);
-    out.push({
-      id: `A${out.length + 1}`,
-      statement: s,
-      classification: classifyAssumption(s),
-      status: "active",
-    });
-  }
-  return out;
-}
-
 /**
- * Escala asunciones activas NON_BLOCKING que tocan impacto material →
  * DECISION_CRITICAL/blocking, y las mirroriza a contract.unknowns (blocking,
  * con assumptionId) para reutilizar la fase ASKING (spec R2/R3).
  */

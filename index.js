@@ -1,6 +1,7 @@
 import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog, findDuplicateTask } from "./engine.js";
 import { startExperiment, noteSuccess, noteFailure } from "./execution-engine.js";
 import { migrateLegacyCognition } from "./cognition-store.js";
+import { handleMessage } from "./runtime/message-handler.js";
 
 import { initMemory, updateProjectMemo, summarizeOperationalContext, updateContext, getOperationalContext, updateTaskMemory, addRecentChange, recordDecision, getDecision, updateLiveContext, compactDecisions } from "./memory.js";
 import { getSessionId, listCapsules, getCapsule, promoteCapsule, selectContext, retrieveContext, closeSession, resolveWamRoot, migrateLegacyCapsules } from "./context.js";
@@ -506,434 +507,52 @@ const WaitAMinutePlugin = async (pluginInput) => {
     // NOT via a plugin config hook (removed: plugin config hook mutated config and
     // is incompatible with opencode 1.18.26+, causing `N.config` TypeError).
 
-    // Chat message hook — Persistence & Progress Gate
-    "chat.message": async (input, output) => {
-      try {
-      if (bypassed) return;
-      const promptText = extractPrompt(input, output);
-      if (!promptText.trim()) return;
-
-      // --- WAIT-A-MINUTE EXECUTION ENGINE INTEGRATION ---
-      // Intercept agent tool executions to record cognitive state in cognition-store
-      // This is passive integration for state preservation, not workflow interference.
-      
-      if (input?.tool && output?.result !== undefined) {
-        const toolName = input.tool;
-        const wamRoot = await ensureWamMemory(input.sessionID, promptText);
-        const taskId = effectiveTaskId(input, sessionTasks, wamRoot);
-        
-        // Ensure legacy cognition is migrated before any operations
-        try { migrateLegacyCognition(wamRoot, taskId); } catch (e) { console.log(`[wait-a-minute] migration error:`, e.message); }
-
-        // Log successful agent execution (noteSuccess)
-
-        // This preserves cognitive trace without blocking or affecting agent behavior
-        try {
-          await noteSuccess(wamRoot, taskId, {
-            hypothesisId: input.hypothesisId,
-            experimentId: input.experimentId,
-            result: output.result,
-            actual: output.actual,
-            unexpected: output.unexpected,
-            provenance: `agent-tool-${toolName}-success`,
-            requirementId: input.requirementId
-          });
-        } catch (e) {
-          // Log failure but don't break the agent workflow
-          console.log(`[wait-a-minute] noteSuccess integration error:`, e.message);
-        }
-      }
-      
-      if (input?.tool && output?.error) {
-        const toolName = input.tool;
-        const wamRoot = await ensureWamMemory(input.sessionID, promptText);
-        const taskId = effectiveTaskId(input, sessionTasks, wamRoot);
-        
-        // Log agent tool execution failure (noteFailure)
-        // This preserves cognitive trace for failed attempts
-        try {
-          await noteFailure(wamRoot, taskId, {
-            hypothesisId: input.hypothesisId,
-            experimentId: input.experimentId,
-            reason: output.error || "tool execution failed",
-            actual: output.actual,
-            unexpected: output.unexpected,
-            provenance: `agent-tool-${toolName}-failure`
-          });
-        } catch (e) {
-          console.log(`[wait-a-minute] noteFailure integration error:`, e.message);
-        }
-      }
-
-      const promptText = extractPrompt(input, output);
-      if (!promptText.trim()) return;
-
-      // Al iniciar/retomar sesión: memoria .wam garantizada en el repo git de
-      // la sesión real (no el cwd del server). initMemory idempotente.
-      const wamRoot = await ensureWamMemory(input.sessionID, promptText);
-
-      // No-task-assumption: intención de resume sin tarea activa → preguntar, no asumir
-      const RESUME_RE = /\b(en qué estábamos|en que estabamos|dónde íbamos|donde íbamos|sigamos|continuemos|retomar la tarea)\b/i;
-      if (!input.taskId && RESUME_RE.test(promptText)) {
-        const active = sessionTasks.get(input.sessionID) || readActiveTaskIdFresh(wamRoot);
-        const st = active ? getTaskState(active, wamRoot) : null;
-        if (st && st.phase !== "DONE") {
-          emitTextPart(output, `[wait-a-minute] Hay una tarea pendiente: ${active} (fase ${st.phase}). ¿Quieres continuarla? Responde /wam resume ${active} o define una tarea nueva — no asumo intención.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-        } else {
-          emitTextPart(output, "[wait-a-minute] No hay tarea activa. Dime qué tarea nueva quieres — no asumo intención previa.", { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-        }
-        return;
-      }
-
-      // Persistencia por sesión: N sesiones sobre la misma carpeta → cada una
-      // con su propia tarea (namespace ses-<sessionID> si el taskId es genérico).
-      let taskId = effectiveTaskId(input, sessionTasks, wamRoot);
-      if (input.sessionID) sessionTasks.set(input.sessionID, taskId);
-
-      // Clarification Gate (spec clarification-gate): en ASKING el mensaje se
-      // clasifica — respuesta natural, intento de implementación o cambio de tarea.
-      const askingState = getTaskState(taskId, wamRoot);
-      if (askingState?.phase === "ASKING") {
-        const trimmed = promptText.trim();
-        if (/^(answer|resolve|contract|progress|task|skills|assumptions|compress)\b/.test(trimmed)) return; // lo maneja command.execute.before
-        const kind = classifyAskingMessage(promptText);
-        if (kind === "blocked-message") {
-          // AC5 + AC11: un intento de implementar o un claim de DONE NO se consume
-          // como respuesta — se intercepta y se re-emite la pregunta bloqueante.
-          const u = (askingState.contract?.unknowns || []).find((x) => x.status === "blocking");
-          const directive = `⛔ [wait-a-minute] BLOQUEADO: Pregunta pendiente ${u?.id || "U1"}: ${u?.question || "decisión crítica sin resolver"}\nNo implementar. Responder: /wam answer ${u?.id || "U1"} <respuesta>`;
-          const srcParts = input?.message?.parts || input?.parts;
-          if (srcParts && srcParts.length > 0) {
-            const tp = srcParts.find((p) => p.type === "text" && typeof p.text === "string");
-            if (tp) tp.text = directive;
-          } else if (input && typeof input.text === "string") {
-            input.text = directive;
-          }
-          emitTextPart(output, directive, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-          return;
-        }
-        if (kind === "new-intent") {
-          // E2E-06: el usuario cambia de tarea → la anterior queda persistida sin
-          // contaminar; el mensaje corre como nuevo pre-flight (nueva tarea).
-          try { fs.rmSync(path.join(wamRoot, ".wam", "active-task"), { force: true }); } catch {}
-          taskId = `task-${Date.now()}`;
-          input.taskId = taskId;
-        } else {
-          const resolved = waitAMinute.answerFromMessage(taskId, promptText, wamRoot);
-          if (resolved.ok) {
-            emitTextPart(
-              output,
-              `✓ [wait-a-minute] question answered — ${resolved.u.id}: "${resolved.u.answer}"\n✓ assumption resolved\n✓ contract updated — fase ${resolved.phase}\nReady → Proceed.`,
-              { sessionID: input.sessionID, messageID: output.message?.id || input.messageID }
-            );
-          } else {
-            const u = (askingState.contract?.unknowns || []).find((x) => x.status === "blocking");
-            emitTextPart(
-              output,
-              `⛔ [wait-a-minute] ASKING — ${u?.id || "U1"}: ${u?.question || "pregunta pendiente"}\nNo implementar hasta responder. Responder: /wam answer ${u?.id || "U1"} <respuesta>`,
-              { sessionID: input.sessionID, messageID: output.message?.id || input.messageID }
-            );
-          }
-          return;
-        }
-      }
-
-      // -----------------------------------------------------------------------
-      // Project Scope: detectar cambio de proyecto → nuevo task
-      // -----------------------------------------------------------------------
-      // Si el task existente pertenece a un proyecto diferente, backlog automático
-      // y nuevo task. ANTES del continuation fast-path para que no se salte.
-      const existingState = getTaskState(taskId, wamRoot);
-      if (existingState?.projectPath && existingState.projectPath !== wamRoot) {
-        // El task pertenece a otro proyecto → backlog automático
-        waitAMinute.addToBacklog(
-          existingState,
-          `Task ${taskId}: ${existingState.contract?.requirements?.map((r) => r.title).join("; ") || "sin reqs"}`,
-          "project-switch"
-        );
-        persistTaskState(taskId, existingState, wamRoot);
-        // Crear nuevo task para este proyecto
-        try { fs.rmSync(path.join(wamRoot, ".wam", "active-task"), { force: true }); } catch {}
-        taskId = `task-${Date.now()}`;
-        input.taskId = taskId;
-        // Continuar al analyze() con el nuevo taskId — NO retornar
-      }
-
-      // Continuation fast-path: contrato aprobado + sin claim de DONE →
-      // verificar si el contexto sigue siendo válido antes de reutilizar.
-      if (existingState?.contract?.status === "APPROVED") {
-        const claim = waitAMinute.evaluateCompletionGate(existingState, promptText);
-        if (!claim.blocked && !claim.allDone) {
-          // Snapshot check: ¿el contexto anterior sigue siendo válido?
-          const snapshotCheck = checkContinuation(taskId, existingState, wamRoot);
-
-          if (snapshotCheck.status === "VALID") {
-            // Fast-path: sin cambios → inyectar solo N2
-            input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
-            try {
-              updateProjectMemo({}, wamRoot);
-            } catch {}
-            try {
-              persistLiveContext(taskId, existingState, wamRoot);
-              const live = readLiveContext(wamRoot, taskId);
-              if (live) {
-                const parts = [`[wam N2 task]\n${live}\n`];
-                parts.push(...delegationLines(existingState).map((l) => l + "\n"));
-                emitTextPart(output, parts.join("\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-              }
-            } catch {}
-            return;
-          }
-
-          // STALE/INVALID: contexto obsoleto → rebuild parcial o completo
-          const scope = rebuildScope(snapshotCheck.changedSignals);
-          if (scope.rebuildN1 || scope.rebuildN3) {
-            // Rebuild parcial: mantener N2, reconstruir N1/N3
-            input.waitAnalysis = sessionStore.get("waitAnalysis") || null;
-            try {
-              updateProjectMemo({}, wamRoot);
-            } catch {}
-            try {
-              persistLiveContext(taskId, existingState, wamRoot);
-              const live = readLiveContext(wamRoot, taskId);
-              if (live) {
-                const parts = [
-                  `[wam continuation] Contexto reconstruido (${snapshotCheck.changedSignals.join(", ")})`,
-                  `[wam N2 task]\n${live}\n`,
-                ];
-                parts.push(...delegationLines(existingState).map((l) => l + "\n"));
-                emitTextPart(output, parts.join("\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-              }
-            } catch {}
-            return;
-          }
-          // INVALID: rebuild completo → caer al flujo normal de analyze()
-        }
-      }
-
-      const analysis = await waitAMinute.analyze({
-        prompt: promptText,
-        projectPath: wamRoot,
-        config: cfg,
-        tierCaps: cfg.tierCaps,
-        activePreset: cfg.activePreset,
-        activeMode: cfg.activeMode,
-      });
-
-      const state = waitAMinute.buildPersistedState(taskId, analysis, wamRoot);
-      state.lastAction = promptText;
-
-      // Task Dedup: check if an active task with the same summary already exists.
-      // This prevents infinite loops where the same task is re-created repeatedly.
-      const existingTaskId = findDuplicateTask(promptText, wamRoot);
-      if (existingTaskId && existingTaskId !== taskId) {
-        console.log(`[wait-a-minute] Duplicate task detected: "${existingTaskId}" matches current prompt. Reusing existing task.`);
-        taskId = existingTaskId;
-        if (input.sessionID) sessionTasks.set(input.sessionID, taskId);
-        const existingState = getTaskState(taskId, wamRoot);
-        if (existingState) {
-          emitTextPart(output, `[wait-a-minute] Tarea existente detectada: ${taskId} (fase ${existingState.phase}). Continuando con la tarea existente.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-          return;
-        }
-      }
-
-      // Assumption Gate (spec change 3): escalar asunciones con impacto material
-      // → DECISION_CRITICAL/blocking + mirror a unknowns → ASKING (sin ejecución).
-      try {
-        const { changed } = escalateAssumptions(state, promptText);
-        if (changed) persistTaskState(taskId, state, wamRoot);
-      } catch (err) {
-        console.error("[wait-a-minute] escalate assumptions failed:", err);
-      }
-
-      sessionStore.set("waitAnalysis", analysis);
-      sessionStore.set("completionContract", state.contract);
-      sessionStore.set("persistentPolicies", analysis.persistentPolicies || []);
-      sessionStore.set("skillRegistry", analysis.skillRegistry || {});
-      persistTaskState(taskId, state, wamRoot);
-
-      // Blocking Questions: DECISION_CRITICAL sin responder → ASKING, preguntar, no ejecutar.
-      const blockingUnknowns = (state.contract?.unknowns || []).filter((u) => u.status === "blocking");
-
-      // Check for previously decided actions to skip questions
-      const finalQuestions = blockingUnknowns.filter(u => {
-        const decision = getDecision(u.id, wamRoot);
-        if (decision) {
-          console.log(`[wait-a-minute] Found existing decision for ${u.id}: ${decision.decision}`);
-          return false;
-        }
-        return true;
-      });
-
-      if (finalQuestions.length > 0 && state.phase !== "ANSWERED") {
-        state.phase = "ASKING";
-        state.nextAction = "Responder pregunta bloqueante antes de ejecutar";
-        persistTaskState(taskId, state, wamRoot);
-        const questions = [];
-        for (const u of finalQuestions) {
-          questions.push(`⛔ [wait-a-minute] ASKING — ${u.id}: ${u.question}\nNo implementar hasta responder. Responder: /wam answer ${u.id} <respuesta>`);
-        }
-        emitTextPart(output, questions.join("\n\n"), { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-        return;
-      }
-
-      // Aprobación: automática solo si NO hay incertidumbre. Si la hay, se
-      // presenta el contrato y se pide confirmación (flujo humano en el loop).
-      // Incertidumbre = ambigüedad alta, confianza de intención baja, o
-      // unknowns abiertos sin responder (los blocking ya fueron ASKING).
-      const intentConf = Number(analysis.intent?.confidence ?? analysis.intent?.conf ?? 100);
-      const openUnknowns = (state.contract?.unknowns || []).filter((u) => u.status !== "answered" && u.status !== "blocking");
-      const highUncertainty =
-        (analysis.ambiguity || "low") === "high" ||
-        intentConf < 60 ||
-        openUnknowns.length > 0;
-      // Confirmación natural del usuario ante el contrato presentado (sin /wam)
-      const trimmed = promptText.trim();
-      const userConfirms =
-        !highUncertainty ||
-        /^(s[ií]|ok|okey|dale|hazlo|adelante|continuar|continua|aprobar|confirmo|correcto|perfecto|bueno|va|listo|sigue)\b/i.test(trimmed) ||
-        trimmed.includes("aprobar contrato");
-
-      if (state.contract?.status === "PROPOSED" && state.phase === "PROPOSED" && userConfirms) {
-        waitAMinute.approveContract(taskId, wamRoot);
-        try {
-          recordDecision({
-            id: `strategy-${taskId}-${Date.now()}`,
-            decision: `Aprobar estrategia ${analysis.strategy || "NORMAL"} para ${taskId}`,
-            reason: promptText.slice(0, 120),
-            source: highUncertainty ? "user-decided" : "observed",
-            confidence: "high",
-          }, wamRoot);
-          // Periodic compaction: clean blank lines from decisions.md
-          try { compactDecisions(wamRoot); } catch {}
-        } catch {}
-        const fresh = getTaskState(taskId, wamRoot);
-        if (fresh) {
-          state.contract = fresh.contract;
-          state.phase = fresh.phase;
-          state.nextAction = fresh.nextAction;
-        }
-      }
-
-      const gate = applyCompletionGate(state, promptText, taskId, waitAMinute, persistTaskState, nextActionFrom, wamRoot);
-      const updatedState = getTaskState(taskId, wamRoot);
-
-      // Contexto vivo: snapshot de la tarea activa (global + copia por sesión)
-      try {
-        persistLiveContext(taskId, updatedState, wamRoot);
-      } catch {}
-
-      const inject = prepareSystemInject(analysis, updatedState, cfg, wamRoot, waitAMinute, taskId, emitTextPart, input, output);
-
-      // Context Assembly Layer: paquete formal N0-N4 por tarea (ni más ni menos)
-      try {
-        initMemory(wamRoot);
-        updateProjectMemo(analysis, wamRoot);
-        const pack = assembleContext({
-          prompt: promptText,
-          taskId,
-          classification: analysis.intent?.classification,
-          mode: analysis.strategy,
-          projectPath: wamRoot,
-          budget: cfg.contextBudget || 4000,
-          taskState: updatedState,
-          skillRegistry: waitAMinute.loadBundledRegistry(),
-          selectedSkills: analysis.skills?.selected || [],
-        });
-        if (pack.lines.length) {
-          inject.push(pack.lines.join("\n") + `\n[wam pack ${pack.budget_used}/${pack.budget} tok ${pack.levels.N0 ? "N0" : ""}${pack.levels.N1 ? "+N1" : ""}${pack.levels.N2 ? "+N2" : ""}${pack.levels.N3 ? "+N3" : ""}${pack.levels.N4 ? "+N4" : ""}]`);
-        }
-        // Snapshot: guardar estado del contexto para detectar cambios en continuaciones
-        try {
-          createSnapshot(taskId, updatedState, wamRoot);
-        } catch {}
-      } catch {}
-
-      if (gate.blocked) {
-        const maxGateReqs = 5;
-        const pendingItems = gate.pending || [];
-        const visiblePending = pendingItems.slice(0, maxGateReqs);
-        const overflowPending = pendingItems.length - maxGateReqs;
-        const pendingList = visiblePending.length > 0
-          ? "\n  Requisitos pendientes:\n    " + visiblePending.map((p) => `- ${truncate(p, 150)}`).join("\n    ") + (overflowPending > 0 ? `\n    ...(+${overflowPending} más)` : "") + "\n"
-          : "";
-        const gateHold = `⛔ [wait-a-minute] COMPLETION GATE: faltan ${gate.pending.length} requisito(s). No declare DONE.${pendingList} Continuar con: ${updatedState.nextAction}`;
-        emitTextPart(output, gateHold, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-        if (input?.parts && input.parts.length > 0) {
-          const tp = input.parts.find((p) => p.type === "text" && typeof p.text === "string");
-          if (tp) tp.text = gateHold;
-        }
-      } else if (gate.allDone) {
-        updateTaskMemory(taskId, {
-          summary: [
-            "# Task Summary",
-            "",
-            "## Objective",
-            `- ${taskId} (${analysis.intent?.classification || "task"})`,
-            "",
-            "## Completed",
-            ...(updatedState.contract?.requirements || []).map((r) => `- ${r}`),
-            "",
-            "## Verification",
-            ...(updatedState.requirements || []).map((r) => `- ${r.id}: ${r.status}`),
-            "",
-            "## Status",
-            "COMPLETED",
-          ].join("\n"),
-        }, wamRoot);
-        addRecentChange({
-          date: new Date().toISOString().slice(0, 10),
-          scope: taskId,
-          changes: updatedState.contract?.requirements || [],
-          verification: `requisitos completos: ${(updatedState.requirements || []).length}`,
-        }, wamRoot);
-        // Compresión automática en DONE: memoria terse para continuidad futura
-        writeCavemanSummary(taskId, updatedState, wamRoot, [
-          "completed:",
-          ...(updatedState.contract?.requirements || []).map((r) => `- ${r}`),
-          "verification:",
-          ...(updatedState.requirements || []).map((r) => `- ${r.id}: ${r.status}`),
-        ].join("\n"));
-        try {
-          closeSession({
-            sessionId: getSessionId(wamRoot),
-            taskId,
-            summary: (updatedState.contract?.requirements || []).join("; "),
-            candidates: (updatedState.requirements || []).map((r) => ({ id: r.id, title: r.title, evidence: r.evidence || [] })),
-          }, wamRoot);
-        } catch {}
-      }
-
-      // Delegación visible cuando el contrato está APPROVED con reqs pendientes
-      // (la directiva de fan-out paralelo via Task + bloqueo de mutación directa)
-      if (updatedState.contract?.status === "APPROVED") {
-        inject.push(...delegationLines(updatedState));
-      }
-
-      if (inject.length > 0) {
-        emitTextPart(output, inject.join("\n") + "\n", { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-      }
-
-      // Incertidumbre sin confirmar → presentar contrato y pedir aprobación
-      // (el usuario confirma con "sí/ok/dale/continuar..." — sin comandos).
-      if (updatedState.contract?.status !== "APPROVED" && updatedState.phase !== "DONE") {
-        waitAMinute.presentValidation({
-          analysis: {
-            ...analysis,
-            contractStatus: updatedState.contract.status,
-            phase: updatedState.phase,
-            completionContract: updatedState.contract,
-          },
-          ctx: output,
-          meta: { sessionID: input.sessionID, messageID: output.message?.id || input.messageID },
-        });
-      }
-
-      input.waitAnalysis = analysis;
-    } catch (err) {
-      console.error("[wait-a-minute] Pre-flight analysis failed:", err);
-    }
-  },
+    // Chat message hook — Persistence & Progress Gate.
+    // Slim adapter: delegates message processing to runtime/message-handler.js.
+    "chat.message": (input, output) =>
+      handleMessage(input, output, {
+        bypassed,
+        sessionTasks,
+        sessionStore,
+        cfg,
+        resolveSessionBase,
+        wamRootFor,
+        ensureWamMemory,
+        effectiveTaskId,
+        genPartId,
+        emitTextPart,
+        readActiveTaskIdFresh,
+        writeActiveTaskId,
+        waitAMinute,
+        migrateLegacyCognition,
+        noteSuccess,
+        noteFailure,
+        getTaskState,
+        persistTaskState,
+        findDuplicateTask,
+        escalateAssumptions,
+        buildAssumptions,
+        initMemory,
+        updateProjectMemo,
+        updateLiveContext,
+        readLiveContext,
+        persistLiveContext,
+        assembleContext,
+        createSnapshot,
+        checkContinuation,
+        rebuildScope,
+        getDecision,
+        recordDecision,
+        compactDecisions,
+        writeCavemanSummary,
+        truncate,
+        delegationLines,
+        updateTaskMemory,
+        addRecentChange,
+        closeSession,
+        getSessionId,
+        classifyAskingMessage,
+      }),
 
     // Handle /wam CLI (opencode 1.18.25: commands arrive via command.execute.before)
     "command.execute.before": async (input, output) => {
@@ -1635,6 +1254,13 @@ const waitAMinute = {
       }
     }
     return { blocked: false, allDone: true };
+  },
+
+  /** Transición de fase basada en el resultado del Completion Gate. */
+  applyPhaseTransition: function(state, gate) {
+    const phase = gate?.allDone ? "DONE" : state?.phase || "IMPLEMENTING";
+    const nextAction = gate?.blocked ? "Continuar con requisitos pendientes" : state?.nextAction;
+    return { phase, nextAction };
   },
 
   /** Aprueba el contrato: PROPOSED → APPROVED, fase → IMPLEMENTING. */

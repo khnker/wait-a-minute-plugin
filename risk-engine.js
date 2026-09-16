@@ -170,3 +170,9 @@ export function evaluateAction(tool, args = {}, taskRoot = "") {
 }
 
 export const RISK_LEVELS = { SAFE: "SAFE", GUARDED: "GUARDED", BLOCKED: "BLOCKED" };
+export const MUTATING_TOOLS = new Set([
+  ...GUARDED_TOOLS, ...BLOCKED_TOOLS,
+]);
+export function isMutatingTool(tool) {
+  return MUTATING_TOOLS.has(tool);
+}
