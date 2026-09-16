@@ -206,10 +206,10 @@ export function findRepeatedExperiment(taskRoot, taskId, { hypothesisId, actionD
 
 // -- Observations --
 
-export function recordObservation(taskRoot, taskId, { experimentId, result, facts = [], actual, unexpected, provenance }) {
+export function recordObservation(taskRoot, taskId, { experimentId, hypothesisId, result, facts = [], actual, unexpected, provenance }) {
   const dir = cognitionRoot(taskRoot, taskId);
   const file = path.join(dir, FILES.observations);
-  const o = { id: genId("O"), experimentId, result, facts };
+  const o = { id: genId("O"), experimentId, hypothesisId, result, facts };
   if (actual !== undefined) o.actual = actual;
   if (unexpected !== undefined) o.unexpected = unexpected;
   if (provenance !== undefined) o.provenance = provenance;
