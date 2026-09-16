@@ -564,7 +564,6 @@ const WaitAMinutePlugin = async (pluginInput) => {
           console.log(`[wait-a-minute] noteFailure integration error:`, e.message);
         }
       }
-      }
 
       const promptText = extractPrompt(input, output);
       if (!promptText.trim()) return;

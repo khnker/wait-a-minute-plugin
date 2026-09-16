@@ -143,9 +143,7 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
     unexpected,
     provenance,
   });
-  // ... (existing assessment/status logic)
-}
-
+  
   if (assessment.result === AssessmentResult.CONTRADICTED) {
     // Do NOT confirm the hypothesis. Trigger noteContradiction and move to
     // INVESTIGATING or REJECTED depending on severity.
@@ -165,8 +163,8 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
   }
 
   // INCONCLUSIVE: tool succeeded but evidence insufficient — leave hypothesis in TESTING.
-  updateHypothesisStatus(taskRoot, taskId, hypothesisId, "TESTING");
-  return { assessment, hypothesisStatus: "TESTING" };
+  updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.TESTING);
+  return { assessment, hypothesisStatus: HYPOTHESIS_STATUS.TESTING };
 }
 
 export function handleContradiction(taskRoot, taskId, { experiment, observation, assessment }) {
