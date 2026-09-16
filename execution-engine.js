@@ -54,58 +54,53 @@ export { createAssessment, assessObservation, AssessmentResult };
 
 /**
  * Determine hypothesis lifecycle status from an assessment.
- * - CONTRADICTED → REJECTED (hard contradiction) or INVESTIGATING (partial / ambiguous)
+ * - CONTRADICTED → REJECTED (hard contradiction) or TESTING (partial / ambiguous)
  * - INCONCLUSIVE → TESTING (keep probing)
  * - SUPPORTED → SUPPORTED
  */
 function deriveHypothesisStatus(assessment) {
-  if (assessment.result === AssessmentResult.SUPPORTED) {
-    return { status: HYPOTHESIS_STATUS.SUPPORTED, severity: null };
-  }
+  if (assessment.result === AssessmentResult.SUPPORTED) return { status: HYPOTHESIS_STATUS.SUPPORTED, severity: null };
   if (assessment.result === AssessmentResult.CONTRADICTED) {
     const { summary = {} } = assessment;
     const contradicted = summary.contradicted || 0;
     const supported = summary.supported || 0;
-    if (contradicted > supported && contradicted > 0) {
-      return { status: HYPOTHESIS_STATUS.REJECTED, severity: "high" };
-    }
-    return { status: "INVESTIGATING", severity: "low" };
+    if (contradicted > supported && contradicted > 0) return { status: HYPOTHESIS_STATUS.REJECTED, severity: "high" };
+    return { status: HYPOTHESIS_STATUS.TESTING, severity: "low" };
   }
-  return { status: "TESTING", severity: null };
+  return { status: HYPOTHESIS_STATUS.TESTING, severity: null };
 }
 
 export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reason, actual, unexpected, provenance }) {
   failExperiment(taskRoot, taskId, experimentId, reason);
 
-  // Tool execution itself failed — treat this as a CONTRADICTED signal against the
-  // experiment's expected observation. A failing tool cannot produce the expected
-  // result, so the hypothesis is refuted and must be REJECTED with replan.
-  const experiment = { hypothesisId, id: experimentId };
+  const experiment = { hypothesisId, id: experimentId, expectedObservation: undefined };
   const observation = { actual, unexpected, provenance, experimentId };
   const assessment = assessObservation(experiment, observation);
-
+  const derived = deriveHypothesisStatus(assessment);
   recordObservation(taskRoot, taskId, {
     experimentId,
     hypothesisId,
-    result: AssessmentResult.CONTRADICTED,
+    result: assessment.result,
     facts: [reason],
     actual,
     unexpected,
     provenance,
   });
-
-  // Tool failure drives CONTRADICTED → REJECTED + replan signal.
-  noteContradiction(taskId, hypothesisId, observation, assessment, taskRoot);
-
-  updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.REJECTED);
-  rejectHypothesis(taskRoot, hypothesisId, reason);
-  archiveHypothesis(taskRoot, taskId, hypothesisId, reason);
-
-  return {
-    assessment: { ...assessment, result: AssessmentResult.CONTRADICTED },
-    hypothesisStatus: HYPOTHESIS_STATUS.REJECTED,
-    replan: true,
-  };
+  if (assessment.result === AssessmentResult.CONTRADICTED) {
+    noteContradiction(taskId, hypothesisId, observation, assessment, taskRoot);
+    if (derived.status === HYPOTHESIS_STATUS.REJECTED) {
+      updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.REJECTED);
+      rejectHypothesis(taskRoot, hypothesisId, reason);
+      archiveHypothesis(taskRoot, taskId, hypothesisId, reason);
+    } else {
+      updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.TESTING);
+    }
+  } else if (assessment.result === AssessmentResult.SUPPORTED) {
+    updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.SUPPORTED);
+  } else {
+    updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.TESTING);
+  }
+  return { assessment, hypothesisStatus: derived.status, severity: derived.severity, replan: assessment.result === AssessmentResult.CONTRADICTED && derived.status === HYPOTHESIS_STATUS.REJECTED };
 }
 
 import { createEvidence, linkEvidenceToRequirement } from "./evidence-lineage.js";

@@ -74,18 +74,19 @@ export function createObservation({
  * @property {number} timestamp
  */
 
+import { assessObservation, AssessmentResult } from "./assessment-engine.js";
+const EVALUATION_BY_RESULT = { [AssessmentResult.SUPPORTED]: "supports", [AssessmentResult.CONTRADICTED]: "contradicts", [AssessmentResult.INCONCLUSIVE]: "unknown" };
 /**
  * Evaluates an observation against a requirement.
- * Returns an evaluation, NOT a status change.
+ * Returns an evaluation, NOT a status change. Delegates to assessment-engine.
  */
 export function evaluateObservationAgainst(observation, requirement) {
-  return {
-    requirementId: observation.requirementId,
-    observationId: observation.id,
-    evaluation: "unknown",
-    reason: "",
-    timestamp: Date.now(),
-  };
+  const expected = (requirement && (requirement.expectedObservation ?? requirement.description)) ?? undefined;
+  const actual = (observation && (observation.observation ?? observation.actual)) ?? undefined;
+  const assessment = assessObservation({ expectedObservation: expected }, actual);
+  const evaluation = EVALUATION_BY_RESULT[assessment.result] || "unknown";
+  const isNoExpected = assessment.reasoning === "No expectedObservation defined for this experiment.";
+  return { requirementId: observation.requirementId, observationId: observation.id, evaluation, reason: isNoExpected ? "" : assessment.reasoning || "", timestamp: Date.now(), assessment };
 }
 
 // -- Task verification: final result --

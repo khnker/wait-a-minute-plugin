@@ -25,11 +25,13 @@ function isSafeReadTool(tool) {
   return ["read", "read_file", "list_directory", "list_files", "get_file"].includes(normalized);
 }
 
-function inferExpectedObservation(tool, args) {
-  const operation = String(tool || "").toLowerCase();
-  if (operation.includes("read") || operation.includes("list") || operation.includes("inspect")) {
-    return null;
+function inferExpectedObservation(tool, args, requirement) {
+  if (requirement) {
+    const text = requirement.title || requirement.description || requirement.text || null;
+    if (text) return `Satisfacción de ${requirement.id || "requisito"}: ${text}`;
   }
+  const operation = String(tool || "").toLowerCase();
+  if (operation.includes("read") || operation.includes("list") || operation.includes("inspect")) return null;
   if (operation.includes("write") || operation.includes("edit") || operation.includes("apply") || operation.includes("run") || operation.includes("test")) {
     return `La herramienta ${tool} completa ${args ? "con los argumentos proporcionados" : "correctamente"}`;
   }
@@ -52,12 +54,14 @@ async function bridgeExecution(input) {
     return;
   }
 
+  const requirementText = requirement?.title || requirement?.description || requirement?.text || null;
+  const hypothesisStatement = requirementText ? `${requirement.id || "req"}: ${requirementText}` : `${tool} ${JSON.stringify(args)}`;
   try {
     const result = await startExperiment(taskRoot, taskId, {
-      statement: `${tool} ${JSON.stringify(args)}`,
+      statement: hypothesisStatement,
       tool,
       args,
-      expectedObservation: inferExpectedObservation(tool, args),
+      expectedObservation: inferExpectedObservation(tool, args, requirement),
       confidence: 0.5,
     });
 
