@@ -12,7 +12,7 @@ const BOUNDARIES = {
 
 test("Architecture Boundary: Domain should not import Runtime", () => {
   const root = process.cwd();
-  const domainFiles = ["evidence/evidence.js", "verification/verification.js", "cognition/cognition-store.js"];
+  const domainFiles = ["evidence/evidence.js", "verification/verification.js", "cognition-store.js"];
   
   for (const file of domainFiles) {
     const content = fs.readFileSync(path.join(root, file), "utf-8");
