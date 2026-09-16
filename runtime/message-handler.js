@@ -140,13 +140,13 @@ export async function handleMessage(input, output, deps) {
 
       try {
         await noteSuccess(wamRoot, taskId, {
-          hypothesisId: input.hypothesisId,
-          experimentId: input.experimentId,
+          hypothesisId: input._wamHypothesisId || input.hypothesisId,
+          experimentId: input._wamExperimentId || input.experimentId,
           result: output.result,
           actual: output.actual,
           unexpected: output.unexpected,
           provenance: `agent-tool-${toolName}-success`,
-          requirementId: input.requirementId,
+          requirementId: input._wamRequirementId || input.requirementId,
         });
       } catch (e) {
         console.log(`[wait-a-minute] noteSuccess integration error:`, e.message);
@@ -162,8 +162,8 @@ export async function handleMessage(input, output, deps) {
 
       try {
         await noteFailure(wamRoot, taskId, {
-          hypothesisId: input.hypothesisId,
-          experimentId: input.experimentId,
+          hypothesisId: input._wamHypothesisId || input.hypothesisId,
+          experimentId: input._wamExperimentId || input.experimentId,
           reason: output.error || "tool execution failed",
           actual: output.actual,
           unexpected: output.unexpected,

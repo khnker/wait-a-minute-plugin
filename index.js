@@ -1,4 +1,4 @@
-import { analyze, getTaskState, persistTaskState, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog, findDuplicateTask } from "./engine.js";
+import { analyze, routeSkillsV2, loadSkillOnDemand, cavemanify, estimateTokens, buildAssumptions, escalateAssumptions, formatBacklog, findDuplicateTask } from "./engine.js";
 import { startExperiment, noteSuccess, noteFailure } from "./execution-engine.js";
 import { migrateLegacyCognition } from "./cognition-store.js";
 import { handleMessage } from "./runtime/message-handler.js";
@@ -14,6 +14,70 @@ import { getStatusReport } from "./execution-state.js";
 import { createSnapshot, checkContinuation, rebuildScope } from "./context-snapshot.js";
 import fs from "node:fs";
 import path from "node:path";
+
+const sessionExecutions = new Map();
+export { sessionExecutions };
+
+function isSafeReadTool(tool) {
+  const normalized = String(tool || "").toLowerCase();
+  if (SAFE_READ_TOOLS instanceof Set) return SAFE_READ_TOOLS.has(normalized);
+  if (SAFE_READ_TOOLS?.length) return SAFE_READ_TOOLS.some((t) => t?.toLowerCase() === normalized);
+  return ["read", "read_file", "list_directory", "list_files", "get_file"].includes(normalized);
+}
+
+function inferExpectedObservation(tool, args) {
+  const operation = String(tool || "").toLowerCase();
+  if (operation.includes("read") || operation.includes("list") || operation.includes("inspect")) {
+    return null;
+  }
+  if (operation.includes("write") || operation.includes("edit") || operation.includes("apply") || operation.includes("run") || operation.includes("test")) {
+    return `La herramienta ${tool} completa ${args ? "con los argumentos proporcionados" : "correctamente"}`;
+  }
+  return null;
+}
+
+async function bridgeExecution(input) {
+  const taskId = input?.taskId || input?.taskID;
+  const sessionID = input?.sessionID || input?.sessionId || getSessionId();
+  const taskRoot = input?.taskRoot || input?.st?.root || input?.st?.taskRoot;
+  const tool = input?.tool || input?.toolName || input?.action || input?.name;
+  const args = input?.args || input?.parameters || {};
+  const state = input?.st || {};
+  const requirements = Array.isArray(state.requirements) ? state.requirements : [];
+  const requirement = requirements.find((item) => item?.status !== "done" && item?.status !== "verified") || requirements[0] || null;
+  const contractApproved = state.contract?.status === "APPROVED";
+  const phase = state.phase;
+
+  if (!taskId || !taskRoot || !tool || (!contractApproved && !["IMPLEMENTING", "VERIFYING"].includes(phase)) || isSafeReadTool(tool)) {
+    return;
+  }
+
+  try {
+    const result = await startExperiment(taskRoot, taskId, {
+      statement: `${tool} ${JSON.stringify(args)}`,
+      tool,
+      args,
+      expectedObservation: inferExpectedObservation(tool, args),
+      confidence: 0.5,
+    });
+
+    if (!result?.ok || !result.hypothesis || !result.experiment) {
+      console.log(`[wait-a-minute] No se pudo iniciar el experimento para ${tool}: ${result?.guard?.reason || "sin resultado"}`);
+      return;
+    }
+
+    const key = input?.callID || `${sessionID}:${tool}`;
+    const mapping = {
+      hypothesisId: result.hypothesis.id,
+      experimentId: result.experiment.id,
+      requirementId: requirement?.id || null,
+    };
+    sessionExecutions.set(key, mapping);
+    Object.assign(input, mapping);
+  } catch (error) {
+    console.log(`[wait-a-minute] Falló el puente de ejecución para ${tool}: ${error.message}`);
+  }
+}
 
 /**
  * Wait a Minute plugin for OpenCode — Pre-Flight Cognitive Layer.
@@ -674,9 +738,66 @@ const WaitAMinutePlugin = async (pluginInput) => {
         if (err?.wamPolicyBlock === true) throw err;
         if (typeof err?.message === "string" && err.message.includes("ENFORCED BLOCK")) throw err;
       }
+
+      try {
+        await bridgeExecution(input);
+      } catch (bridgeError) {
+        console.log("[wait-a-minute] Bridge execution non-blocking error:", bridgeError.message);
+      }
     },
   };
 };
+
+/**
+ * Runs after tool.execute.before — persists success/failure to the
+ * cognition store via noteSuccess/noteFailure, reading experiment IDs
+ * from the sessionExecutions map (or input._wam* overrides) instead of
+ * input.hypothesisId which is never set by tool.execute.before.
+ */
+async function postToolExecution(input, output) {
+  try {
+    if (bypassed) return;
+    const sid = input?.sessionID;
+    const taskRoot = await resolveSessionBase(sid);
+    const taskId = sessionTasks.get(sid) || readActiveTaskIdFresh(taskRoot) || "default-task";
+    const wamRoot = taskRoot;
+    const toolName = input?.tool || "";
+    const key = input?.callID || `${sid}:${toolName}`;
+    const mapping = sessionExecutions.get(key) || {};
+
+    if (input?.tool && output?.error) {
+      try {
+        await noteFailure(wamRoot, taskId, {
+          hypothesisId: input._wamHypothesisId || mapping.hypothesisId || input.hypothesisId,
+          experimentId: input._wamExperimentId || mapping.experimentId || input.experimentId,
+          requirementId: input._wamRequirementId || mapping.requirementId || input.requirementId,
+          reason: output.error || "tool execution failed",
+          actual: output.actual,
+          unexpected: output.unexpected,
+          provenance: `agent-tool-${toolName}-failure`,
+        });
+      } catch (e) {
+        console.log(`[wait-a-minute] postToolExecution noteFailure error:`, e.message);
+      }
+    } else if (input?.tool) {
+      try {
+        await noteSuccess(wamRoot, taskId, {
+          hypothesisId: input._wamHypothesisId || mapping.hypothesisId || input.hypothesisId,
+          experimentId: input._wamExperimentId || mapping.experimentId || input.experimentId,
+          requirementId: input._wamRequirementId || mapping.requirementId || input.requirementId,
+          result: output.result,
+          actual: output.actual,
+          unexpected: output.unexpected,
+          provenance: `agent-tool-${toolName}-success`,
+        });
+      } catch (e) {
+        console.log(`[wait-a-minute] postToolExecution noteSuccess error:`, e.message);
+      }
+    }
+  } catch (err) {
+    console.error("[wait-a-minute] postToolExecution error:", err);
+  }
+}
 
 
 /**

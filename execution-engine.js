@@ -129,20 +129,27 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
     hypothesisId,
   }, taskRoot);
 
-  // 2. Vincular en la cadena causal
-  if (requirementId) {
-    linkEvidenceToRequirement(evidence.id, requirementId, hypothesisId, experimentId, "obs-id-stub", taskId, taskRoot);
+  // 2. Recordar observación primero para obtener ID real de observación
+  let observationId;
+  try {
+    const obs = recordObservation(taskRoot, taskId, {
+      experimentId,
+      hypothesisId,
+      result: assessment.result,
+      facts: [evidence.id],
+      actual,
+      unexpected,
+      provenance,
+    });
+    observationId = obs?.id ?? "obs-id-stub";
+  } catch {
+    observationId = "obs-id-stub";
   }
 
-  recordObservation(taskRoot, taskId, {
-    experimentId,
-    hypothesisId,
-    result: assessment.result,
-    facts: [evidence.id], // Referenciar evidencia creada
-    actual,
-    unexpected,
-    provenance,
-  });
+  // 3. Vincular en la cadena causal con el ID real de observación
+  if (requirementId) {
+    linkEvidenceToRequirement(evidence.id, requirementId, hypothesisId, experimentId, observationId, taskId, taskRoot);
+  }
   
   if (assessment.result === AssessmentResult.CONTRADICTED) {
     // Do NOT confirm the hypothesis. Trigger noteContradiction and move to
