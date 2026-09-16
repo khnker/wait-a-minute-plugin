@@ -27,7 +27,7 @@ const taskId = "test-task";
 test("Cognition: HYPOTHESIS_STATUS constants are uppercase", () => {
   assert.equal(HYPOTHESIS_STATUS.PROPOSED, "PROPOSED");
   assert.equal(HYPOTHESIS_STATUS.TESTING, "TESTING");
-  assert.equal(HYPOTHESIS_STATUS.CONFIRMED, "CONFIRMED");
+  assert.equal(HYPOTHESIS_STATUS.SUPPORTED, "SUPPORTED");
   assert.equal(HYPOTHESIS_STATUS.REJECTED, "REJECTED");
   assert.equal(HYPOTHESIS_STATUS.ARCHIVED, "ARCHIVED");
 });
@@ -62,9 +62,9 @@ test("Cognition: REJECTED hypothesis preserved (no silent reuse)", () => {
   assert.ok(rejected.length >= 1);
 });
 
-test("Cognition: CONFIRMED hypothesis excluded from active set", () => {
+test("Cognition: SUPPORTED hypothesis excluded from active set", () => {
   const h = createHypothesis(tmpRoot, taskId, { statement: "H2b: confirm test" });
-  updateHypothesisStatus(tmpRoot, taskId, h.id, HYPOTHESIS_STATUS.CONFIRMED);
+  updateHypothesisStatus(tmpRoot, taskId, h.id, HYPOTHESIS_STATUS.SUPPORTED);
   const active = getActiveHypotheses(tmpRoot, taskId);
   assert.ok(!active.find((x) => x.id === h.id));
 });

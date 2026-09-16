@@ -56,11 +56,11 @@ export { createAssessment, assessObservation, AssessmentResult };
  * Determine hypothesis lifecycle status from an assessment.
  * - CONTRADICTED → REJECTED (hard contradiction) or INVESTIGATING (partial / ambiguous)
  * - INCONCLUSIVE → TESTING (keep probing)
- * - SUPPORTED → CONFIRMED
+ * - SUPPORTED → SUPPORTED
  */
 function deriveHypothesisStatus(assessment) {
   if (assessment.result === AssessmentResult.SUPPORTED) {
-    return { status: HYPOTHESIS_STATUS.CONFIRMED, severity: null };
+    return { status: HYPOTHESIS_STATUS.SUPPORTED, severity: null };
   }
   if (assessment.result === AssessmentResult.CONTRADICTED) {
     const { summary = {} } = assessment;
@@ -160,8 +160,8 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
   }
 
   if (assessment.result === AssessmentResult.SUPPORTED) {
-    updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.CONFIRMED);
-    return { assessment, hypothesisStatus: HYPOTHESIS_STATUS.CONFIRMED };
+    updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.SUPPORTED);
+    return { assessment, hypothesisStatus: HYPOTHESIS_STATUS.SUPPORTED };
   }
 
   // INCONCLUSIVE: tool succeeded but evidence insufficient — leave hypothesis in TESTING.

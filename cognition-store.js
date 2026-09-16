@@ -25,11 +25,11 @@ const FILES = {
 export const DELETION_POLICY = "soft-archive";
 
 // -- Status constants (single source of truth) --
-// Hypotheses lifecycle: PROPOSED → TESTING → CONFIRMED | REJECTED → ARCHIVED
+// Hypotheses lifecycle: PROPOSED → TESTING → SUPPORTED | REJECTED → ARCHIVED
 export const HYPOTHESIS_STATUS = Object.freeze({
   PROPOSED: "PROPOSED",
   TESTING: "TESTING",
-  CONFIRMED: "CONFIRMED",
+  SUPPORTED: "SUPPORTED",
   REJECTED: "REJECTED",
   ARCHIVED: "ARCHIVED",
 });
@@ -235,7 +235,7 @@ export function buildCompactState(taskRoot, taskId) {
       h.status === HYPOTHESIS_STATUS.PROPOSED ||
       h.status === HYPOTHESIS_STATUS.TESTING
     ),
-    confirmedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.CONFIRMED),
+    confirmedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.SUPPORTED),
     rejectedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.REJECTED),
     archivedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.ARCHIVED),
     recentExperiments: listExperiments(taskRoot, taskId).slice(-5),
