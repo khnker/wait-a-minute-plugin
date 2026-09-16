@@ -1,3 +1,5 @@
+// Fixed version of execution-engine.js
+
 /**
  * Autonomous execution loop — hypothesis → classify → experiment → observe → replan.
  * Non-destructive: never hard-deletes. Failed approaches are archived/rejected.
@@ -19,7 +21,6 @@ import { guardAction } from "./runtime-guards.js";
 import { rejectHypothesis } from "./cognitive-state.js";
 import { assessObservation, createAssessment, AssessmentResult } from "./assessment-engine.js";
 import { noteContradiction } from "./hypothesis-manager.js";
-
 
 function describe(tool, args = {}) {
   const { hypothesisId: _h, ...rest } = args;
@@ -77,7 +78,7 @@ export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reas
   const observation = { actual, unexpected, provenance, experimentId };
   const assessment = assessObservation(experiment, observation);
   const derived = deriveHypothesisStatus(assessment);
-  recordObservation(taskRoot, taskId, {
+  const obs = recordObservation(taskRoot, taskId, {
     experimentId,
     hypothesisId,
     result: assessment.result,
@@ -86,16 +87,8 @@ export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reas
     unexpected,
     provenance,
   });
-  if (assessment.result === AssessmentResult.CONTRADICTED) {
-    noteContradiction(taskId, hypothesisId, observation, assessment, taskRoot);
-    if (derived.status === HYPOTHESIS_STATUS.REJECTED) {
-      updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.REJECTED);
-      rejectHypothesis(taskRoot, hypothesisId, reason);
-      archiveHypothesis(taskRoot, taskId, hypothesisId, reason);
-    } else {
-      updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.TESTING);
-    }
-  } else if (assessment.result === AssessmentResult.SUPPORTED) {
+
+  if (derived.status === HYPOTHESIS_STATUS.SUPPORTED) {
     updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.SUPPORTED);
   } else {
     updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.TESTING);
@@ -105,10 +98,7 @@ export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reas
 
 import { createEvidence, linkEvidenceToRequirement } from "./evidence-lineage.js";
 
-// ... (existing imports)
-
 export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, result, actual, unexpected, provenance, requirementId }) {
-  // ... (existing assessment logic)
   const experiment = { hypothesisId, id: experimentId };
   const observation = { actual, unexpected, provenance, experimentId };
   const assessment = assessObservation(experiment, observation);
@@ -119,7 +109,7 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
   const evidence = createEvidence(taskId, {
     requirementId,
     content: typeof result === "string" ? result : JSON.stringify(result ?? "ok"),
-    type: "TOOL_OUTPUT", // Ajustar según constante apropiada
+    type: "TOOL_OUTPUT",
     source: "execution-engine",
     hypothesisId,
   }, taskRoot);
@@ -135,13 +125,13 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
     provenance,
   });
   const observationId = obs?.id;
-  if (!observationId) throw new Error("recordObservation did not return an id");
+  if (!observationId)
+    throw new Error("recordObservation did not return an id");
 
   // 3. Vincular en la cadena causal con el ID real de observación
   if (requirementId) {
     linkEvidenceToRequirement(evidence.id, requirementId, hypothesisId, experimentId, observationId, taskId, taskRoot);
   }
-  
   if (assessment.result === AssessmentResult.CONTRADICTED) {
     // Do NOT confirm the hypothesis. Trigger noteContradiction and move to
     // INVESTIGATING or REJECTED depending on severity.
@@ -154,12 +144,10 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
     }
     return { assessment, hypothesisStatus: status, severity, replan: status !== HYPOTHESIS_STATUS.REJECTED };
   }
-
   if (assessment.result === AssessmentResult.SUPPORTED) {
     updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.SUPPORTED);
     return { assessment, hypothesisStatus: HYPOTHESIS_STATUS.SUPPORTED };
   }
-
   // INCONCLUSIVE: tool succeeded but evidence insufficient — leave hypothesis in TESTING.
   updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.TESTING);
   return { assessment, hypothesisStatus: HYPOTHESIS_STATUS.TESTING };
@@ -169,28 +157,22 @@ export function handleContradiction(taskRoot, taskId, { experiment, observation,
   const { hypothesisId, id: experimentId } = experiment;
   updateHypothesisStatus(taskRoot, taskId, hypothesisId, "contradicted");
   rejectHypothesis(taskRoot, hypothesisId, "contradicted by observation");
-
   const contradiction = noteContradiction(taskId, hypothesisId, observation, assessment, taskRoot);
-
   recordObservation(taskRoot, taskId, {
     experimentId,
     result: assessment.result,
     facts: [contradiction.detail],
     source: { type: "execution-assessment" },
   });
-
   const newHypothesis = createHypothesis(taskRoot, taskId, {
     statement: `[REPLAN] New hypothesis after contradicting ${hypothesisId}: reassess strategy`,
     confidence: 0.3,
   });
-
   return {
     status: "CONTRADICTED",
     previousHypothesisId: hypothesisId,
     previousExperimentId: experimentId,
     assessment,
-    contradiction,
     newHypothesis,
-    replanState: "INVESTIGATING",
   };
 }
