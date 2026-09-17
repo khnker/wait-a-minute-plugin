@@ -833,8 +833,9 @@ async function postToolExecution(input, output) {
   } catch (err) {
     console.error("[wait-a-minute] postToolExecution error:", err);
   } finally {
-    if (input?.callID) {
-      sessionExecutions.delete(input.callID);
+    const cleanupKey = input._wamCallID || input?.callID || `${input?.sessionID}:${toolName}`;
+    if (cleanupKey && cleanupKey !== `${input?.sessionID}:${toolName}`) {
+      sessionExecutions.delete(cleanupKey);
     }
   }
 }
