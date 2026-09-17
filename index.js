@@ -80,7 +80,13 @@ async function bridgeExecution({ taskId, taskRoot, state, tool, args, callID, se
       requirementId: requirement?.id || null,
     };
     sessionExecutions.set(key, mapping);
-    Object.assign(input, mapping);
+    return {
+      ok: true,
+      callID: key,
+      hypothesisId: result.hypothesis.id,
+      experimentId: result.experiment.id,
+      requirementId: requirement?.id || null,
+    };
   } catch (error) {
     console.log(`[wait-a-minute] Falló el puente de ejecución para ${tool}: ${error.message}`);
   }
@@ -748,7 +754,7 @@ const WaitAMinutePlugin = async (pluginInput) => {
 
       try {
         const resolvedCallID = input?.callID || `${sid || getSessionId()}__exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        await bridgeExecution({
+        const bridgeResult = await bridgeExecution({
           taskId,
           taskRoot,
           state: st,
@@ -757,6 +763,12 @@ const WaitAMinutePlugin = async (pluginInput) => {
           callID: resolvedCallID,
           sessionID: sid,
         });
+        if (bridgeResult?.ok) {
+          input._wamCallID = bridgeResult.callID;
+          input._wamHypothesisId = bridgeResult.hypothesisId;
+          input._wamExperimentId = bridgeResult.experimentId;
+          input._wamRequirementId = bridgeResult.requirementId;
+        }
       } catch (bridgeError) {
         console.log("[wait-a-minute] Bridge execution non-blocking error:", bridgeError.message);
       }
@@ -786,7 +798,7 @@ async function postToolExecution(input, output) {
     const taskId = sessionTasks.get(sid) || readActiveTaskIdFresh(taskRoot) || "default-task";
     const wamRoot = taskRoot;
     const toolName = input?.tool || "";
-    const key = input?.callID || `${sid}:${toolName}`;
+    const key = input._wamCallID || input?.callID || `${sid}:${toolName}`;
     const mapping = sessionExecutions.get(key) || {};
 
     if (input?.tool && output?.error) {
