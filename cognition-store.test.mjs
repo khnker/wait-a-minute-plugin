@@ -141,6 +141,18 @@ test("Cognition: buildCompactState returns active/rejected/recent", () => {
   assert.ok(Array.isArray(state.archivedHypotheses));
 });
 
+test("Cognition: rejected hypothesis does NOT fail task (task continues)", () => {
+  const h = createHypothesis(tmpRoot, taskId, { statement: "H7: will fail" });
+  const e = createExperiment(tmpRoot, taskId, { hypothesisId: h.id, actionDescription: "test" });
+  failExperiment(tmpRoot, taskId, e.id, "expected failure");
+  updateHypothesisStatus(tmpRoot, taskId, h.id, HYPOTHESIS_STATUS.REJECTED);
+
+  const state = buildCompactState(tmpRoot, taskId);
+  const rejected = state.rejectedHypotheses.find(x => x.id === h.id);
+  assert.ok(rejected, "rejected hypothesis is preserved");
+  assert.ok(!state.activeHypotheses.find(x => x.id === h.id), "rejected not in active");
+});
+
 // Cleanup
 test("Cognition: cleanup", () => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
