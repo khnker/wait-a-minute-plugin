@@ -73,7 +73,7 @@ async function bridgeExecution({ taskId, taskRoot, state, tool, args, callID, se
       return;
     }
 
-    const key = input?.callID || `${sessionID}:${tool}`;
+    const key = callID || `${sessionID}:${tool}`;
     const mapping = {
       hypothesisId: result.hypothesis.id,
       experimentId: result.experiment.id,
@@ -747,7 +747,16 @@ const WaitAMinutePlugin = async (pluginInput) => {
       }
 
       try {
-        await bridgeExecution(input);
+        const resolvedCallID = input?.callID || `${sid || getSessionId()}__exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        await bridgeExecution({
+          taskId,
+          taskRoot,
+          state: st,
+          tool: input?.tool || "",
+          args: input?.args || input?.parameters || {},
+          callID: resolvedCallID,
+          sessionID: sid,
+        });
       } catch (bridgeError) {
         console.log("[wait-a-minute] Bridge execution non-blocking error:", bridgeError.message);
       }
@@ -811,6 +820,10 @@ async function postToolExecution(input, output) {
     }
   } catch (err) {
     console.error("[wait-a-minute] postToolExecution error:", err);
+  } finally {
+    if (input?.callID) {
+      sessionExecutions.delete(input.callID);
+    }
   }
 }
 
