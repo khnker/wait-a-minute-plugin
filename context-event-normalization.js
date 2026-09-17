@@ -18,6 +18,12 @@ export function normalizeContextItem(event) {
     scope: inferScope(type, payload),
     importance: inferImportance(type, payload),
 
+    requirementId: extractSingleId(payload.requirementId, payload.requirements),
+    hypothesisId: extractSingleId(payload.hypothesisId, payload.hypotheses),
+    experimentId: extractSingleId(payload.experimentId, payload.experiments),
+    observationId: extractObservationId(payload),
+    evidenceId: extractEvidenceId(payload),
+
     requirementIds: extractRequirementIds(payload),
     hypothesisIds: extractHypothesisIds(payload),
     experimentIds: extractExperimentIds(payload),
@@ -25,6 +31,25 @@ export function normalizeContextItem(event) {
     mandatoryIncluded: inferMandatoryIncluded(type),
     unresolvedCriticalUnknowns: inferUnresolvedCriticalUnknowns(type, payload),
   };
+}
+
+function extractSingleId(single, array) {
+  if (single) return single;
+  if (Array.isArray(array) && array.length > 0) return array[0];
+  return null;
+}
+
+function extractObservationId(payload) {
+  if (payload?.observationId) return payload.observationId;
+  if (payload?.observation && payload?.observation?.id) return payload.observation.id;
+  // In some events, observation might be in the content after normalization, but we keep it simple.
+  return null;
+}
+
+function extractEvidenceId(payload) {
+  if (payload?.evidenceId) return payload.evidenceId;
+  if (payload?.evidence && payload?.evidence?.id) return payload.evidence.id;
+  return null;
 }
 
 function normalizeContentByType(eventType, payload) {
