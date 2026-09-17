@@ -7,17 +7,23 @@ export function createAssessment(expected, actual) {
 }
 
 export function assessObservation(experiment, observation) {
-  const expected = experiment.expectedObservation;
-  if (!expected || typeof expected !== "object") {
+  const expectedObs = experiment.expectedObservation;
+  if (!expectedObs || typeof expectedObs !== "object") {
     return {
       result: AssessmentResult.INCONCLUSIVE,
       reasoning: "No expectedObservation defined for this experiment.",
       comparisons: [],
       summary: { supported: 0, contradicted: 0, inconclusive: 0, total: 0 },
-      expected,
+      expected: expectedObs,
       actual: observation,
     };
   }
+
   const actual = observation?.actual || observation;
-  return createAssessment(expected, actual);
+
+  if (expectedObs.expected && typeof expectedObs.expected === "object") {
+    return createAssessment(expectedObs.expected, actual);
+  }
+
+  return createAssessment(expectedObs, actual);
 }

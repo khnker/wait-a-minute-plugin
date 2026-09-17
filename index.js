@@ -26,17 +26,44 @@ function isSafeReadTool(tool) {
 }
 
 function inferExpectedObservation(tool, args, requirement) {
-  if (requirement) {
-    const text = requirement.title || requirement.description || requirement.text || null;
-    if (text) return { [requirement.id || "requirement"]: text };
-  }
   const operation = String(tool || "").toLowerCase();
-  if (operation.includes("read") || operation.includes("list") || operation.includes("inspect")) return null;
-  if (operation.includes("write") || operation.includes("edit") || operation.includes("apply") || operation.includes("run") || operation.includes("test")) {
-    const field = tool.toLowerCase().replace(/[^a-z0-9]/g, "_") || "operation";
-    return { [field]: args ? "completado con los argumentos proporcionados" : "completado correctamente" };
+  const outcomeType = inferOutcomeType(operation, args);
+
+  if (requirement) {
+    return {
+      requirementId: requirement.id,
+      outcomeType,
+      expected: {
+        status: "success",
+        exitCode: 0,
+      },
+    };
   }
-  return null;
+
+  if (operation.includes("read") || operation.includes("list") || operation.includes("inspect")) {
+    return { outcomeType, expected: null };
+  }
+
+  if (operation.includes("write") || operation.includes("edit") || operation.includes("apply") || operation.includes("run") || operation.includes("test")) {
+    return {
+      outcomeType,
+      expected: {
+        status: "success",
+        exitCode: 0,
+      },
+    };
+  }
+
+  return { outcomeType, expected: null };
+}
+
+function inferOutcomeType(operation, args) {
+  if (operation.includes("run") || operation.includes("exec") || operation.includes("bash")) return "command_execution";
+  if (operation.includes("test")) return "test_execution";
+  if (operation.includes("write") || operation.includes("edit") || operation.includes("apply")) return "file_modification";
+  if (operation.includes("read") || operation.includes("list") || operation.includes("inspect")) return "file_inspection";
+  if (operation.includes("search") || operation.includes("grep")) return "search";
+  return "unknown";
 }
 
 async function bridgeExecution({ taskId, taskRoot, state, tool, args, callID, sessionID }) {
