@@ -14,6 +14,7 @@ import {
   failExperiment,
   hasRepetitiveFailure,
   archiveHypothesis,
+  getExperiment,
   HYPOTHESIS_STATUS,
   EXPERIMENT_STATUS,
 } from "./cognition-store.js";
@@ -71,41 +72,58 @@ function deriveHypothesisStatus(assessment) {
   return { status: HYPOTHESIS_STATUS.TESTING, severity: null };
 }
 
-export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reason, actual, unexpected, provenance }) {
-  failExperiment(taskRoot, taskId, experimentId, reason);
-
-  const experiment = { hypothesisId, id: experimentId, expectedObservation: undefined };
+function processObservation(taskRoot, taskId, { hypothesisId, experimentId, result, actual, unexpected, provenance, reason, outcome, facts }) {
+  const stored = experimentId ? getExperiment(taskRoot, taskId, experimentId) : null;
+  const experiment = stored || { hypothesisId, id: experimentId };
   const observation = { actual, unexpected, provenance, experimentId };
   const assessment = assessObservation(experiment, observation);
   const derived = deriveHypothesisStatus(assessment);
-  const obs = recordObservation(taskRoot, taskId, {
+
+  const persistedObs = recordObservation(taskRoot, taskId, {
     experimentId,
     hypothesisId,
     result: assessment.result,
-    facts: [reason],
+    facts: facts || (outcome === "failure" ? [reason] : [result || "ok"]),
     actual,
     unexpected,
     provenance,
   });
 
-  if (derived.status === HYPOTHESIS_STATUS.SUPPORTED) {
-    updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.SUPPORTED);
+  let status;
+  if (assessment.result === AssessmentResult.SUPPORTED) {
+    status = HYPOTHESIS_STATUS.SUPPORTED;
+  } else if (assessment.result === AssessmentResult.CONTRADICTED) {
+    const { summary = {} } = assessment;
+    const contradicted = summary.contradicted || 0;
+    const supported = summary.supported || 0;
+    if (contradicted > supported && contradicted > 0) status = HYPOTHESIS_STATUS.REJECTED;
+    else status = HYPOTHESIS_STATUS.TESTING;
   } else {
-    updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.TESTING);
+    status = HYPOTHESIS_STATUS.TESTING;
   }
-  return { assessment, hypothesisStatus: derived.status, severity: derived.severity, replan: assessment.result === AssessmentResult.CONTRADICTED && derived.status === HYPOTHESIS_STATUS.REJECTED };
+  updateHypothesisStatus(taskRoot, taskId, hypothesisId, status);
+
+  return { assessment, hypothesisStatus: status, severity: derived.severity, observation: persistedObs };
+}
+
+export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reason, actual, unexpected, provenance }) {
+  failExperiment(taskRoot, taskId, experimentId, reason);
+  const { assessment, hypothesisStatus, severity } = processObservation(taskRoot, taskId, {
+    hypothesisId,
+    experimentId,
+    reason,
+    actual,
+    unexpected,
+    provenance,
+    outcome: "failure",
+  });
+  return { assessment, hypothesisStatus, severity, replan: assessment.result === AssessmentResult.CONTRADICTED && hypothesisStatus === HYPOTHESIS_STATUS.REJECTED };
 }
 
 import { createEvidence, linkEvidenceToRequirement } from "./evidence-lineage.js";
 
 export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, result, actual, unexpected, provenance, requirementId }) {
-  const experiment = { hypothesisId, id: experimentId };
-  const observation = { actual, unexpected, provenance, experimentId };
-  const assessment = assessObservation(experiment, observation);
-
-  completeExperiment(taskRoot, taskId, experimentId, { result, assessment });
-
-  // 1. Crear evidencia formal
+  // 1. Crear evidencia formal primero para obtener evidenceId
   const evidence = createEvidence(taskId, {
     requirementId,
     content: typeof result === "string" ? result : JSON.stringify(result ?? "ok"),
@@ -114,43 +132,29 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
     hypothesisId,
   }, taskRoot);
 
-  // 2. Recordar observación primero para obtener ID real de observación
-  const obs = recordObservation(taskRoot, taskId, {
-    experimentId,
+  // 2. Procesar observación con evidenceId en facts
+  const { assessment, hypothesisStatus, observation } = processObservation(taskRoot, taskId, {
     hypothesisId,
-    result: assessment.result,
-    facts: [evidence.id],
+    experimentId,
+    result,
     actual,
     unexpected,
     provenance,
+    outcome: "success",
+    facts: [evidence.id],
   });
-  const observationId = obs?.id;
-  if (!observationId)
-    throw new Error("recordObservation did not return an id");
 
   // 3. Vincular en la cadena causal con el ID real de observación
-  if (requirementId) {
+  const observationId = observation?.id;
+  if (observationId && requirementId) {
     linkEvidenceToRequirement(evidence.id, requirementId, hypothesisId, experimentId, observationId, taskId, taskRoot);
   }
+
   if (assessment.result === AssessmentResult.CONTRADICTED) {
-    // Do NOT confirm the hypothesis. Trigger noteContradiction and move to
-    // INVESTIGATING or REJECTED depending on severity.
     noteContradiction(taskId, hypothesisId, observation, assessment, taskRoot);
-    const { status, severity } = deriveHypothesisStatus(assessment);
-    updateHypothesisStatus(taskRoot, taskId, hypothesisId, status);
-    if (status === HYPOTHESIS_STATUS.REJECTED) {
-      rejectHypothesis(taskRoot, hypothesisId, "contradicted by observation");
-      archiveHypothesis(taskRoot, taskId, hypothesisId, "contradicted by observation");
-    }
-    return { assessment, hypothesisStatus: status, severity, replan: status !== HYPOTHESIS_STATUS.REJECTED };
+    return { assessment, hypothesisStatus, severity: null, replan: hypothesisStatus !== HYPOTHESIS_STATUS.REJECTED };
   }
-  if (assessment.result === AssessmentResult.SUPPORTED) {
-    updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.SUPPORTED);
-    return { assessment, hypothesisStatus: HYPOTHESIS_STATUS.SUPPORTED };
-  }
-  // INCONCLUSIVE: tool succeeded but evidence insufficient — leave hypothesis in TESTING.
-  updateHypothesisStatus(taskRoot, taskId, hypothesisId, HYPOTHESIS_STATUS.TESTING);
-  return { assessment, hypothesisStatus: HYPOTHESIS_STATUS.TESTING };
+  return { assessment, hypothesisStatus };
 }
 
 export function handleContradiction(taskRoot, taskId, { experiment, observation, assessment }) {

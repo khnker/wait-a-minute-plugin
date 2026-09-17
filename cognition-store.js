@@ -175,6 +175,15 @@ export function listExperiments(taskRoot, taskId) {
   const file = path.join(cognitionRoot(taskRoot, taskId), FILES.experiments);
   return readAll(file);
 }
+export function getExperiment(taskRoot, taskId, id) {
+  return listExperiments(taskRoot, taskId).find((e) => e.id === id) || null;
+}
+export function getHypothesis(taskRoot, taskId, id) {
+  return listHypotheses(taskRoot, taskId).find((h) => h.id === id) || null;
+}
+export function getObservation(taskRoot, taskId, id) {
+  return listObservations(taskRoot, taskId).find((o) => o.id === id) || null;
+}
 
 export function completeExperiment(taskRoot, taskId, id, { result = "ok" } = {}) {
   return updateExperiment(taskRoot, taskId, id, { status: EXPERIMENT_STATUS.COMPLETED, result });

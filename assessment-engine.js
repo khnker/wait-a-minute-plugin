@@ -18,5 +18,6 @@ export function assessObservation(experiment, observation) {
       actual: observation,
     };
   }
-  return createAssessment(expected, observation);
+  const actual = observation?.actual || observation;
+  return createAssessment(expected, actual);
 }

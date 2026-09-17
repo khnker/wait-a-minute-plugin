@@ -74,7 +74,7 @@ test("happy path: tool.execute.before -> tool.execute.after produces H1/E1/O1/EV
       statement: "R1: El scraper obtiene productos de Lider",
       tool: "bash",
       args: { command: "echo hi" },
-      expectedObservation: { type: "text", pattern: "hi" },
+      expectedObservation: { result: "success" },
       confidence: 0.6,
     });
 
@@ -91,7 +91,7 @@ test("happy path: tool.execute.before -> tool.execute.after produces H1/E1/O1/EV
       experimentId: E1.id,
       requirementId: "R1",
       result: "hi",
-      actual: "hi",
+      actual: { result: "success" },
       provenance: "agent-tool-bash-success",
     });
 
