@@ -187,3 +187,62 @@ test("recordQuery: returns detection result", () => {
   // Second occurrence: might trigger if minOccurrences=2 and within window
   assert.ok(result === null || (result && typeof result === "object"));
 });
+
+// -- detectStrategyRepetition --------------------------------------------------
+import { detectStrategyRepetition, sameStrategyIdentity } from "./context-loop-prevention.js";
+
+const strategySnap = (overrides = {}) => ({
+  strategy: "Modernizar escrapper-eltarro",
+  scope: "scrapper-eltarro",
+  status: "ACTIVE",
+  allowedActions: ["read_file", "edit_file"],
+  prohibitedActions: ["delete_file"],
+  createdAt: "2026-09-21T10:00:00.000Z",
+  instanceId: "run-1",
+  ...overrides,
+});
+
+test("detectStrategyRepetition: returns loopDetected=false for fewer than threshold snapshots", () => {
+  const result = detectStrategyRepetition([strategySnap(), strategySnap()], 3);
+  assert.equal(result.loopDetected, false);
+});
+
+test("detectStrategyRepetition: detects identical strategy across volatile-only differences", () => {
+  const snapshots = [
+    strategySnap({ instanceId: "run-1", createdAt: "2026-01-01T00:00:00Z" }),
+    strategySnap({ instanceId: "run-2", createdAt: "2026-01-02T00:00:00Z" }),
+    strategySnap({ instanceId: "run-3", createdAt: "2026-01-03T00:00:00Z" }),
+  ];
+  const result = detectStrategyRepetition(snapshots, 3);
+  assert.equal(result.loopDetected, true);
+  assert.equal(result.occurrences, 3);
+  assert.match(result.hash, /^[0-9a-f]{64}$/);
+});
+
+test("detectStrategyRepetition: does not flag semantically different strategies", () => {
+  const snapshots = [
+    strategySnap({ strategy: "A" }),
+    strategySnap({ strategy: "B" }),
+    strategySnap({ strategy: "C" }),
+  ];
+  const result = detectStrategyRepetition(snapshots, 3);
+  assert.equal(result.loopDetected, false);
+});
+
+test("detectStrategyRepetition: respects custom threshold", () => {
+  const snapshots = [strategySnap(), strategySnap({ instanceId: "x" })];
+  assert.equal(detectStrategyRepetition(snapshots, 3).loopDetected, false);
+  assert.equal(detectStrategyRepetition(snapshots, 2).loopDetected, true);
+});
+
+test("sameStrategyIdentity: true for equivalent strategies (volatile fields differ)", () => {
+  const a = strategySnap({ instanceId: "1", createdAt: "2026-01-01" });
+  const b = strategySnap({ instanceId: "2", createdAt: "2030-12-31" });
+  assert.equal(sameStrategyIdentity(a, b), true);
+});
+
+test("sameStrategyIdentity: false for different scope", () => {
+  const a = strategySnap();
+  const b = strategySnap({ scope: "other" });
+  assert.equal(sameStrategyIdentity(a, b), false);
+});

@@ -42,6 +42,8 @@
  * @property {number} [maxUniqueItems=100] - Max unique fingerprints to track
  */
 
+import { hashStrategy, sameStrategy } from "./strategy-identity.js";
+
 const DEFAULT_CONFIG = {
   maxEvents: 1000,
   minOccurrences: 3,
@@ -287,4 +289,59 @@ export function quickLoopCheck(items, threshold = 3) {
   return loops;
 }
 
+/**
+ * Strategy repetition check: given a sequence of approvedStrategy snapshots
+ * (in chronological order), detect whether the agent is re-running the SAME
+ * strategy N times despite different surface outcomes. This catches cases
+ * where the user / system keeps approving identical strategies without progress.
+ *
+ * Uses canonical hashing (strategy-identity.hashStrategy) so volatile fields
+ * (timestamps, runIds, instanceIds) do NOT affect equality.
+ *
+ * @param {Object[]} strategySnapshots - Array of approvedStrategy objects
+ * @param {number} [threshold=3] - Minimum repetitions to flag a strategy loop
+ * @returns {{ loopDetected: boolean, hash?: string, occurrences?: number, strategy?: Object }}
+ */
+export function detectStrategyRepetition(strategySnapshots, threshold = 3) {
+  if (!Array.isArray(strategySnapshots) || strategySnapshots.length < threshold) {
+    return { loopDetected: false };
+  }
+  const counts = new Map();
+  for (const snapshot of strategySnapshots) {
+    const hash = hashStrategy(snapshot);
+    if (hash === null) continue;
+    counts.set(hash, (counts.get(hash) || 0) + 1);
+  }
+  let topHash = null;
+  let topCount = 0;
+  let topStrategy = null;
+  for (const [hash, count] of counts) {
+    if (count > topCount) {
+      topCount = count;
+      topHash = hash;
+      topStrategy = strategySnapshots.find((s) => hashStrategy(s) === hash) || null;
+    }
+  }
+  if (topCount >= threshold) {
+    return {
+      loopDetected: true,
+      hash: topHash,
+      occurrences: topCount,
+      strategy: topStrategy,
+    };
+  }
+  return { loopDetected: false };
+}
+
+/**
+ * Compare two approvedStrategy objects for semantic identity, ignoring
+ * volatile fields. Thin wrapper around strategy-identity.sameStrategy.
+ *
+ * @param {Object} a
+ * @param {Object} b
+ * @returns {boolean}
+ */
+export function sameStrategyIdentity(a, b) {
+  return sameStrategy(a, b);
+}
 export { ContextLoopDetector };
