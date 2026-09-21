@@ -390,3 +390,118 @@ export function hasStaleEvidence(taskId, requirementId, root) {
   const evidence = getEvidenceForRequirement(taskId, requirementId, root);
   return evidence.some((ev) => ev.status === "stale" || ev.status === "STALE");
 }
+
+/**
+ * Structural ID enforcement (Completion Integrity / Change 03).
+ *
+ * Evidence generated from execution (tests, linters, experiments, observations)
+ * must carry the full causal chain of identifiers:
+ *
+ *   requirementId  -> hypothesisId -> experimentId -> observationId
+ *
+ * This module enforces:
+ *  - each ID is a non-empty string
+ *  - IDs follow the structural prefixes req- / hyp- / exp- / obs-
+ *    (warning only, not rejection)
+ *  - execution-produced evidence cannot be marked `valid` until all four
+ *    identifiers are present
+ *
+ * The functions below are pure and side-effect-free.
+ */
+
+export const STRUCTURAL_ID_PATTERNS = Object.freeze({
+  requirementId: /^req-[a-zA-Z0-9_-]+$/,
+  hypothesisId: /^hyp-[a-zA-Z0-9_-]+$/,
+  experimentId: /^exp-[a-zA-Z0-9_-]+$/,
+  observationId: /^obs-[a-zA-Z0-9_-]+$/,
+});
+
+export const REQUIRED_LINEAGE_FIELDS = Object.freeze([
+  "requirementId",
+  "hypothesisId",
+  "experimentId",
+  "observationId",
+]);
+
+/**
+ * Returns the list of lineage fields that are missing or empty on the evidence.
+ */
+export function findMissingLineageFields(evidence) {
+  if (!evidence || typeof evidence !== "object") {
+    return [...REQUIRED_LINEAGE_FIELDS];
+  }
+  return REQUIRED_LINEAGE_FIELDS.filter(
+    (field) => typeof evidence[field] !== "string" || evidence[field].trim() === ""
+  );
+}
+
+/**
+ * Validates an evidence object for structural integrity.
+ * Returns { valid, missing, warnings }.
+ */
+export function validateEvidenceStructure(evidence) {
+  const missing = findMissingLineageFields(evidence);
+  const warnings = [];
+  if (evidence && typeof evidence === "object") {
+    for (const field of REQUIRED_LINEAGE_FIELDS) {
+      const value = evidence[field];
+      if (typeof value === "string" && value.trim() !== "") {
+        const pattern = STRUCTURAL_ID_PATTERNS[field];
+        if (pattern && !pattern.test(value)) {
+          warnings.push(`${field} "${value}" does not match expected pattern`);
+        }
+      }
+    }
+  }
+  return {
+    valid: missing.length === 0,
+    missing,
+    warnings,
+  };
+}
+
+/**
+ * True iff evidence is structurally complete (all four lineage IDs present).
+ */
+export function hasCompleteLineage(evidence) {
+  return validateEvidenceStructure(evidence).valid;
+}
+
+/**
+ * Validate a batch of evidence entries (e.g., those attached to a requirement).
+ * Returns { complete, incomplete } lists.
+ */
+export function partitionEvidenceByLineage(evidenceList) {
+  const complete = [];
+  const incomplete = [];
+  if (!Array.isArray(evidenceList)) {
+    return { complete, incomplete };
+  }
+  for (const ev of evidenceList) {
+    if (hasCompleteLineage(ev)) complete.push(ev);
+    else incomplete.push(ev);
+  }
+  return { complete, incomplete };
+}
+
+/**
+ * Decorates an existing evidence object with execution-lineage metadata.
+ * Returns a new object (does not mutate). Throws if any required field is
+ * missing — callers that want a non-throwing variant should call
+ * validateEvidenceStructure first.
+ */
+export function stampExecutionLineage(evidence, lineage) {
+  if (!lineage || typeof lineage !== "object") {
+    throw new Error("lineage must be an object with requirementId, hypothesisId, experimentId, observationId");
+  }
+  const stamped = { ...(evidence || {}) };
+  for (const field of REQUIRED_LINEAGE_FIELDS) {
+    const value = lineage[field];
+    if (typeof value !== "string" || value.trim() === "") {
+      throw new Error(`missing or empty lineage field: ${field}`);
+    }
+    stamped[field] = value;
+  }
+  stamped.lineageStampedAt = new Date().toISOString();
+  return stamped;
+}
