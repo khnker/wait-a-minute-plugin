@@ -47,7 +47,35 @@ import { getTaskState } from "./engine.js";
  */
 
 function estimateTokens(text = "") {
-  return Math.ceil((text || "").length / 4);
+  const str = typeof text === "string" ? text : "";
+  return Math.ceil(str.length / 4);
+}
+
+/**
+ * Coerce any run-item (string, {text}, {content}, null, etc.) into a
+ * lowercase-string token set for keyword analysis. Returns "" for empty/unknown
+ * inputs so callers never have to deal with `.toLowerCase is not a function`.
+ */
+function asText(item) {
+  if (item == null) return "";
+  if (typeof item === "string") return item;
+  if (typeof item === "number" || typeof item === "boolean") return String(item);
+  if (typeof item === "object") {
+    if (typeof item.text === "string") return item.text;
+    if (typeof item.content === "string") return item.content;
+    if (typeof item.decision === "string") return item.decision;
+    if (typeof item.outcome === "string") return item.outcome;
+    try {
+      return JSON.stringify(item);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function asLower(item) {
+  return asText(item).toLowerCase();
 }
 
 export function getHistoricalCandidates(taskId, root, graph = null) {
@@ -81,15 +109,17 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
 
     // Score observations from this run
     for (const obs of run.observations || []) {
-      const obsKeywords = new Set(obs.toLowerCase().split(/\s+/).filter(Boolean));
+      const obsStr = asText(obs);
+      const obsLower = asLower(obs);
+      const obsKeywords = new Set(obsLower.split(/\s+/).filter(Boolean));
       const overlap = [...taskKeywords].filter((k) => obsKeywords.has(k)).length;
       const score = computeRelevanceScore({
         hasExplicitDependency: false,
-        matchesActiveRequirement: unresolved.some((r) => obs.toLowerCase().includes(r.title.toLowerCase())),
+        matchesActiveRequirement: unresolved.some((r) => obsLower.includes(asLower(r.title))),
         sameTask: true,
-        sameArtifact: obs.toLowerCase().includes("artifact") || obs.toLowerCase().includes("build"),
-        relatedFailure: failures.some((f) => f.outcome && obs.toLowerCase().includes(f.outcome.toLowerCase())),
-        relatedDecision: decisions.some((d) => obs.toLowerCase().includes(d.decision.toLowerCase())),
+        sameArtifact: obsLower.includes("artifact") || obsLower.includes("build"),
+        relatedFailure: failures.some((f) => f.outcome && obsLower.includes(asLower(f.outcome))),
+        relatedDecision: decisions.some((d) => obsLower.includes(asLower(d.decision))),
         keywordOverlap: overlap,
         isRecent: run.startedAt > Date.now() - 86400000 * 7, // last 7 days
       });
@@ -98,7 +128,7 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
         candidates.push({
           id: `obs-${run.id}-${candidates.length}`,
           type: "observation",
-          content: obs,
+          content: obsStr,
           relevanceScore: score,
           relevanceReason: getRelevanceReason({ sameTask: true, keywordOverlap: overlap }),
           status,
@@ -110,13 +140,15 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
 
     // Score decisions from this run
     for (const decision of run.decisions || []) {
-      const decisionKeywords = new Set(decision.toLowerCase().split(/\s+/).filter(Boolean));
+      const decisionStr = asText(decision);
+      const decisionLower = asLower(decision);
+      const decisionKeywords = new Set(decisionLower.split(/\s+/).filter(Boolean));
       const overlap = [...taskKeywords].filter((k) => decisionKeywords.has(k)).length;
       const score = computeRelevanceScore({
-        hasExplicitDependency: graph ? graph.getDependencies(taskId).some((d) => d.content?.toLowerCase().includes(decision.toLowerCase())) : false,
-        matchesActiveRequirement: unresolved.some((r) => decision.toLowerCase().includes(r.title.toLowerCase())),
+        hasExplicitDependency: graph ? graph.getDependencies(taskId).some((d) => asLower(d.content).includes(decisionLower)) : false,
+        matchesActiveRequirement: unresolved.some((r) => decisionLower.includes(asLower(r.title))),
         sameTask: true,
-        sameArtifact: decision.toLowerCase().includes("artifact") || decision.toLowerCase().includes("build"),
+        sameArtifact: decisionLower.includes("artifact") || decisionLower.includes("build"),
         relatedFailure: false,
         relatedDecision: false,
         keywordOverlap: overlap,
@@ -127,7 +159,7 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
         candidates.push({
           id: `decision-${run.id}-${candidates.length}`,
           type: "decision",
-          content: decision,
+          content: decisionStr,
           relevanceScore: score,
           relevanceReason: getRelevanceReason({ hasExplicitDependency: score > 0.8, sameTask: true, keywordOverlap: overlap }),
           status,
@@ -139,9 +171,11 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
 
     // Score evidence from this run
     for (const evidence of run.evidence || []) {
+      const evidenceStr = asText(evidence);
+      const evidenceLower = asLower(evidence);
       const score = computeRelevanceScore({
         hasExplicitDependency: false,
-        matchesActiveRequirement: unresolved.some((r) => evidence.toLowerCase().includes(r.title.toLowerCase())),
+        matchesActiveRequirement: unresolved.some((r) => evidenceLower.includes(asLower(r.title))),
         sameTask: true,
         sameArtifact: false,
         relatedFailure: false,
@@ -154,7 +188,7 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
         candidates.push({
           id: `evidence-${run.id}-${candidates.length}`,
           type: "evidence",
-          content: evidence,
+          content: evidenceStr,
           relevanceScore: score,
           relevanceReason: getRelevanceReason({ sameTask: true }),
           status,
@@ -167,11 +201,12 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
 
   // Add previous failures as candidates
   for (const failure of failures) {
+    const failureOutcomeLower = asLower(failure.outcome);
     const score = computeRelevanceScore({
       hasExplicitDependency: false,
       matchesActiveRequirement: false,
       sameTask: true,
-      sameArtifact: failure.outcome?.toLowerCase().includes("artifact") || failure.outcome?.toLowerCase().includes("build"),
+      sameArtifact: failureOutcomeLower.includes("artifact") || failureOutcomeLower.includes("build"),
       relatedFailure: true,
       relatedDecision: false,
       keywordOverlap: 0,
@@ -182,7 +217,7 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
       candidates.push({
         id: `failure-${failure.id}`,
         type: "failure",
-        content: failure.outcome || "Failed run",
+        content: asText(failure.outcome) || "Failed run",
         relevanceScore: score,
         relevanceReason: getRelevanceReason({ relatedFailure: true }),
         status: "historical",
@@ -194,14 +229,15 @@ export function getHistoricalCandidates(taskId, root, graph = null) {
 
   // Add unresolved requirements as candidates
   for (const req of unresolved) {
-    const reqKeywords = new Set(req.title.toLowerCase().split(/\s+/).filter(Boolean));
+    const reqTitleLower = asLower(req.title);
+    const reqKeywords = new Set(reqTitleLower.split(/\s+/).filter(Boolean));
     const overlap = [...taskKeywords].filter((k) => reqKeywords.has(k)).length;
 
     if (overlap > 0) {
       candidates.push({
         id: `req-${req.id}`,
         type: "requirement",
-        content: req.title,
+        content: asText(req.title),
         relevanceScore: 0.9,
         relevanceReason: "active requirement",
         status: "unresolved",
