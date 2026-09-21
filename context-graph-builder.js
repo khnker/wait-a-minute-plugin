@@ -18,34 +18,38 @@ export function buildContextGraph(taskState, runState, evidenceLineage) {
   const g = new ContextGraph();
 
   // 1. Task Node
-  if (taskState?.taskId) {
+  const taskId = taskState?.taskId || null;
+  if (taskId) {
     g.addNode({
-      id: taskState.taskId,
+      id: taskId,
       type: "task",
-      content: taskState.contract?.objective || "Active task",
+      content: taskState?.contract?.objective || "Active task",
       metadata: { provenance: "user_decided" },
     });
   }
 
-  // 2. Requirement Nodes (mapped to output type or requirement type?)
-  // Canonical Graph defines "requirement" type. Adapting from taskState.requirements.
+  // 2. Requirement Nodes
   for (const req of taskState?.requirements || []) {
+    if (!req?.id) continue;
     g.addNode({
       id: req.id,
       type: "requirement",
       content: req.title || req.description || "",
       metadata: { provenance: "user_decided" },
     });
-    // Task requires requirement
-    g.addEdge({
-      from: taskState.taskId,
-      to: req.id,
-      type: "requires_completion",
-    });
+    // Task requires requirement (only if task node exists)
+    if (taskId) {
+      g.addEdge({
+        from: taskId,
+        to: req.id,
+        type: "requires_completion",
+      });
+    }
   }
 
   // 3. Evidence Lineage (mapped to canonical edges)
   for (const ev of evidenceLineage || []) {
+    if (!ev?.id) continue;
     g.addNode({
       id: ev.id,
       type: "evidence",
@@ -53,15 +57,14 @@ export function buildContextGraph(taskState, runState, evidenceLineage) {
       verified: ev.status === "valid",
       metadata: { provenance: "run_execution" },
     });
-    // Evidence supports requirement
-    if (ev.requirementId) {
+    // Evidence supports requirement (only if requirement node exists)
+    if (ev.requirementId && g.hasNode(ev.requirementId)) {
       g.addEdge({
         from: ev.id,
         to: ev.requirementId,
         type: "supports",
       });
     }
-
   }
 
   return g;
