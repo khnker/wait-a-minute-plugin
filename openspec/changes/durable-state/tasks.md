@@ -1,0 +1,21 @@
+# Tasks: Durable State
+
+- [ ] 1. Define state schemas for assessment/plan/evidence/completion/drift in `state-schema.js`.
+- [ ] 2. Implement atomic write helper (`atomicWrite(path, payload)`) using temp + rename.
+- [ ] 3. Implement schema validator wrapping every read/write.
+- [ ] 4. Implement `state-index.json` builder and incremental updater.
+- [ ] 5. Implement startup recovery:
+    - [ ] Hydrate in-flight tasks from durable state.
+    - [ ] Quarantine and report corrupted state.
+    - [ ] Resume from last completed step.
+- [ ] 6. Implement per-task ordering enforcement (assessment before plan, plan before evidence).
+- [ ] 7. Implement GC for orphaned/expired state with configurable retention.
+- [ ] 8. Implement `stateQuery(...)` API for drift, audit, and dashboard.
+- [ ] 9. Add tests:
+    - [ ] Atomic writes survive simulated crash mid-write (no torn files).
+    - [ ] Schema-invalid writes are rejected before commit.
+    - [ ] Recovery resumes from correct checkpoint.
+    - [ ] Corrupted state is quarantined, not silently dropped.
+    - [ ] GC removes only expired entries.
+    - [ ] Concurrent writes to the same task are serialized safely.
+- [ ] 10. End-to-end test: kill the agent mid-task → state recovers → agent resumes without redoing completed steps.
