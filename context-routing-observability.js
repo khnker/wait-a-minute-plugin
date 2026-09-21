@@ -75,6 +75,27 @@ export function explainRoutingDecision(item, context, graph) {
       type: reason.type,
       reason: reason.description,
     });
+  } else if (
+    context.missing &&
+    context.missing.some(
+      (g) =>
+        g.requiredBy === item.id ||
+        (typeof g.description === "string" && g.description.includes(item.id)) ||
+        (g.type === "missing_dependency" && g.requiredBy)
+    )
+  ) {
+    const gap = context.missing.find(
+      (g) =>
+        g.requiredBy === item.id ||
+        (typeof g.description === "string" && g.description.includes(item.id)) ||
+        (g.type === "missing_dependency" && g.requiredBy)
+    );
+    decisions.push({
+      itemId: item.id,
+      type: "missing",
+      reason: gap.description || "Required but missing",
+      requiredBy: gap.requiredBy,
+    });
   } else if (!context.included?.includes(item.id) && context.included) {
     decisions.push({
       itemId: item.id,
@@ -108,7 +129,13 @@ function explainInclusion(item, context, graph) {
 function explainExclusion(item, context, graph) {
   // Check if required but missing
   const gaps = context.missing || [];
-  const missingGap = gaps.find((g) => g.requiredBy === item.id);
+  const itemId = item.id;
+  const missingGap = gaps.find(
+    (g) =>
+      g.requiredBy === itemId ||
+      (typeof g.description === "string" && g.description.includes(itemId)) ||
+      (g.type === "missing_dependency" && g.requiredBy)
+  );
   if (missingGap) {
     return { type: "missing", description: missingGap.description };
   }
