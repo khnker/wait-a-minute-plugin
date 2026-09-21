@@ -1,31 +1,73 @@
-// Fixed version of execution-engine.js
-
 /**
  * Autonomous execution loop — hypothesis → classify → experiment → observe → replan.
  * Non-destructive: never hard-deletes. Failed approaches are archived/rejected.
+ *
+ * Decoupled into:
+ *   - observation-engine.js — raw observation recording
+ *   - evidence-engine.js    — evidence creation + lineage linking
+ *   - state-machine.js      — hypothesis / experiment status transitions
+ *
+ * This module orchestrates the three engines and remains the entry point
+ * for startExperiment / noteFailure / noteSuccess / handleContradiction.
  */
 
 import {
   createHypothesis,
   createExperiment,
-  recordObservation,
-  updateHypothesisStatus,
-  completeExperiment,
   failExperiment,
+  updateHypothesisStatus,
   hasRepetitiveFailure,
   archiveHypothesis,
-  getExperiment,
   HYPOTHESIS_STATUS,
-  EXPERIMENT_STATUS,
 } from "./cognition-store.js";
 import { guardAction } from "./runtime-guards.js";
 import { rejectHypothesis } from "./cognitive-state.js";
-import { assessObservation, createAssessment, AssessmentResult } from "./assessment-engine.js";
+import { assessObservation, AssessmentResult } from "./assessment-engine.js";
 import { noteContradiction } from "./hypothesis-manager.js";
+
+import {
+  recordRawObservation,
+  resolveExperimentContext,
+} from "./observation-engine.js";
+import {
+  produceExecutionEvidence,
+  linkEvidenceIfBound,
+} from "./evidence-engine.js";
+import {
+  deriveHypothesisStatus,
+  shouldReplan,
+  shouldNoteContradiction,
+} from "./state-machine.js";
 
 function describe(tool, args = {}) {
   const { hypothesisId: _h, ...rest } = args;
   return `${tool}:${JSON.stringify(rest)}`;
+}
+
+/**
+ * Pure orchestrator: turn an observation + assessment into the next
+ * hypothesis status and the persisted observation record. Delegates
+ * persistence to observation-engine and status derivation to state-machine.
+ */
+function processObservation(taskRoot, taskId, args) {
+  // Resolve experiment context first so the assessment has the right input shape
+  // (it needs experiment.expectedObservation to compare against args.actual).
+  const experiment = resolveExperimentContext(taskRoot, taskId, args);
+  const assessment = assessObservation(experiment ?? { id: null }, {
+    actual: args.actual,
+    unexpected: args.unexpected,
+    provenance: args.provenance,
+    experimentId: args.experimentId,
+  });
+  // Now persist with the *assessment* result, not the raw tool result.
+  const { observation } = recordRawObservation(taskRoot, taskId, {
+    ...args,
+    result: assessment.result,
+  });
+  const { status, severity } = deriveHypothesisStatus(assessment);
+  updateHypothesisStatus(taskRoot, taskId, args.hypothesisId, status);
+
+  return { assessment, hypothesisStatus: status, severity, observation };
 }
 
 export async function startExperiment(taskRoot, taskId, { statement, tool, args = {}, confidence = 0.5, expectedObservation }) {
@@ -45,69 +87,17 @@ export async function startExperiment(taskRoot, taskId, { statement, tool, args 
 
   const experiment = createExperiment(taskRoot, taskId, {
     hypothesisId: hypothesis.id,
+    tool,
+    args,
     actionDescription,
-    risk: guard.level,
     expectedObservation,
   });
+  updateHypothesisStatus(taskRoot, taskId, hypothesis.id, HYPOTHESIS_STATUS.TESTING);
   return { ok: true, hypothesis, experiment, guard };
 }
 
-export { createAssessment, assessObservation, AssessmentResult };
-
-/**
- * Determine hypothesis lifecycle status from an assessment.
- * - CONTRADICTED → REJECTED (hard contradiction) or TESTING (partial / ambiguous)
- * - INCONCLUSIVE → TESTING (keep probing)
- * - SUPPORTED → SUPPORTED
- */
-function deriveHypothesisStatus(assessment) {
-  if (assessment.result === AssessmentResult.SUPPORTED) return { status: HYPOTHESIS_STATUS.SUPPORTED, severity: null };
-  if (assessment.result === AssessmentResult.CONTRADICTED) {
-    const { summary = {} } = assessment;
-    const contradicted = summary.contradicted || 0;
-    const supported = summary.supported || 0;
-    if (contradicted > supported && contradicted > 0) return { status: HYPOTHESIS_STATUS.REJECTED, severity: "high" };
-    return { status: HYPOTHESIS_STATUS.TESTING, severity: "low" };
-  }
-  return { status: HYPOTHESIS_STATUS.TESTING, severity: null };
-}
-
-function processObservation(taskRoot, taskId, { hypothesisId, experimentId, result, actual, unexpected, provenance, reason, outcome, facts }) {
-  const stored = experimentId ? getExperiment(taskRoot, taskId, experimentId) : null;
-  const experiment = stored || { hypothesisId, id: experimentId };
-  const observation = { actual, unexpected, provenance, experimentId };
-  const assessment = assessObservation(experiment, observation);
-  const derived = deriveHypothesisStatus(assessment);
-
-  const persistedObs = recordObservation(taskRoot, taskId, {
-    experimentId,
-    hypothesisId,
-    result: assessment.result,
-    facts: facts || (outcome === "failure" ? [reason] : [result || "ok"]),
-    actual,
-    unexpected,
-    provenance,
-  });
-
-  let status;
-  if (assessment.result === AssessmentResult.SUPPORTED) {
-    status = HYPOTHESIS_STATUS.SUPPORTED;
-  } else if (assessment.result === AssessmentResult.CONTRADICTED) {
-    const { summary = {} } = assessment;
-    const contradicted = summary.contradicted || 0;
-    const supported = summary.supported || 0;
-    if (contradicted > supported && contradicted > 0) status = HYPOTHESIS_STATUS.REJECTED;
-    else status = HYPOTHESIS_STATUS.TESTING;
-  } else {
-    status = HYPOTHESIS_STATUS.TESTING;
-  }
-  updateHypothesisStatus(taskRoot, taskId, hypothesisId, status);
-
-  return { assessment, hypothesisStatus: status, severity: derived.severity, observation: persistedObs };
-}
-
 export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reason, actual, unexpected, provenance }) {
-  failExperiment(taskRoot, taskId, experimentId, reason);
+  if (experimentId) failExperiment(taskRoot, taskId, experimentId, reason);
   const { assessment, hypothesisStatus, severity } = processObservation(taskRoot, taskId, {
     hypothesisId,
     experimentId,
@@ -117,22 +107,23 @@ export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reas
     provenance,
     outcome: "failure",
   });
-  return { assessment, hypothesisStatus, severity, replan: assessment.result === AssessmentResult.CONTRADICTED && hypothesisStatus === HYPOTHESIS_STATUS.REJECTED };
+  return {
+    assessment,
+    hypothesisStatus,
+    severity,
+    replan: shouldReplan({ assessment, hypothesisStatus }),
+  };
 }
 
-import { createEvidence, linkEvidenceToRequirement } from "./evidence-lineage.js";
-
 export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, result, actual, unexpected, provenance, requirementId }) {
-  // 1. Crear evidencia formal primero para obtener evidenceId
-  const evidence = createEvidence(taskId, {
+  // 1. Create evidence first so we can carry its id into the observation facts.
+  const { evidence } = produceExecutionEvidence(taskId, taskRoot, {
     requirementId,
-    content: typeof result === "string" ? result : JSON.stringify(result ?? "ok"),
-    type: "TOOL_OUTPUT",
-    source: "execution-engine",
+    result,
     hypothesisId,
-  }, taskRoot);
+  });
 
-  // 2. Procesar observación con evidenceId en facts
+  // 2. Persist observation with the evidence id as the primary fact.
   const { assessment, hypothesisStatus, observation } = processObservation(taskRoot, taskId, {
     hypothesisId,
     experimentId,
@@ -144,15 +135,27 @@ export function noteSuccess(taskRoot, taskId, { hypothesisId, experimentId, resu
     facts: [evidence.id],
   });
 
-  // 3. Vincular en la cadena causal con el ID real de observación
-  const observationId = observation?.id;
-  if (observationId && requirementId) {
-    linkEvidenceToRequirement(evidence.id, requirementId, hypothesisId, experimentId, observationId, taskId, taskRoot);
-  }
+  // 3. Bind evidence to the requirement lineage when both sides are known.
+  linkEvidenceIfBound({
+    evidenceId: evidence.id,
+    requirementId,
+    hypothesisId,
+    experimentId,
+    observationId: observation?.id,
+    taskId,
+    taskRoot,
+  });
 
   if (assessment.result === AssessmentResult.CONTRADICTED) {
-    noteContradiction(taskId, hypothesisId, observation, assessment, taskRoot);
-    return { assessment, hypothesisStatus, severity: null, replan: hypothesisStatus !== HYPOTHESIS_STATUS.REJECTED };
+    if (shouldNoteContradiction({ assessment, hypothesisStatus })) {
+      noteContradiction(taskId, hypothesisId, observation, assessment, taskRoot);
+    }
+    return {
+      assessment,
+      hypothesisStatus,
+      severity: null,
+      replan: shouldReplan({ assessment, hypothesisStatus }),
+    };
   }
   return { assessment, hypothesisStatus };
 }
@@ -162,11 +165,12 @@ export function handleContradiction(taskRoot, taskId, { experiment, observation,
   updateHypothesisStatus(taskRoot, taskId, hypothesisId, "contradicted");
   rejectHypothesis(taskRoot, hypothesisId, "contradicted by observation");
   const contradiction = noteContradiction(taskId, hypothesisId, observation, assessment, taskRoot);
-  recordObservation(taskRoot, taskId, {
+  recordRawObservation(taskRoot, taskId, {
     experimentId,
+    hypothesisId,
     result: assessment.result,
     facts: [contradiction.detail],
-    source: { type: "execution-assessment" },
+    provenance: { type: "execution-assessment" },
   });
   const newHypothesis = createHypothesis(taskRoot, taskId, {
     statement: `[REPLAN] New hypothesis after contradicting ${hypothesisId}: reassess strategy`,
