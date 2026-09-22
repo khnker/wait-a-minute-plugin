@@ -123,12 +123,18 @@ export function adaptRouterResult(routerResult, options = {}) {
  * Execute router and adapt result for assembly.
  * This is the main integration point.
  *
- * @param {Object} graph - Context Graph
+ * Canonical path: Context Router is the sole authority for N3 selection.
+ * Silent fallbacks are forbidden; the only opt-in legacy selector is
+ * gated by env WAM_CONTEXT_SELECTOR=legacy OR options.useLegacySelector=true.
+ *
+ * @param {Object} graph - Context Graph (canonical ContextGraph instance)
  * @param {RouterAdapterOptions} options
  * @returns {AdapterResult}
  */
 export function routeAndAdapt(graph, options) {
-  const { taskId, budget = 4000 } = options;
+  const { taskId, budget = 4000, useLegacySelector = false } = options;
+  const legacySelectorAllowed =
+    process.env.WAM_CONTEXT_SELECTOR === "legacy" || useLegacySelector === true;
 
   if (!graph || !taskId) {
     return {
@@ -143,8 +149,25 @@ export function routeAndAdapt(graph, options) {
 
   try {
     const routerResult = resolveContext(graph, { taskId, maxTokens: budget });
-    return adaptRouterResult(routerResult, { budget });
+    const adapted = adaptRouterResult(routerResult, { budget });
+    // C02: mark source as legacy only when caller explicitly opted in
+    // AND router returned empty/insufficient — never silent.
+    if (legacySelectorAllowed && (!adapted.capsules || adapted.capsules.length === 0)) {
+      return { ...adapted, source: "legacy-allowed" };
+    }
+    return adapted;
   } catch (error) {
+    // Surface error: do NOT swap in legacy selector unless explicitly allowed.
+    if (!legacySelectorAllowed) {
+      return {
+        capsules: [],
+        sufficiency: "insufficient",
+        missing: [`router error: ${error.message}`],
+        contract: { conditions: [] },
+        routerResult: null,
+        source: "router-error",
+      };
+    }
     return {
       capsules: [],
       sufficiency: "insufficient",
@@ -159,6 +182,11 @@ export function routeAndAdapt(graph, options) {
 /**
  * Build a minimal context graph from task state.
  * Used when no pre-existing graph is available.
+ *
+ * @deprecated Callers should use buildRuntimeContextGraph() instead so all
+ * runtime layers (evidence, decisions, constraints, artifacts, observations,
+ * cognition, hypotheses, experiments) are represented. This helper is kept
+ * only for the legacy selector opt-in path (WAM_CONTEXT_SELECTOR=legacy).
  *
  * @param {Object} taskState
  * @param {string} root

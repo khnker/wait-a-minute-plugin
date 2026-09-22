@@ -76,7 +76,7 @@ export function runScenario(scenario, select) {
   const selectedTokens = nodesTokens(selectedIds.map((id) => nodes[id]).filter(Boolean));
   const pageFaults = Number(out?.pageFaults ?? 0);
   const reacquiredTokens = Number(out?.reacquiredTokens ?? 0);
-  const usedIds = Array.isArray(out?.usedIds) ? selectedIds : [];
+  const usedIds = Array.isArray(out?.usedIds) ? out.usedIds : [];
 
   const metrics = record({
     strategy: scenario.name + "#" + scenario.kind,

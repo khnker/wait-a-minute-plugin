@@ -32,7 +32,8 @@ import path from "node:path";
 import { getOperationalContext, summarizeOperationalContext, normalizeConfidence, confidenceLabel } from "./memory.js";
 import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
 import { loadCognitiveState, compactCognitiveState } from "./cognitive-state.js";
-import { routeAndAdapt, buildGraphFromTaskState } from "./router-adapter.js";
+import { routeAndAdapt } from "./router-adapter.js";
+import { buildRuntimeContextGraph } from "./runtime-context-graph.js";
 import { ADMISSION } from "./context-router.js";
 
 /**
@@ -243,7 +244,16 @@ export function assembleContext({
     // or returns insufficient without the legacy flag, surface insufficiency —
     // do NOT silently swap to it.
     if (!isTrivial) {
-      const graph = buildGraphFromTaskState(taskState, projectPath);
+      const graph = buildRuntimeContextGraph({
+        taskState,
+        runState: typeof runState !== "undefined" ? runState : null,
+        evidenceLineage: typeof evidenceLineage !== "undefined" ? evidenceLineage : [],
+        cognitionState: typeof cognitionState !== "undefined" ? cognitionState : null,
+        decisions: typeof decisions !== "undefined" ? decisions : [],
+        constraints: typeof constraints !== "undefined" ? constraints : [],
+        artifacts: typeof artifacts !== "undefined" ? artifacts : [],
+        observations: typeof observations !== "undefined" ? observations : [],
+      });
       const routerPkg = routeAndAdapt(graph, {
         taskId: taskState?.taskId,
         budget: flex,

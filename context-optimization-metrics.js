@@ -119,15 +119,19 @@ export function record(input) {
 
   // CWR: fraction of selected tokens that ended up unused.
   //     Token-weighted waste is more informative than a raw id ratio.
+  //     When `usedTokens` is not supplied, derive from the actual usedIds set
+  //     (intersected with selectedIds) rather than defaulting to selectedIds.
+  //     This ensures CWR reflects real downstream consumption.
   const usedSet = new Set(usedIds);
   let usedTokens = 0;
-  // We don't know the per-id token cost from the IDs alone; use a relative
-  // estimate from the id-set ratio and selectedTokens when no per-id costs
-  // are supplied. Callers may pass `usedTokens` directly to override.
   if (typeof input?.usedTokens === "number") {
     usedTokens = Math.max(0, Math.min(selectedTokens, Number(input.usedTokens)));
   } else if (selectedIds.length > 0) {
-    usedTokens = (usedSet.size / selectedIds.length) * selectedTokens;
+    // Count usedIds that actually belong to the selected set; estimate
+    // used tokens proportionally to selectedTokens.
+    let usedInSelection = 0;
+    for (const id of usedSet) if (selectedSet.has(id)) usedInSelection++;
+    usedTokens = (usedInSelection / selectedIds.length) * selectedTokens;
   } else {
     usedTokens = 0;
   }
