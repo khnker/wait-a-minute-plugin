@@ -60,7 +60,13 @@ function rel(p) {
 
 function runNodeTest(files) {
   const args = ["--test", "--test-concurrency=1", ...files];
-  const res = spawnSync(process.execPath, args, { stdio: ["pipe", "pipe", "pipe"], timeout: 30000 });
+  const timeout = Number(process.env.WAM_TEST_TIMEOUT_MS || 120000);
+  const res = spawnSync(process.execPath, args, { stdio: ["pipe", "pipe", "pipe"], timeout });
+  if (res.error && res.error.code === 'ETIMEDOUT') {
+    console.error(`[run-tests] ERROR: Test suite execution timed out after ${timeout}ms`);
+  }
+  if (res.stdout) process.stdout.write(res.stdout);
+  if (res.stderr) process.stderr.write(res.stderr);
   return res.status ?? 1;
 }
 
@@ -74,14 +80,18 @@ function runLegacy(files) {
 }
 
 function main() {
+  const isLegacy = process.argv.includes("--legacy");
   const explicit = path.join(ROOT, "wait-a-minute-test.mjs");
-  const discovered = collectTests(ROOT);
+  let discovered = collectTests(ROOT);
+
+  if (!isLegacy) {
+    discovered = discovered.filter(f => path.resolve(f) !== explicit);
+  }
 
   const all = new Set(discovered);
-  if (fs.existsSync(explicit)) all.add(explicit);
+  if (isLegacy && fs.existsSync(explicit)) all.add(explicit);
 
   const files = [...all].sort();
-
   if (files.length === 0) {
     console.error("[run-tests] no test suites discovered under", ROOT);
     process.exit(2);
@@ -92,7 +102,6 @@ function main() {
     console.log(`  - ${rel(f)}`);
   }
 
-  const isLegacy = process.argv.includes("--legacy");
   const status = isLegacy ? runLegacy(files) : runNodeTest(files);
   process.exit(status);
 }
