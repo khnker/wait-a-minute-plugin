@@ -8,3 +8,4 @@
 /.wam/
 # Engram AI agent memory
 .engram/
+node_modules/

@@ -19,6 +19,7 @@
  */
 
 import { ContextGraph } from "./context-graph.js";
+import { buildContextGraph } from "./context-graph-builder.js";
 
 /**
  * @typedef {Object} BuildRuntimeContextGraphInput
@@ -54,48 +55,23 @@ export function buildRuntimeContextGraph(input = {}) {
     experiments = [],
   } = input;
 
-  const g = new ContextGraph();
+  // Canonical primary source: delegate base graph (task + requirements +
+  // evidence) to context-graph-builder.js so node/edge schema and IDs
+  // stay canonical. The remaining state layers (cognition, decisions,
+  // constraints, artifacts, observations, hypotheses, experiments) are
+  // added below on top of the canonical base.
+  const g = buildContextGraph(taskState, runState, evidenceLineage);
   const taskId = taskState?.taskId || null;
 
-  // -- Task node --
-  if (taskId) {
-    g.addNode({
-      id: taskId,
-      type: "task",
-      content:
-        taskState?.contract?.objective ||
-        taskState?.lastAction ||
-        runState?.objective ||
-        "Active task",
-      metadata: {
-        provenance: "user_decided",
-        status: taskState?.status || runState?.status || "active",
-        runId: runState?.runId || null,
-      },
-    });
-  }
-
-  // -- Requirement nodes (task → requires_completion → requirement) --
-  //     We also emit an "output" shadow node per requirement to maintain
-  //     compatibility with Context Router (which expects output-type nodes
-  //     for its Phase 3 collection).
+  // -- Requirement shadow output nodes (router compatibility) --
+  //     The canonical requirement node + the task→requirement edge are
+  //     already produced by buildContextGraph() above. We only need the
+  //     shadow "output" node per requirement so Context Router's Phase 3
+  //     collection can resolve output-type ids.
   const requirementIds = new Set();
   for (const req of taskState?.requirements || []) {
     if (!req?.id) continue;
     requirementIds.add(req.id);
-    g.addNode({
-      id: req.id,
-      type: "requirement",
-      content: req.title || req.description || "",
-      metadata: {
-        provenance: "user_decided",
-        priority: req.priority || "normal",
-      },
-    });
-    if (taskId) {
-      g.addEdge({ from: taskId, to: req.id, type: "requires_completion" });
-    }
-    // Shadow output node for router compatibility.
     const outputId = `${req.id}::output`;
     g.addNode({
       id: outputId,

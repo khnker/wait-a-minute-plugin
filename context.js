@@ -41,7 +41,7 @@ const ALIASES = {
   ui: "frontend",
 };
 
-let _sessionCache = null;
+// --- CHANGE: session identity derived by root + OpenCode sessionID only ---
 
 function capsulesDir(root) {
   return path.join(root || process.cwd(), ".wam", "capsules");
@@ -67,16 +67,22 @@ function fileExists(p) {
   }
 }
 
-// -- Change 1: session identity -------------------------------------------------
+// -- Change 3: session identity derived per root --------------------------------
+// Session ID is scoped to (root, OpenCode sessionID), never global.
+// Different roots NEVER share session identity.
 
-export function getSessionId(root) {
-  if (_sessionCache) return _sessionCache;
+export function getSessionId(root, sessionID) {
   const file = sessionFile(root);
+  const key = `${root}:${sessionID || "default"}`;
+  // Per-(root,session) cache — never shared across roots
+  if (!getSessionId._cache) getSessionId._cache = new Map();
+  if (getSessionId._cache.has(key)) return getSessionId._cache.get(key);
+
   try {
     if (fileExists(file)) {
       const s = JSON.parse(fs.readFileSync(file, "utf-8"));
       if (s.session_id) {
-        _sessionCache = s.session_id;
+        getSessionId._cache.set(key, s.session_id);
         return s.session_id;
       }
     }
@@ -86,12 +92,12 @@ export function getSessionId(root) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ session_id: sid, created_at: nowIso() }, null, 2));
   } catch {}
-  _sessionCache = sid;
+  getSessionId._cache.set(key, sid);
   return sid;
 }
 
 export function resetSessionCache() {
-  _sessionCache = null;
+  if (getSessionId._cache) getSessionId._cache.clear();
 }
 
 // -- Change 1: capsule CRUD ------------------------------------------------------
@@ -589,6 +595,9 @@ export function resolveWamRoot(prompt = "", sessionRoot = process.cwd()) {
   // Sin match y sessionRoot no es repo → continuidad: repo hijo con memoria
   // .wam más reciente (el usuario sigue donde dejó el trabajo, no donde nació
   // el proceso). Evita que mensajes sin señal de repo caigan a la raíz vacía.
+  // NOTA: mtime se usa como tiebreaker ÚNICAMENTE entre repos que tienen ya
+  // memoria .wam — NO es la señal primaria. La resolución primaria es siempre
+  // por señales explícitas (paths del prompt) o coincidencia de repo.
   if (best === sessionRoot && !repoSet.includes(sessionRoot) && repoSet.length) {
     const withMemory = repoSet
       .map((r) => {

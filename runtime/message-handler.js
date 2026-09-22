@@ -286,18 +286,17 @@ export async function handleMessage(input, output, deps) {
     const state = waitAMinute.buildPersistedState(taskId, analysis, wamRoot);
     state.lastAction = promptText;
 
-    // Task Dedup - only if taskId was not explicitly provided or initialized as generic/new
-    if (!input?.taskId || GENERIC_TASK.test(input.taskId)) {
+    // Task Dedup - CANDIDATE ONLY: never overrides taskId implicitly.
+    // - If input.taskId is explicit → NEVER override; do NOT even consult findDuplicateTask
+    // - If taskId is generic/new → findDuplicateTask may return a candidate
+    //   but is reported, not assigned; caller decides via /wam task switch
+    const isExplicit = input?.taskId && !GENERIC_TASK.test(input.taskId);
+    if (!isExplicit) {
       const existingTaskId = findDuplicateTask(promptText, wamRoot);
       if (existingTaskId && existingTaskId !== taskId) {
-        console.log(`[wait-a-minute] Duplicate task detected: "${existingTaskId}" matches current prompt. Reusing existing task.`);
-        taskId = existingTaskId;
-        if (input.sessionID) sessionTasks.set(input.sessionID, taskId);
-        const existingState2 = getTaskState(taskId, wamRoot);
-        if (existingState2) {
-          emitTextPart(output, `[wait-a-minute] Tarea existente detectada: ${taskId} (fase ${existingState2.phase}). Continuando con la tarea existente.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-          return;
-        }
+        // Candidate-only: report, do not reassign. The session continues with
+        // the freshly-initialized taskId; the user can reuse via /wam task switch.
+        emitTextPart(output, `[wait-a-minute] Tarea similar detectada: ${existingTaskId} (usa /wam task switch ${existingTaskId} para retomar)`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
       }
     }
 

@@ -371,16 +371,30 @@ export function createEvidence(check, result) {
 
 /**
  * Evalúa un requirement a partir de sus checks (todos obligatorios):
- * VERIFIED solo si todos los resultados son PASS. Sin verificación parcial.
+ * VERIFIED solo si todos los resultados son PASS y check_id corresponde 1:1.
+ * Sin verificación parcial ni duplicados.
  */
 export function evaluateRequirement(checks, results) {
   const list = Array.isArray(checks) ? checks : [];
   const res = Array.isArray(results) ? results : [];
   if (!list.length) return { status: "VERIFYING", reason: "sin checks definidos" };
   if (res.length !== list.length) return { status: "VERIFYING", reason: "checks pendientes de ejecutar" };
+  // Validación uno-a-uno por check_id
+  const checkIds = new Set(list.map((c) => c.check_id || c.id || ""));
+  const resultIds = new Set(res.map((r) => r.check_id || r.id || ""));
+  if ([...checkIds].every((id) => resultIds.has(id)) === false) {
+    return { status: "VERIFYING", reason: "mapeo check_id incompleto o duplicado" };
+  }
+  // Detectar check_id duplicados en results
+  const seen = new Set();
+  for (const r of res) {
+    const id = r.check_id || r.id || "";
+    if (seen.has(id)) return { status: "VERIFYING", reason: `check_id duplicado: ${id}` };
+    seen.add(id);
+  }
   const failed = res.find((r) => r.status !== "PASS");
   if (failed) return { status: "VERIFYING", reason: `${failed.check_id || "?"}: ${failed.status}` };
-  return { status: "VERIFIED", reason: "todos los checks pasaron" };
+  return { status: "VERIFIED", reason: "todos los checks pasaron y mapeo es uno-a-uno" };
 }
 
 /**

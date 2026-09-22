@@ -147,9 +147,12 @@ export function linkEvidenceToRequirement(evidenceId, requirementId, hypothesisI
   return evidence;
 }
 
-export function invalidateDependentEvidence(taskId, hypothesisId, reason, root) {
+export function invalidateDependentEvidence(taskId, hypothesisIdOrRequirementId, reason, root) {
   const allEvidence = getAllEvidence(taskId, root);
-  const dependent = allEvidence.filter(ev => ev.hypothesisId === hypothesisId && ev.status !== "stale");
+  const dependent = allEvidence.filter(ev =>
+    (ev.hypothesisId === hypothesisIdOrRequirementId || ev.requirementId === hypothesisIdOrRequirementId) &&
+    ev.status !== "stale"
+  );
   for (const ev of dependent) {
     ev.status = "stale";
     ev.invalidationReason = reason;
@@ -178,7 +181,13 @@ export function getAllEvidence(taskId, root) {
     }
   }
 
-  return evidenceList.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return evidenceList.sort((a, b) => {
+    const ta = Date.parse(a.createdAt) || 0;
+    const tb = Date.parse(b.createdAt) || 0;
+    if (ta !== tb) return tb - ta;
+    if (a.id && b.id && a.id !== b.id) return a.id < b.id ? 1 : -1;
+    return 0;
+  });
 }
 
 export function getEvidenceForRequirement(taskId, requirementId, root) {
@@ -201,7 +210,14 @@ export function verifyEvidence(taskId, evidenceId, criterion, result, root) {
     verifiedAt: Date.now(),
   });
   if (result === "PASS") {
-    evidence.status = "valid";
+    const hasFullLineage =
+      evidence.requirementId && evidence.hypothesisId &&
+      evidence.experimentId && evidence.observationId;
+    if (hasFullLineage) {
+      evidence.status = "valid";
+    } else {
+      evidence.status = "insufficient";
+    }
   } else if (result === "PARTIAL") {
     evidence.status = "insufficient";
   }
@@ -236,18 +252,19 @@ export function detectOrphanedEvidence(taskId, root) {
 }
 
 export function detectInvalidatedEvidence(taskId, currentEnvironment, root) {
-  const state = getTaskState(taskId, root);
-  if (!state) return [];
   const allEvidence = getAllEvidence(taskId, root);
-  if (!state.currentEnvironment) return [];
-  const oldEnv = state.currentEnvironment;
-  const newEnv = currentEnvironment;
-  if (oldEnv.os !== newEnv.os || oldEnv.nodeVersion !== newEnv.nodeVersion ||
-      oldEnv.executable !== newEnv.executable || oldEnv.version !== newEnv.version ||
-      (oldEnv.repositoryRevision || "") !== (newEnv.repositoryRevision || "")) {
-    return allEvidence.filter((ev) => ev.status === "valid" || ev.status === "superseded");
-  }
-  return [];
+  const newEnv = currentEnvironment || {};
+  const invalidated = allEvidence.filter((ev) => {
+    if (ev.status !== "valid" && ev.status !== "superseded") return false;
+    const oldEnv = ev.environment || {};
+    return Object.keys(oldEnv).some((key) => {
+      const oldVal = oldEnv[key];
+      const newVal = newEnv[key];
+      if (oldVal === undefined && newVal === undefined) return false;
+      return oldVal !== newVal;
+    });
+  });
+  return invalidated.map((ev) => ({ evidence: ev, previousEnvironment: ev.environment, currentEnvironment: newEnv }));
 }
 
 export function getLineageForRequirement(taskId, requirementId, root) {
@@ -377,7 +394,8 @@ export function getLineage(requirementIdOrTaskId, requirementId, root) {
     experiments: [...new Set(evidence.map((e) => e.experimentId).filter(Boolean))],
     observations: [...new Set(evidence.map((e) => e.observationId).filter(Boolean))],
     evidence,
-    ...lineage,
+    requirement: lineage.requirement,
+    evidenceEntries: lineage.evidence,
   };
 }
 

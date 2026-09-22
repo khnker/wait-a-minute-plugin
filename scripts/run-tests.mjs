@@ -8,11 +8,15 @@
  * node --test --test-concurrency=1, and prints a summary.
  *
  * Exits non-zero if no suites are found or any suite fails.
+ *
+ * Exports `collectTests(root)` so tests/test-discovery.test.mjs can verify
+ * the recursive discovery contract without spawning the runner.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const ROOT = process.cwd();
 const IGNORE_DIRS = new Set([
@@ -28,9 +32,9 @@ const IGNORE_DIRS = new Set([
 /**
  * Recursively collect *.test.mjs files under root, excluding IGNORE_DIRS.
  * @param {string} dir
- * @returns {string[]} absolute paths, sorted deterministically by caller
+ * @returns {string[]} absolute paths (order is depth-first, lex within dir)
  */
-function collectTests(dir) {
+export function collectTests(dir) {
   const out = [];
   let entries;
   try {
@@ -56,63 +60,49 @@ function rel(p) {
 
 function runNodeTest(files) {
   const args = ["--test", "--test-concurrency=1", ...files];
-  const res = spawnSync(process.execPath, args, { stdio: "inherit" });
+  const res = spawnSync(process.execPath, args, { stdio: ["pipe", "pipe", "pipe"], timeout: 30000 });
   return res.status ?? 1;
 }
 
 function runLegacy(files) {
-  // wait-a-minute-test.mjs is a plain assertion script, not a node --test file
-  const target = files.find((f) => path.basename(f) === "wait-a-minute-test.mjs");
-  if (!target) return 0;
-  const res = spawnSync(process.execPath, [target], { stdio: "inherit" });
+  // wait-a-minute-test.mjs is the legacy monolithic suite. The new runner
+  // already discovers it recursively, so this path is reserved for explicit
+  // `npm run test:legacy`.
+  const args = ["--test", "--test-concurrency=1", ...files];
+  const res = spawnSync(process.execPath, args, { stdio: "inherit" });
   return res.status ?? 1;
 }
 
 function main() {
-  const discovered = collectTests(ROOT).map((p) => path.resolve(p));
-  const legacyPath = path.resolve(ROOT, "wait-a-minute-test.mjs");
+  const explicit = path.join(ROOT, "wait-a-minute-test.mjs");
+  const discovered = collectTests(ROOT);
 
-  const suiteSet = new Set(discovered);
-  if (fs.existsSync(legacyPath)) suiteSet.add(legacyPath);
+  const all = new Set(discovered);
+  if (fs.existsSync(explicit)) all.add(explicit);
 
-  const suites = [...suiteSet].sort((a, b) => rel(a).localeCompare(rel(b)));
+  const files = [...all].sort();
 
-  if (suites.length === 0) {
-    console.error("[run-tests] no test suites found");
-    process.exit(1);
+  if (files.length === 0) {
+    console.error("[run-tests] no test suites discovered under", ROOT);
+    process.exit(2);
   }
 
-  console.log(`[run-tests] discovered ${suites.length} suite(s):`);
-  for (const s of suites) console.log(`  - ${rel(s)}`);
-
-  // 1) Run wait-a-minute-test.mjs as a plain node script (legacy contract)
-  const legacyFiles = suites.filter(
-    (f) => path.basename(f) === "wait-a-minute-test.mjs"
-  );
-  const nodeTestFiles = suites.filter(
-    (f) => path.basename(f) !== "wait-a-minute-test.mjs"
-  );
-
-  let failed = 0;
-  const legacyStatus = runLegacy(legacyFiles);
-  if (legacyStatus !== 0) {
-    console.error(`[run-tests] legacy suite failed (exit ${legacyStatus})`);
-    failed++;
+  console.log(`[run-tests] discovered ${files.length} suites`);
+  for (const f of files) {
+    console.log(`  - ${rel(f)}`);
   }
 
-  if (nodeTestFiles.length > 0) {
-    const status = runNodeTest(nodeTestFiles);
-    if (status !== 0) {
-      console.error(`[run-tests] node --test failed (exit ${status})`);
-      failed++;
-    }
-  }
-
-  console.log(`[run-tests] executed ${suites.length} suite(s)`);
-  if (failed > 0) {
-    console.error(`[run-tests] ${failed} runner(s) failed`);
-    process.exit(1);
-  }
+  const isLegacy = process.argv.includes("--legacy");
+  const status = isLegacy ? runLegacy(files) : runNodeTest(files);
+  process.exit(status);
 }
 
-main();
+// Only run main when executed directly. When imported by test-discovery.test.mjs
+// we want to access collectTests without side effects.
+const invokedDirectly =
+  typeof process.argv[1] === "string" &&
+  fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+
+if (invokedDirectly) {
+  main();
+}

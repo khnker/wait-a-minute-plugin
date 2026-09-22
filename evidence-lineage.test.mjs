@@ -109,8 +109,23 @@ describe("getEvidence", () => {
 describe("getAllEvidence", () => {
   it("returns all evidence sorted by createdAt", () => {
     const taskId = setupTask();
-    createEvidence(taskId, { requirementId: "req-1", content: "First" }, TMP);
-    createEvidence(taskId, { requirementId: "req-1", content: "Second" }, TMP);
+    const first = createEvidence(taskId, {
+      requirementId: "req-1", hypothesisId: "hyp-1",
+      experimentId: "exp-1", observationId: "obs-1", content: "First"
+    }, TMP);
+    const firstFile = path.join(TMP, ".wam", "tasks", taskId, "lineage", `${first.id}.json`);
+    const firstData = JSON.parse(fs.readFileSync(firstFile, "utf-8"));
+    firstData.createdAt = "2020-01-01T00:00:00.000Z";
+    fs.writeFileSync(firstFile, JSON.stringify(firstData));
+
+    const second = createEvidence(taskId, {
+      requirementId: "req-1", hypothesisId: "hyp-1",
+      experimentId: "exp-1", observationId: "obs-1", content: "Second"
+    }, TMP);
+    const secondFile = path.join(TMP, ".wam", "tasks", taskId, "lineage", `${second.id}.json`);
+    const secondData = JSON.parse(fs.readFileSync(secondFile, "utf-8"));
+    secondData.createdAt = "2020-01-02T00:00:00.000Z";
+    fs.writeFileSync(secondFile, JSON.stringify(secondData));
 
     const all = getAllEvidence(taskId, TMP);
     assert.equal(all.length, 2);
@@ -133,21 +148,40 @@ describe("getEvidenceForRequirement", () => {
 describe("getValidEvidence", () => {
   it("returns only valid evidence", () => {
     const taskId = setupTask();
-    const ev1 = createEvidence(taskId, { requirementId: "req-1", content: "Ev1" }, TMP);
-    const ev2 = createEvidence(taskId, { requirementId: "req-1", content: "Ev2" }, TMP);
+    const ev1 = createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
+      content: "Ev1"
+    }, TMP);
+    const ev2 = createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
+      content: "Ev2"
+    }, TMP);
 
     verifyEvidence(taskId, ev1.id, "criterion", "PASS", TMP);
 
     const valid = getValidEvidence(taskId, "req-1", TMP);
     assert.equal(valid.length, 1);
     assert.equal(valid[0].id, ev1.id);
+    assert.equal(valid[0].status, "valid");
   });
 });
 
 describe("verifyEvidence", () => {
-  it("sets status to valid on PASS", () => {
+  it("sets status to valid on PASS with full lineage", () => {
     const taskId = setupTask();
-    const ev = createEvidence(taskId, { requirementId: "req-1", content: "Test" }, TMP);
+    const ev = createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
+      content: "Test"
+    }, TMP);
     verifyEvidence(taskId, ev.id, "All tests pass", "PASS", TMP);
 
     const updated = getEvidence(taskId, ev.id, TMP);
@@ -217,6 +251,9 @@ describe("detectInvalidatedEvidence", () => {
     const taskId = setupTask();
     const ev = createEvidence(taskId, {
       requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
       content: "Chromium works",
       environment: { os: "linux", nodeVersion: "v20", executable: "chromium", version: "1.0" },
     }, TMP);
@@ -237,6 +274,9 @@ describe("detectInvalidatedEvidence", () => {
     const taskId = setupTask();
     const ev = createEvidence(taskId, {
       requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
       content: "Test",
       environment: { os: "linux", nodeVersion: "v20" },
     }, TMP);
@@ -254,7 +294,13 @@ describe("detectInvalidatedEvidence", () => {
 describe("isRequirementSatisfied", () => {
   it("true when valid evidence exists", () => {
     const taskId = setupTask();
-    const ev = createEvidence(taskId, { requirementId: "req-1", content: "Test" }, TMP);
+    const ev = createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
+      content: "Test"
+    }, TMP);
     verifyEvidence(taskId, ev.id, "Test", "PASS", TMP);
 
     assert.equal(isRequirementSatisfied(taskId, "req-1", TMP), true);
@@ -262,7 +308,13 @@ describe("isRequirementSatisfied", () => {
 
   it("false when no valid evidence", () => {
     const taskId = setupTask();
-    createEvidence(taskId, { requirementId: "req-1", content: "Test" }, TMP);
+    createEvidence(taskId, {
+      requirementId: "req-1",
+      hypothesisId: "hyp-1",
+      experimentId: "exp-1",
+      observationId: "obs-1",
+      content: "Test"
+    }, TMP);
     assert.equal(isRequirementSatisfied(taskId, "req-1", TMP), false);
   });
 });
@@ -270,7 +322,10 @@ describe("isRequirementSatisfied", () => {
 describe("getCompletionStatus", () => {
   it("reports completion status correctly", () => {
     const taskId = setupTask();
-    const ev1 = createEvidence(taskId, { requirementId: "req-1", content: "Test" }, TMP);
+    const ev1 = createEvidence(taskId, {
+      requirementId: "req-1", hypothesisId: "hyp-1",
+      experimentId: "exp-1", observationId: "obs-1", content: "Test"
+    }, TMP);
     verifyEvidence(taskId, ev1.id, "Test", "PASS", TMP);
 
     const status = getCompletionStatus(taskId, TMP);
@@ -281,8 +336,14 @@ describe("getCompletionStatus", () => {
 
   it("canComplete true when all satisfied and no orphans", () => {
     const taskId = setupTask();
-    const ev1 = createEvidence(taskId, { requirementId: "req-1", content: "Test" }, TMP);
-    const ev2 = createEvidence(taskId, { requirementId: "req-2", content: "Test" }, TMP);
+    const ev1 = createEvidence(taskId, {
+      requirementId: "req-1", hypothesisId: "hyp-1",
+      experimentId: "exp-1", observationId: "obs-1", content: "Test"
+    }, TMP);
+    const ev2 = createEvidence(taskId, {
+      requirementId: "req-2", hypothesisId: "hyp-2",
+      experimentId: "exp-2", observationId: "obs-2", content: "Test"
+    }, TMP);
     verifyEvidence(taskId, ev1.id, "Test", "PASS", TMP);
     verifyEvidence(taskId, ev2.id, "Test", "PASS", TMP);
 
@@ -294,8 +355,14 @@ describe("getCompletionStatus", () => {
 describe("getEvidenceSummary", () => {
   it("aggregates evidence counts", () => {
     const taskId = setupTask();
-    createEvidence(taskId, { requirementId: "req-1", content: "Test1" }, TMP);
-    const ev2 = createEvidence(taskId, { requirementId: "req-1", content: "Test2" }, TMP);
+    createEvidence(taskId, {
+      requirementId: "req-1", hypothesisId: "hyp-1",
+      experimentId: "exp-1", observationId: "obs-1", content: "Test1"
+    }, TMP);
+    const ev2 = createEvidence(taskId, {
+      requirementId: "req-1", hypothesisId: "hyp-1",
+      experimentId: "exp-1", observationId: "obs-1", content: "Test2"
+    }, TMP);
     verifyEvidence(taskId, ev2.id, "Test", "PASS", TMP);
 
     const summary = getEvidenceSummary(taskId, TMP);

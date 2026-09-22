@@ -33,6 +33,7 @@ import { getOperationalContext, summarizeOperationalContext, normalizeConfidence
 import { selectContext, estimateCapsuleTokens, getSessionId } from "./context.js";
 import { loadCognitiveState, compactCognitiveState } from "./cognitive-state.js";
 import { routeAndAdapt } from "./router-adapter.js";
+import { buildContextGraph } from "./context-graph-builder.js";
 import { buildRuntimeContextGraph } from "./runtime-context-graph.js";
 import { ADMISSION } from "./context-router.js";
 
@@ -243,7 +244,14 @@ export function assembleContext({
     // via WAM_CONTEXT_SELECTOR=legacy in env/options. If router cannot resolve
     // or returns insufficient without the legacy flag, surface insufficiency —
     // do NOT silently swap to it.
-    if (!isTrivial) {
+if (!isTrivial) {
+      // Canonical primary source: context-graph-builder.buildContextGraph
+      // provides the base task/requirement/evidence nodes. The runtime
+      // builder then LAYERS on the additional state slices (decisions,
+      // constraints, artifacts, observations, cognition, hypotheses,
+      // experiments) by delegating to buildContextGraph for the base.
+      // This keeps context-graph-builder.js as the single source of truth
+      // for the canonical node/edge schema while preserving full coverage.
       const graph = buildRuntimeContextGraph({
         taskState,
         runState: typeof runState !== "undefined" ? runState : null,
@@ -252,7 +260,8 @@ export function assembleContext({
         decisions: typeof decisions !== "undefined" ? decisions : [],
         constraints: typeof constraints !== "undefined" ? constraints : [],
         artifacts: typeof artifacts !== "undefined" ? artifacts : [],
-        observations: typeof observations !== "undefined" ? observations : [],
+        observations:
+          typeof observations !== "undefined" ? observations : [],
       });
       const routerPkg = routeAndAdapt(graph, {
         taskId: taskState?.taskId,

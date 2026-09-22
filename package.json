@@ -3,7 +3,6 @@
   "description": "Cognitive pre-flight and execution-control plugin for OpenCode",
   "version": "1.1.0",
   "main": "index.js",
-  "type": "module",
   "engines": {
     "node": ">=20"
   },

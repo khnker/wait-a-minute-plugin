@@ -229,17 +229,25 @@ function readActiveTaskRecord(root) {
   }
 }
 
-function readActiveTaskIdFresh(root, ttlMs = 60000) {
-  const rec = readActiveTaskRecord(root);
-  if (!rec) return null;
-  if (!rec.ts) return null;
-  if (Date.now() - rec.ts <= ttlMs) return rec.id;
-  return null;
-}
 
-function writeActiveTaskId(id, root) {
-  fs.mkdirSync(path.dirname(ACTIVE_FILE(root)), { recursive: true });
-  fs.writeFileSync(ACTIVE_FILE(root), JSON.stringify({ id, ts: Date.now() }));
+
+function writeActiveTaskId(id, root, options = {}) {
+  // Ownership: include sessionId + projectRoot + ts for session isolation.
+  // Legacy format {id,ts} remains readable; new format adds ownership fields.
+  const payload = {
+    id,
+    ts: Date.now(),
+    sessionId: options.sessionId || null,
+    projectRoot: options.projectRoot || root || process.cwd(),
+  };
+  try {
+    fs.mkdirSync(path.dirname(ACTIVE_FILE(root)), { recursive: true });
+    fs.writeFileSync(ACTIVE_FILE(root), JSON.stringify(payload));
+  } catch (err) {
+    // Critical write: surface error to caller for handling — never silent
+    console.error(`[WAM] writeActiveTaskId failed for ${id} at ${root}:`, err.message);
+    throw err;
+  }
 }
 
 function listTaskIds(root) {
@@ -256,8 +264,21 @@ function listTaskIds(root) {
 
 // -- Persistencia por sesión: N sesiones pueden trabajar la MISMA carpeta sin
 // colisionar en default-task / task-context.md / active-task. ----------------
-
 const GENERIC_TASK = /^(default-task|task|general|)$/;
+
+function readActiveTaskIdFresh(root, options = {}) {
+  const rec = readActiveTaskRecord(root);
+  if (!rec) return null;
+  const ttlMs = options.ttlMs || 60000;
+  if (!rec.ts) return null;
+  if (Date.now() - rec.ts > ttlMs) return null;
+  // Validate ownership: if record has sessionId, it must match caller session;
+  // if record has projectRoot, it must match caller's root. This prevents
+  // session A from silently adopting session B's active-task.
+  if (options.sessionId && rec.sessionId && rec.sessionId !== options.sessionId) return null;
+  if (options.projectRoot && rec.projectRoot && rec.projectRoot !== root) return null;
+  return rec.id;
+}
 
 /**
  * taskId efectivo de WAM para un mensaje:

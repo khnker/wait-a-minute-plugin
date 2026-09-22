@@ -4,7 +4,7 @@
  * Analiza peticiones de usuario antes de la resolución de skills y la ejecución del agente.
  * Clasifica la tarea, inspecciona el proyecto, detecta supuestos y selecciona skills.
  */
-console.log('DEBUG: Engine loaded from /home/nicolas/dev/wait-a-minute-plugin/engine.js');
+// Debug removed — no hardcoded paths in runtime package.
 
 const fs = await import("node:fs");
 const path = await import("node:path");
