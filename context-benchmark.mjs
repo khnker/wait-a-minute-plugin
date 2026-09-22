@@ -37,6 +37,7 @@ import {
 } from "./context-sufficiency-oracle.js";
 
 import { testMinimality } from "./context-minimality.js";
+import { wamRouterSelector } from "./context-benchmark-router.mjs";
 
 // ---------------------------------------------------------------------------
 // Types (JSDoc)
@@ -655,9 +656,33 @@ if (isMain(import.meta)) {
   // table. The report script imports this module and never enters this
   // branch because its `process.argv[1]` differs from this module's URL.
   const scenarios = [...corpusA(), ...corpusB(), ...corpusC()];
+
+  // Strategy 1: scoring selector (baseline heuristic)
   const select = scoringSelector();
   const { results, summary } = runBenchmark(scenarios, select);
-  const rows = results.map((r) => ({
+  console.log("=== Scoring Selector (baseline) ===");
+  printTable(rowsFromResults(results));
+  console.log("");
+  console.log("Summary by strategy:");
+  for (const [, s] of Object.entries(summary)) {
+    console.log(JSON.stringify(s));
+  }
+
+  // Strategy 2: real WAM Context Router (canonical production selector)
+  console.log("");
+  console.log("=== WAM Context Router (canonical) ===");
+  const routerSelect = wamRouterSelector();
+  const routerRun = runBenchmark(scenarios, routerSelect);
+  printTable(rowsFromResults(routerRun.results));
+  console.log("");
+  console.log("Router summary by strategy:");
+  for (const [, s] of Object.entries(routerRun.summary)) {
+    console.log(JSON.stringify(s));
+  }
+}
+
+function rowsFromResults(results) {
+  return results.map((r) => ({
     scenario: r.name,
     kind: r.kind,
     CRR: r.metrics.CRR,
@@ -674,12 +699,6 @@ if (isMain(import.meta)) {
     opt: r.optimization.pass ? "OK" : "FAIL",
     gate: r.gates.pass ? "PASS" : "FAIL",
   }));
-  printTable(rows);
-  console.log("");
-  console.log("Summary by strategy:");
-  for (const [, s] of Object.entries(summary)) {
-    console.log(JSON.stringify(s));
-  }
 }
 
 export const __gates = DEFAULT_GATES;
