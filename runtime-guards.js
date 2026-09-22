@@ -1,5 +1,6 @@
 import { findRepeatedExperiment, hasRepetitiveFailure } from "./cognition-store.js";
 import { evaluateAction } from "./risk-engine.js";
+import { getCapability, CAPABILITY_LEVELS } from "./policy/action-capabilities.js";
 
 const HARD_DELETE_RE =
   /\b(rmdir|unlink|shred|truncate)\b|\brm\s+(-[a-zA-Z]*f|--force)|\bgit\s+reset\s+--hard\b|\b(DROP|TRUNCATE)\s+(TABLE|DATABASE)\b/i;
@@ -28,6 +29,20 @@ function actionDescription(tool, args = {}) {
  * 4. Scope enforcement
  */
 export async function guardAction(tool, args, taskRoot, taskId) {
+  // 0. Fail-closed (C01): herramientas no catalogadas se bloquean aquí,
+  //    ANTES de cualquier otra evaluación. Esto crea una segunda línea
+  //    de defensa independiente del risk-engine: aunque la evaluación
+  //    contextual cambie, una herramienta desconocida nunca llega a
+  //    ejecutarse.
+  const capability = getCapability(tool);
+  if (capability === CAPABILITY_LEVELS.UNKNOWN) {
+    return {
+      allowed: false,
+      level: "BLOCKED",
+      reason: `fail-closed: herramienta no catalogada (${tool})`,
+    };
+  }
+
   if (isHardDelete(tool, args)) {
     return {
       allowed: false,

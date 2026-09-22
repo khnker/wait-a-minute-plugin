@@ -436,43 +436,54 @@ function classifyActionAgainstStrategy(action, tool, args, approvedStrategy) {
     return { covered: null, reason: "No active approved strategy" };
   }
 
-  const actionLower = String(action || "").toLowerCase();
-  const toolLower = String(tool || "").toLowerCase();
-  const cmdLower = String(args?.command || args?.cmd || args?.script || "").toLowerCase();
+  const { classifyByCapabilities, buildCandidate } = require_policy_capabilities();
+  const candidate = buildCandidate({ action, tool, args });
 
-  // 1. Prohibited actions: ALWAYS require explicit user authorization,
-  //    even if strategy is approved. Strategy continuity is not blanket.
-  for (const prohibited of approvedStrategy.prohibitedActions || []) {
-    if (actionLower.includes(prohibited.toLowerCase())) {
-      return {
-        covered: false,
-        reason: `Acción prohibida explícitamente en strategy: ${prohibited}`,
-      };
+  // Normalize legacy string-list strategies into structured capability records
+  // on the fly. Substring matching is intentionally NOT used. Each legacy
+  // string becomes either an action capability (single token, e.g. "edit") or
+  // a command capability (multi-token, e.g. "npm test" → executable "npm",
+  // argsPattern ["test"]). This prevents "npm test" from accidentally covering
+  // "npm publish" or "npm install malicious".
+  const toCapability = (s) => {
+    const str = String(s).trim();
+    const parts = str.split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return null;
+    if (parts.length === 1) return { capability: "action.execute", action: parts[0] };
+    return { capability: "command.execute", executable: parts[0], argsPattern: parts.slice(1) };
+  };
+  const allowedCaps = (approvedStrategy.allowedActions || []).map(toCapability).filter(Boolean);
+  const prohibitedCaps = (approvedStrategy.prohibitedActions || []).map(toCapability).filter(Boolean);
+
+  const verdict = classifyByCapabilities(candidate, {
+    allowed: allowedCaps,
+    prohibited: prohibitedCaps,
+  });
+
+  if (!verdict.allowed) {
+    if (verdict.reason.startsWith("prohibited-capability")) {
+      const capName = verdict.reason.split(":")[1];
+      return { covered: false, reason: `Acción prohibida explícitamente en strategy (${capName})` };
     }
-    if (cmdLower.includes(prohibited.toLowerCase())) {
-      return {
-        covered: false,
-        reason: `Comando prohibido explícitamente en strategy: ${prohibited}`,
-      };
+    if (verdict.reason === "no-matching-capability") {
+      return { covered: false, reason: "Acción no cubierta por capabilities estructuradas de la strategy" };
     }
+    return { covered: false, reason: verdict.reason };
   }
-
-  // 2. Allowed actions: cover SAFE and TACTICAL execution of the strategy.
-  //    Examples: read, search, inspect, test, lint, install dependency,
-  //    install browser binary, run validation, modify source, retry.
-  for (const allowed of approvedStrategy.allowedActions || []) {
-    if (actionLower.includes(allowed.toLowerCase())) return { covered: true, reason: `allowed: ${allowed}` };
-    if (toolLower.includes(allowed.toLowerCase())) return { covered: true, reason: `tool: ${allowed}` };
-    if (cmdLower.includes(allowed.toLowerCase())) return { covered: true, reason: `cmd: ${allowed}` };
-  }
-
-  // 3. Heuristic fallback: SAFE/inspector tools are always covered when
-  //    strategy is active (they cannot break it).
-  const safeTools = ["read", "grep", "glob", "ls", "fetch", "webfetch", "test", "lint"];
-  if (safeTools.includes(toolLower)) return { covered: true, reason: "SAFE tool under active strategy" };
-
-  return { covered: false, reason: "Acción no cubierta explícitamente por la estrategia aprobada" };
+  return { covered: true, reason: verdict.reason };
 }
+
+function require_policy_capabilities() {
+  return require_capabilities_module || (require_capabilities_module = loadCapabilities());
+}
+let require_capabilities_module = null;
+function loadCapabilities() {
+  return require("./policy/strategy-capabilities.js");
+}
+
+// (Legacy substring-matching path removed. Strategy continuity is now evaluated
+//  against structured capabilities in ./policy/strategy-capabilities.js so that
+//  "npm test" cannot accidentally cover "npm publish" or "npm install <pkg>".)
 
 /**
  * Evidence-Guided Recovery: classify a failure so the agent must diagnose

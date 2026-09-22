@@ -94,7 +94,10 @@ test("Risk Engine: RISK_LEVELS export", () => {
   assert.equal(RISK_LEVELS.BLOCKED, "BLOCKED");
 });
 
-test("Risk Engine: unknown tool defaults to GUARDED", () => {
+test("Risk Engine: unknown tool defaults to BLOCKED (fail-closed)", () => {
+  // Política C01: una herramienta no catalogada NO debe quedar como GUARDED
+  // (permitiendo ejecución); debe ser BLOCKED para forzar fail-closed.
   const r = evaluateAction("mystery_tool", { path: "/home/user/proj/x.js" });
-  assert.equal(r.level, "GUARDED");
+  assert.equal(r.level, "BLOCKED");
+  assert.match(r.reason, /fail-closed/i);
 });
