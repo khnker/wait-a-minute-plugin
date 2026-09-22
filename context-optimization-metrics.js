@@ -29,6 +29,10 @@
 // @property {string[]} usedIds        ids the consumer actually read/used downstream
 // @property {number} pageFaults       number of additional fetches triggered by misses
 // @property {number} reacquiredTokens tokens spent on those additional fetches
+// @property {boolean} [taskSuccess]   did the downstream task succeed? 1 for TSR numerator
+// @property {boolean} [verified]      did an independent oracle verify sufficiency? 1 for VSR numerator
+// @property {number} [retrievalOverhead] tokens spent on retrieval/lookup overhead (TTC component)
+// @property {string[]} [oracleMissing] ids the oracle declared missing (independent ground truth)
 
 /**
  * @typedef {Object} ContextMetrics
@@ -143,8 +147,38 @@ export function record(input) {
   // RPC: raw reacquired tokens. Not normalized; it's a cost, not a rate.
   const RPC = reacquiredTokens;
 
-  return {
-    strategy,
+  // -- Extended metrics (P1) --
+  //
+  // TSR (Task Success Rate): whether the downstream task succeeded.
+  //     Computed as 1 when `taskSuccess` is true, 0 when false.
+  //     NaN/undefined -> omitted from output to avoid poisoning summaries.
+  //     Boolean per-record; aggregated in summarize() by mean.
+  const TSR =
+    input?.taskSuccess === true ? 1 : input?.taskSuccess === false ? 0 : null;
+
+  // VSR (Verification/Oracle Success Rate): did an independent oracle
+  //     verify the selection as sufficient?  Independent of the selector's
+  //     own requiredIds — uses oracleMissing.length === 0 as truth.
+  //     Defaults to null when no oracle verdict was supplied.
+  const oracleMissing = Array.isArray(input?.oracleMissing)
+    ? input.oracleMissing
+    : null;
+  const VSR = oracleMissing ? (oracleMissing.length === 0 ? 1 : 0) : null;
+
+  // TTC (Total Context Cost) = initial selection tokens + reacquired
+  //     tokens + retrieval overhead.  This is the real cost the system
+  //     paid to deliver context, not just the bytes we shipped.
+  const retrievalOverhead =
+    typeof input?.retrievalOverhead === "number" &&
+    Number.isFinite(input.retrievalOverhead)
+      ? Math.max(0, input.retrievalOverhead)
+      : 0;
+  const TTC = Math.round(
+    Math.max(0, selectedTokens) + Math.max(0, reacquiredTokens) + retrievalOverhead
+  );
+
+  const out = {
+    strategy: input.strategy,
     CRR: round4(CRR),
     SPR: round4(SPR),
     COR: round4(COR),
@@ -156,7 +190,13 @@ export function record(input) {
     usedTokens: Math.round(usedTokens),
     pageFaults,
     reacquiredTokens: Math.round(reacquiredTokens),
+    TTC,
+    retrievalOverhead: Math.round(retrievalOverhead),
   };
+  if (TSR !== null) out.TSR = round4(TSR);
+  if (VSR !== null) out.VSR = round4(VSR);
+  if (oracleMissing) out.oracleMissing = [...oracleMissing];
+  return out;
 }
 
 // -- Aggregate / summary --
@@ -180,7 +220,20 @@ export function summarize(records) {
     const n = items.length || 1;
     const sum = (k) => items.reduce((acc, x) => acc + (x[k] || 0), 0);
     const mean = (k) => sum(k) / n;
-    out[strategy] = {
+    // TSR / VSR are per-record booleans coerced to 0/1; aggregate by mean
+    // over only the records that reported them.  Records that did not
+    // report a verdict must not be counted as failures.
+    const tsrRecords = items.filter((x) => typeof x.TSR === "number");
+    const vsrRecords = items.filter((x) => typeof x.VSR === "number");
+    const tsrMean =
+      tsrRecords.length === 0
+        ? null
+        : tsrRecords.reduce((acc, x) => acc + x.TSR, 0) / tsrRecords.length;
+    const vsrMean =
+      vsrRecords.length === 0
+        ? null
+        : vsrRecords.reduce((acc, x) => acc + x.VSR, 0) / vsrRecords.length;
+    const agg = {
       strategy,
       CRR: round4(mean("CRR")),
       SPR: round4(mean("SPR")),
@@ -193,8 +246,15 @@ export function summarize(records) {
       usedTokens: Math.round(sum("usedTokens")),
       pageFaults: Math.round(sum("pageFaults")),
       reacquiredTokens: Math.round(sum("reacquiredTokens")),
+      TTC: Math.round(sum("TTC")),
+      retrievalOverhead: Math.round(sum("retrievalOverhead")),
       samples: n,
     };
+    if (tsrMean !== null) agg.TSR = round4(tsrMean);
+    if (vsrMean !== null) agg.VSR = round4(vsrMean);
+    agg.tsrReported = tsrRecords.length;
+    agg.vsrReported = vsrRecords.length;
+    out[strategy] = agg;
   }
   return out;
 }
@@ -203,34 +263,123 @@ export function summarize(records) {
 
 /**
  * Default thresholds for the falsifiable gates (C10).
- * Tightened to: SPR must be near-perfect, COR must be zero,
- * waste must stay modest, page faults and reacquisition cost bounded.
+ *
+ * Gates are split into two explicit categories (P1):
+ *
+ *   - SAFETY gates: a selector that fails these is fundamentally unsafe;
+ *     they cannot be relaxed for "performance" reasons.
+ *       SPR_MIN  (>=0.99)        required ids must mostly survive
+ *       COR_MAX  (=0.0)          critical ids must NEVER be dropped
+ *       TSR_MIN  (>=0.99)        downstream task must mostly succeed
+ *       VSR_MIN  (>=0.99)        independent oracle must mostly verify
+ *
+ *   - OPTIMIZATION gates: a selector that fails these is wasteful but
+ *     not unsafe.  They are tunable per-corpus.
+ *       CWR_MAX  (0.5)           kept context was actually used
+ *       PFR_MAX  (0.05)          additional fetches triggered by misses
+ *       RPC_MAX  (0)             reacquisition cost must be explained
+ *       CRR_MIN  (0.0)           any reduction is fine
+ *
+ * `evaluateGates()` evaluates BOTH sets and returns both verdicts.
+ * `evaluateSafetyGates()` and `evaluateOptimizationGates()` evaluate
+ * one set at a time so callers can reason about each independently.
  */
-export const DEFAULT_GATES = Object.freeze({
+export const SAFETY_GATES = Object.freeze({
   SPR_MIN: 0.99,
   COR_MAX: 0.0,
+  TSR_MIN: 0.99,
+  VSR_MIN: 0.99,
+});
+
+export const OPTIMIZATION_GATES = Object.freeze({
   CWR_MAX: 0.5,
   PFR_MAX: 0.05,
-  RPC_MAX: 0, // any reacquisition cost must be explained, not hidden
-  CRR_MIN: 0.0, // any reduction is fine; absence is just honest reporting
+  RPC_MAX: 0,
+  CRR_MIN: 0.0,
+});
+
+// Back-compat alias: the historical "DEFAULT_GATES" is the union of both
+// sets, with the same numeric thresholds as before.  New code should
+// prefer SAFETY_GATES / OPTIMIZATION_GATES directly.
+export const DEFAULT_GATES = Object.freeze({
+  ...SAFETY_GATES,
+  ...OPTIMIZATION_GATES,
 });
 
 /**
- * Evaluate a metric against a set of falsifiable gates.
+ * Evaluate ONLY safety gates against a metric record.
+ *
+ * @param {ContextMetrics} m
+ * @param {Partial<typeof SAFETY_GATES>} [overrides]
+ * @returns {{pass: boolean, failures: string[]}}
+ */
+export function evaluateSafetyGates(m, overrides = {}) {
+  const g = { ...SAFETY_GATES, ...(overrides || {}) };
+  const failures = [];
+  if (typeof m.SPR === "number" && m.SPR < g.SPR_MIN) {
+    failures.push(`SPR ${m.SPR} < ${g.SPR_MIN}`);
+  }
+  if (typeof m.COR === "number" && m.COR > g.COR_MAX) {
+    failures.push(`COR ${m.COR} > ${g.COR_MAX}`);
+  }
+  // TSR/VSR may be absent on records that did not report a verdict.
+  // We only fail when a verdict WAS reported and it falls below floor.
+  if (typeof m.TSR === "number" && m.TSR < g.TSR_MIN) {
+    failures.push(`TSR ${m.TSR} < ${g.TSR_MIN}`);
+  }
+  if (typeof m.VSR === "number" && m.VSR < g.VSR_MIN) {
+    failures.push(`VSR ${m.VSR} < ${g.VSR_MIN}`);
+  }
+  return { pass: failures.length === 0, failures };
+}
+
+/**
+ * Evaluate ONLY optimization gates against a metric record.
+ *
+ * @param {ContextMetrics} m
+ * @param {Partial<typeof OPTIMIZATION_GATES>} [overrides]
+ * @returns {{pass: boolean, failures: string[]}}
+ */
+export function evaluateOptimizationGates(m, overrides = {}) {
+  const g = { ...OPTIMIZATION_GATES, ...(overrides || {}) };
+  const failures = [];
+  if (typeof m.CWR === "number" && m.CWR > g.CWR_MAX) {
+    failures.push(`CWR ${m.CWR} > ${g.CWR_MAX}`);
+  }
+  if (typeof m.PFR === "number" && m.PFR > g.PFR_MAX) {
+    failures.push(`PFR ${m.PFR} > ${g.PFR_MAX}`);
+  }
+  if (typeof m.RPC === "number" && m.RPC > g.RPC_MAX) {
+    failures.push(`RPC ${m.RPC} > ${g.RPC_MAX}`);
+  }
+  // CRR_MIN: if there is reduction at all, fine. We don't push for more.
+  if (typeof m.CRR === "number" && m.CRR < g.CRR_MIN) {
+    failures.push(`CRR ${m.CRR} < ${g.CRR_MIN}`);
+  }
+  return { pass: failures.length === 0, failures };
+}
+
+/**
+ * Evaluate a metric against the full falsifiable gate set.
+ *
+ * Returned object splits safety vs optimization verdicts so callers
+ * (benchmark, ablation, CI) can act on each independently.  The legacy
+ * `pass` and `failures` fields remain the AND of both sets so existing
+ * callers keep working unchanged.
  *
  * @param {ContextMetrics} m
  * @param {Partial<typeof DEFAULT_GATES>} [overrides]
- * @returns {{pass: boolean, failures: string[]}}
+ * @returns {{pass: boolean, failures: string[], safety: {pass: boolean, failures: string[]}, optimization: {pass: boolean, failures: string[]}}}
  */
 export function evaluateGates(m, overrides = {}) {
-  const g = { ...DEFAULT_GATES, ...(overrides || {}) };
-  const failures = [];
-  if (m.SPR < g.SPR_MIN) failures.push(`SPR ${m.SPR} < ${g.SPR_MIN}`);
-  if (m.COR > g.COR_MAX) failures.push(`COR ${m.COR} > ${g.COR_MAX}`);
-  if (m.CWR > g.CWR_MAX) failures.push(`CWR ${m.CWR} > ${g.CWR_MAX}`);
-  if (m.PFR > g.PFR_MAX) failures.push(`PFR ${m.PFR} > ${g.PFR_MAX}`);
-  if (m.RPC > g.RPC_MAX) failures.push(`RPC ${m.RPC} > ${g.RPC_MAX}`);
-  return { pass: failures.length === 0, failures };
+  const safety = evaluateSafetyGates(m, overrides);
+  const optimization = evaluateOptimizationGates(m, overrides);
+  return {
+    pass: safety.pass && optimization.pass,
+    failures: [...safety.failures, ...optimization.failures],
+    safety,
+    optimization,
+  };
 }
 
 // -- Helpers --

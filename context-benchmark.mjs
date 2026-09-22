@@ -21,10 +21,22 @@ import {
   record,
   summarize,
   evaluateGates,
+  evaluateSafetyGates,
+  evaluateOptimizationGates,
+  SAFETY_GATES,
+  OPTIMIZATION_GATES,
   DEFAULT_GATES,
   nodesTokens,
   estimateTokens,
 } from "./context-optimization-metrics.js";
+
+import {
+  buildOracleGraph,
+  verifySufficiency,
+  computeRequiredClosure,
+} from "./context-sufficiency-oracle.js";
+
+import { testMinimality } from "./context-minimality.js";
 
 // ---------------------------------------------------------------------------
 // Types (JSDoc)
@@ -78,6 +90,97 @@ export function runScenario(scenario, select) {
   const reacquiredTokens = Number(out?.reacquiredTokens ?? 0);
   const usedIds = Array.isArray(out?.usedIds) ? out.usedIds : [];
 
+  // -- Independent ground-truth oracle integration (P1) --
+  //
+  // The scenario-declared `requiredIds` is one view of "what was needed".
+  // The oracle's required-closure is an INDEPENDENT view derived only from
+  // REQUIRES / DEPENDS_ON edges in the scenario graph.  We run the
+  // oracle against the selector's chosen set and capture:
+  //   - oracleMissing : ids oracle says are missing (VSR = 0 if any)
+  //   - oracleClosure : the oracle's required closure
+  //   - oracleSufficient : boolean ground truth
+  //
+  // Scenarios may opt out by setting `scenario.skipOracle = true`.
+  // If a scenario declares `scenario.requires`, those edges become the
+  // oracle graph.  Otherwise we synthesize "implicit edges" from the
+  // scenario's required ids (each required -> task), which still gives
+  // the oracle an independent walk to compute closure over.
+  let oracleResult = null;
+  let oracleGraph = null;
+  const taskId =
+    scenario.taskId || scenario.requiredIds[0] || allIds[0] || "task";
+  if (!scenario.skipOracle) {
+    // Build the oracle graph: nodes = scenario.nodes, edges =
+    // scenario.requires (if any) OR an implicit REQUIRES edge from
+    // the task to every other required id.
+    const oracleNodes = allIds.map((id) => ({
+      id,
+      type: nodes[id]?.type,
+      content: nodes[id]?.content,
+    }));
+    const oracleEdges = scenario.requires
+      ? scenario.requires.map((e) => ({
+          from: e.from,
+          to: e.to,
+          // Normalize to an edge type the oracle's closure walk accepts.
+          // The oracle recognizes `requires`, `depends_on`,
+          // `DEPENDENCY`, and the canonical EDGE_TYPES values.  When a
+          // scenario declares `type: "REQUIRES"` we map it to `requires`
+          // so the walk actually traverses it.
+          type: e.type === "REQUIRES" ? "requires" : (e.type || "requires"),
+        }))
+      : scenario.requiredIds
+          .filter((id) => id !== taskId)
+          .map((id) => ({ from: taskId, to: id, type: "requires" }));
+    // Ensure the task node is always present even when not in nodes
+    // (some synthetic scenarios are tiny and reference a virtual task).
+    if (!nodes[taskId]) {
+      oracleNodes.push({ id: taskId, type: "task", content: "" });
+    }
+    oracleGraph = buildOracleGraph({ nodes: oracleNodes, edges: oracleEdges });
+    oracleResult = verifySufficiency(taskId, oracleGraph, selectedIds);
+  }
+
+  // -- Minimality integration (P1) --
+  //
+  // For each scenario we also run `testMinimality` against the same
+  // oracle graph to report redundant nodes and the minimality ratio.
+  // The minimality verdict is intentionally orthogonal to sufficiency:
+  // a selection can be sufficient AND non-minimal (over-injected).
+  let minimality = null;
+  if (oracleGraph) {
+    minimality = testMinimality({
+      taskId,
+      selected: selectedIds,
+      oracleGraph,
+    });
+  }
+
+  // -- Task Success Rate (TSR) --
+  //
+  // Default heuristic: if the selector preserved SPR>=1 AND the oracle
+  // verdict is sufficient AND there were no page faults, the task
+  // would have succeeded.  Scenarios can override with `scenario.taskSuccess`.
+  let taskSuccess;
+  if (typeof scenario.taskSuccess === "boolean") {
+    taskSuccess = scenario.taskSuccess;
+  } else {
+    const preservedAll =
+      scenario.requiredIds.length === 0 ||
+      scenario.requiredIds.every((id) => selectedIds.includes(id));
+    taskSuccess = preservedAll && pageFaults === 0;
+  }
+
+  // -- Retrieval overhead (TTC component) --
+  //
+  // Estimated as a fixed per-selector overhead (lookup cost) plus a
+  // per-page-fault penalty.  Scenarios can override with
+  // `scenario.retrievalOverhead` to model a real retrieval backend.
+  const lookupOverhead = typeof scenario.lookupOverhead === "number"
+    ? scenario.lookupOverhead
+    : 50;
+  const retrievalOverhead = lookupOverhead + pageFaults * 200;
+
   const metrics = record({
     strategy: scenario.name + "#" + scenario.kind,
     requiredTokens,
@@ -89,10 +192,41 @@ export function runScenario(scenario, select) {
     usedIds,
     pageFaults,
     reacquiredTokens,
+    taskSuccess,
+    oracleMissing: oracleResult ? oracleResult.missing : null,
+    retrievalOverhead,
   });
 
   const gates = evaluateGates(metrics);
-  return { name: scenario.name, kind: scenario.kind, metrics, gates, _allIds: allIds };
+  const safety = evaluateSafetyGates(metrics);
+  const optimization = evaluateOptimizationGates(metrics);
+
+  return {
+    name: scenario.name,
+    kind: scenario.kind,
+    metrics,
+    gates,
+    safety,
+    optimization,
+    oracle: oracleResult
+      ? {
+          sufficient: oracleResult.sufficient,
+          missing: oracleResult.missing,
+          requiredClosure: oracleResult.requiredClosure,
+          unused: oracleResult.unused,
+        }
+      : null,
+    minimality: minimality
+      ? {
+          minimalityRatio: minimality.minimalityRatio,
+          loadBearing: minimality.loadBearing,
+          redundant: minimality.redundant,
+          overInjected: minimality.overInjected,
+          totalRequiredSelected: minimality.totalRequiredSelected,
+        }
+      : null,
+    _allIds: allIds,
+  };
 }
 
 /**
@@ -459,7 +593,23 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 function printTable(rows) {
-  const headers = ["scenario", "kind", "CRR", "SPR", "COR", "CWR", "PFR", "RPC", "gate"];
+  const headers = [
+    "scenario",
+    "kind",
+    "CRR",
+    "SPR",
+    "COR",
+    "CWR",
+    "PFR",
+    "RPC",
+    "TSR",
+    "VSR",
+    "TTC",
+    "min",
+    "safety",
+    "opt",
+    "gate",
+  ];
   const widths = headers.map((h) =>
     Math.max(h.length, ...rows.map((r) => String(r[h] ?? "").length))
   );
@@ -478,6 +628,12 @@ function printTable(rows) {
         r.CWR,
         r.PFR,
         r.RPC,
+        r.TSR,
+        r.VSR,
+        r.TTC,
+        r.min,
+        r.safety,
+        r.opt,
         r.gate,
       ])
     );
@@ -510,6 +666,12 @@ if (isMain(import.meta)) {
     CWR: r.metrics.CWR,
     PFR: r.metrics.PFR,
     RPC: r.metrics.RPC,
+    TSR: r.metrics.TSR ?? "-",
+    VSR: r.metrics.VSR ?? "-",
+    TTC: r.metrics.TTC,
+    min: r.minimality ? r.minimality.minimalityRatio.toFixed(2) : "-",
+    safety: r.safety.pass ? "OK" : "FAIL",
+    opt: r.optimization.pass ? "OK" : "FAIL",
     gate: r.gates.pass ? "PASS" : "FAIL",
   }));
   printTable(rows);
@@ -521,3 +683,5 @@ if (isMain(import.meta)) {
 }
 
 export const __gates = DEFAULT_GATES;
+export const __safetyGates = SAFETY_GATES;
+export const __optimizationGates = OPTIMIZATION_GATES;

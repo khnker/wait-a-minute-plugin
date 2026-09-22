@@ -18,6 +18,10 @@ import {
   record,
   summarize,
   evaluateGates,
+  evaluateSafetyGates,
+  evaluateOptimizationGates,
+  SAFETY_GATES,
+  OPTIMIZATION_GATES,
   DEFAULT_GATES,
   estimateTokens,
   nodesTokens,
@@ -34,6 +38,13 @@ import {
   budgetedSelector,
   scoringSelector,
 } from "./context-benchmark.mjs";
+
+import { testMinimality } from "./context-minimality.js";
+import {
+  buildOracleGraph,
+  verifySufficiency,
+  computeRequiredClosure,
+} from "./context-sufficiency-oracle.js";
 
 import {
   ablationMatrix,
@@ -369,4 +380,366 @@ test("C11.5 ablation script is deterministic across runs", () => {
   const a = runAblation();
   const b = runAblation();
   assert.deepEqual(a, b);
+});
+
+// ---------------------------------------------------------------------------
+// P1 — Extended metrics: TSR, VSR, TTC
+// ---------------------------------------------------------------------------
+
+test("P1.1 record() captures TSR=true/false and omits when absent", () => {
+  const base = {
+    strategy: "test",
+    requiredTokens: 100,
+    selectedTokens: 50,
+    fullTokens: 200,
+    requiredIds: ["r1"],
+    selectedIds: ["r1"],
+    criticalIds: [],
+    usedIds: ["r1"],
+    pageFaults: 0,
+    reacquiredTokens: 0,
+  };
+  const ok = record({ ...base, taskSuccess: true });
+  const fail = record({ ...base, taskSuccess: false });
+  const absent = record({ ...base });
+  assert.equal(ok.TSR, 1);
+  assert.equal(fail.TSR, 0);
+  assert.equal("TSR" in absent, false);
+});
+
+test("P1.2 record() captures VSR from oracleMissing", () => {
+  const base = {
+    strategy: "test",
+    requiredTokens: 100,
+    selectedTokens: 50,
+    fullTokens: 200,
+    requiredIds: ["r1", "r2"],
+    selectedIds: ["r1"],
+    criticalIds: [],
+    usedIds: ["r1"],
+    pageFaults: 0,
+    reacquiredTokens: 0,
+  };
+  const sufficient = record({ ...base, oracleMissing: [] });
+  const missing = record({ ...base, oracleMissing: ["r2"] });
+  const absent = record({ ...base });
+  assert.equal(sufficient.VSR, 1);
+  assert.equal(missing.VSR, 0);
+  assert.equal("VSR" in absent, false);
+});
+
+test("P1.3 record() computes TTC = selected + reacquired + retrieval overhead", () => {
+  const m = record({
+    strategy: "test",
+    requiredTokens: 100,
+    selectedTokens: 200,
+    fullTokens: 1000,
+    requiredIds: ["r1"],
+    selectedIds: ["r1", "r2"],
+    criticalIds: [],
+    usedIds: ["r1"],
+    pageFaults: 0,
+    reacquiredTokens: 50,
+    retrievalOverhead: 25,
+  });
+  // 200 (selected) + 50 (reacquired) + 25 (retrieval) = 275
+  assert.equal(m.TTC, 275);
+  assert.equal(m.retrievalOverhead, 25);
+});
+
+test("P1.4 record() defaults retrievalOverhead to 0 when not supplied", () => {
+  const m = record({
+    strategy: "test",
+    requiredTokens: 100,
+    selectedTokens: 100,
+    fullTokens: 100,
+    requiredIds: ["r1"],
+    selectedIds: ["r1"],
+    criticalIds: [],
+    usedIds: ["r1"],
+    pageFaults: 0,
+    reacquiredTokens: 0,
+  });
+  assert.equal(m.TTC, 100);
+  assert.equal(m.retrievalOverhead, 0);
+});
+
+test("P1.5 summarize() aggregates TSR/VSR/TTC across records", () => {
+  const records = [
+    record({
+      strategy: "x",
+      requiredTokens: 100,
+      selectedTokens: 50,
+      fullTokens: 200,
+      requiredIds: ["a"],
+      selectedIds: ["a"],
+      criticalIds: [],
+      usedIds: ["a"],
+      pageFaults: 0,
+      reacquiredTokens: 0,
+      taskSuccess: true,
+      oracleMissing: [],
+      retrievalOverhead: 10,
+    }),
+    record({
+      strategy: "x",
+      requiredTokens: 100,
+      selectedTokens: 50,
+      fullTokens: 200,
+      requiredIds: ["a"],
+      selectedIds: ["a"],
+      criticalIds: [],
+      usedIds: ["a"],
+      pageFaults: 0,
+      reacquiredTokens: 0,
+      taskSuccess: false,
+      oracleMissing: ["b"],
+      retrievalOverhead: 20,
+    }),
+  ];
+  const out = summarize(records);
+  assert.equal(out.x.TSR, 0.5);
+  assert.equal(out.x.VSR, 0.5);
+  assert.equal(out.x.TTC, 130); // (50+0+10) + (50+0+20)
+  assert.equal(out.x.tsrReported, 2);
+  assert.equal(out.x.vsrReported, 2);
+});
+
+// ---------------------------------------------------------------------------
+// P1 — Gate separation (Safety vs Optimization)
+// ---------------------------------------------------------------------------
+
+test("P1.6 SAFETY_GATES contain SPR/COR/TSR/VSR only", () => {
+  assert.equal("SPR_MIN" in SAFETY_GATES, true);
+  assert.equal("COR_MAX" in SAFETY_GATES, true);
+  assert.equal("TSR_MIN" in SAFETY_GATES, true);
+  assert.equal("VSR_MIN" in SAFETY_GATES, true);
+  assert.equal("CWR_MAX" in SAFETY_GATES, false);
+  assert.equal("PFR_MAX" in SAFETY_GATES, false);
+  assert.equal("RPC_MAX" in SAFETY_GATES, false);
+  assert.equal("CRR_MIN" in SAFETY_GATES, false);
+});
+
+test("P1.7 OPTIMIZATION_GATES contain CWR/PFR/RPC/CRR only", () => {
+  assert.equal("CWR_MAX" in OPTIMIZATION_GATES, true);
+  assert.equal("PFR_MAX" in OPTIMIZATION_GATES, true);
+  assert.equal("RPC_MAX" in OPTIMIZATION_GATES, true);
+  assert.equal("CRR_MIN" in OPTIMIZATION_GATES, true);
+  assert.equal("SPR_MIN" in OPTIMIZATION_GATES, false);
+  assert.equal("COR_MAX" in OPTIMIZATION_GATES, false);
+  assert.equal("TSR_MIN" in OPTIMIZATION_GATES, false);
+  assert.equal("VSR_MIN" in OPTIMIZATION_GATES, false);
+});
+
+test("P1.8 evaluateSafetyGates fails on TSR/VSR violations", () => {
+  const m = {
+    SPR: 1,
+    COR: 0,
+    TSR: 0.5, // violates TSR_MIN
+    VSR: 1,
+  };
+  const v = evaluateSafetyGates(m);
+  assert.equal(v.pass, false);
+  assert.ok(v.failures.some((f) => f.startsWith("TSR ")));
+});
+
+test("P1.9 evaluateSafetyGates passes when TSR/VSR absent", () => {
+  const m = { SPR: 1, COR: 0 };
+  const v = evaluateSafetyGates(m);
+  assert.equal(v.pass, true);
+  assert.deepEqual(v.failures, []);
+});
+
+test("P1.10 evaluateOptimizationGates is independent of safety verdicts", () => {
+  // Catastrophic safety violation but optimization-clean.
+  const m = { SPR: 0.0, COR: 1.0, CWR: 0.1, PFR: 0.01, RPC: 0, CRR: 0.5 };
+  const safety = evaluateSafetyGates(m);
+  const optimization = evaluateOptimizationGates(m);
+  assert.equal(safety.pass, false);
+  assert.equal(optimization.pass, true);
+});
+
+test("P1.11 evaluateGates returns both safety and optimization verdicts", () => {
+  const m = { SPR: 1, COR: 0, CWR: 0.1, PFR: 0.01, RPC: 0, CRR: 0.5 };
+  const v = evaluateGates(m);
+  assert.equal("safety" in v, true);
+  assert.equal("optimization" in v, true);
+  assert.equal(v.safety.pass, true);
+  assert.equal(v.optimization.pass, true);
+  assert.equal(v.pass, true);
+});
+
+// ---------------------------------------------------------------------------
+// P1 — Oracle integration in benchmark
+// ---------------------------------------------------------------------------
+
+test("P1.12 runScenario attaches independent oracle verdict", () => {
+  // Scenario: a small graph where required ids are explicit, but the
+  // oracle graph (built from REQUIRES edges) might disagree.
+  const scenario = {
+    name: "P1-oracle-1",
+    kind: "A",
+    requiredIds: ["task", "spec"],
+    criticalIds: ["task"],
+    distractorIds: ["noise"],
+    requires: [
+      { from: "task", to: "spec", type: "requires" },
+    ],
+    nodes: {
+      task: { content: "do X" },
+      spec: { content: "spec for X" },
+      noise: { content: "noise" },
+    },
+  };
+  const result = runScenario(scenario, scoringSelector());
+  assert.ok(result.oracle, "oracle verdict must be attached");
+  assert.equal(result.oracle.sufficient, true);
+  assert.deepEqual(result.oracle.missing, []);
+});
+
+test("P1.13 runScenario oracle captures missing nodes independent of selector's requiredIds", () => {
+  // Oracle graph declares a transitive dependency the scenario does
+  // NOT list in `requiredIds`.  Even if the selector preserves the
+  // scenario's requiredIds, the oracle verdict must reflect the gap.
+  const scenario = {
+    name: "P1-oracle-2",
+    kind: "A",
+    requiredIds: ["task"],
+    criticalIds: [],
+    distractorIds: [],
+    requires: [
+      { from: "task", to: "spec", type: "requires" },
+      { from: "spec", to: "deep", type: "requires" },
+    ],
+    nodes: {
+      task: { content: "do X" },
+      spec: { content: "spec for X" },
+      deep: { content: "deeper spec for X" },
+    },
+  };
+  // Use a selector that keeps ONLY the declared requiredIds.
+  const result = runScenario(scenario, requiredOnlySelector);
+  assert.ok(result.oracle);
+  // Oracle should report spec + deep as missing (they're in the
+  // required closure via edges, even though not in scenario.requiredIds).
+  assert.ok(result.oracle.missing.includes("spec"));
+  assert.ok(result.oracle.missing.includes("deep"));
+  assert.equal(result.metrics.VSR, 0);
+});
+
+test("P1.14 runScenario respects skipOracle flag", () => {
+  const scenario = {
+    name: "P1-oracle-skip",
+    kind: "A",
+    requiredIds: ["r1"],
+    criticalIds: [],
+    distractorIds: [],
+    skipOracle: true,
+    nodes: { r1: { content: "only required" } },
+  };
+  const result = runScenario(scenario, fullSelector);
+  assert.equal(result.oracle, null);
+  assert.equal(result.minimality, null);
+});
+
+// ---------------------------------------------------------------------------
+// P1 — Minimality integration
+// ---------------------------------------------------------------------------
+
+test("P1.15 runScenario attaches minimality report", () => {
+  const scenario = {
+    name: "P1-minimality-1",
+    kind: "A",
+    requiredIds: ["r1"],
+    criticalIds: ["r1"],
+    distractorIds: ["d1", "d2"],
+    nodes: {
+      r1: { content: "required content" },
+      d1: { content: "distractor 1" },
+      d2: { content: "distractor 2" },
+    },
+  };
+  const result = runScenario(scenario, fullSelector);
+  assert.ok(result.minimality);
+  // fullSelector keeps all three; r1 is load-bearing, d1 and d2 are
+  // over-injected.
+  assert.deepEqual(result.minimality.overInjected.sort(), ["d1", "d2"]);
+  assert.ok(result.minimality.minimalityRatio >= 0);
+  assert.ok(result.minimality.minimalityRatio <= 1);
+});
+
+test("P1.16 runBenchmark propagates oracle + minimality across all scenarios", () => {
+  const scenarios = [
+    {
+      name: "P1-bench-1",
+      kind: "A",
+      requiredIds: ["r1"],
+      criticalIds: [],
+      distractorIds: [],
+      nodes: { r1: { content: "required" } },
+    },
+    {
+      name: "P1-bench-2",
+      kind: "A",
+      requiredIds: ["r1", "r2"],
+      criticalIds: [],
+      distractorIds: [],
+      nodes: {
+        r1: { content: "required 1" },
+        r2: { content: "required 2" },
+      },
+    },
+  ];
+  const { results, summary } = runBenchmark(scenarios, fullSelector);
+  assert.equal(results.length, 2);
+  for (const r of results) {
+    assert.ok(r.oracle, `oracle missing on ${r.name}`);
+    assert.ok(r.minimality, `minimality missing on ${r.name}`);
+    assert.ok(r.safety, `safety verdict missing on ${r.name}`);
+    assert.ok(r.optimization, `optimization verdict missing on ${r.name}`);
+  }
+  // Summary should reflect aggregated TSR/VSR/TTC.
+  const keys = Object.keys(summary);
+  assert.ok(keys.length >= 1, "summary should have at least one strategy");
+  const s = summary[keys[0]];
+  assert.equal(typeof s.TTC, "number");
+  assert.ok(s.tsrReported >= 0);
+});
+
+// ---------------------------------------------------------------------------
+// P1 — Sanity: minimality + oracle direct unit tests
+// ---------------------------------------------------------------------------
+
+test("P1.17 testMinimality identifies load-bearing nodes", () => {
+  const nodes = [
+    { id: "a", content: "a" },
+    { id: "b", content: "b" },
+    { id: "c", content: "c" },
+  ];
+  // a requires b requires c -> all three load-bearing
+  const edges = [
+    { from: "a", to: "b", type: "requires" },
+    { from: "b", to: "c", type: "requires" },
+  ];
+  const g = buildOracleGraph({ nodes, edges });
+  const report = testMinimality({ taskId: "a", selected: ["a", "b", "c"], oracleGraph: g });
+  assert.equal(report.minimalityRatio, 1);
+  assert.deepEqual(report.redundant, []);
+});
+
+test("P1.18 verifySufficiency ground-truth is independent of scenario.requiredIds", () => {
+  const nodes = [
+    { id: "task", content: "task" },
+    { id: "spec", content: "spec" },
+    { id: "noise", content: "noise" },
+  ];
+  const edges = [
+    { from: "task", to: "spec", type: "requires" },
+  ];
+  const g = buildOracleGraph({ nodes, edges });
+  const result = verifySufficiency("task", g, ["task"]);
+  assert.equal(result.sufficient, false);
+  assert.deepEqual(result.missing, ["spec"]);
+  // The closure is derived from edges, not from any external label.
+  assert.deepEqual(result.requiredClosure.sort(), ["spec", "task"].sort());
 });
