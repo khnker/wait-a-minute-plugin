@@ -11,6 +11,8 @@
     "*.js",
     "*.mjs",
     "assessment/",
+    "preflight/",
+    "skills/",
     "audit/",
     "budget/",
     "cache/",
@@ -45,7 +47,8 @@
   ],
   "scripts": {
     "test": "node --test --test-concurrency=1 *.test.mjs",
-    "smoke": "node -e \"import('./index.js').then(m => console.log('WAM plugin loaded successfully'))\""
+    "smoke": "node -e \"import('./index.js').then(m => console.log('WAM plugin loaded successfully'))\"",
+    "pack:test": "node scripts/verify-package.mjs"
   },
   "repository": {
     "type": "git",
