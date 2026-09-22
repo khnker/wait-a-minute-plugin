@@ -46,8 +46,9 @@ test("R5: incertidumbre destructiva → DECISION_CRITICAL → bloquea aprobació
   assert.ok(approved.reason.includes("DECISION_CRITICAL"), "razón indica decision-critical");
 
   const inp = { parts: [{ type: "text", text: "terminé, done" }], taskId };
-  await hooks["chat.message"](inp, { parts: [], system: [] });
-  const outText = inp.parts[0].text;
+  const out = { parts: [], system: [] };
+  await hooks["chat.message"](inp, out);
+  const outText = out.parts.map((p) => p.text).join("\n") || "";
   assert.ok(
     outText.includes("BLOQUEADO") || outText.includes("COMPLETION GATE") || outText.includes("No implementar"),
     "DONE bloqueado (interceptado, no avanza)"

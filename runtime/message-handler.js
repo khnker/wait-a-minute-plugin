@@ -286,16 +286,18 @@ export async function handleMessage(input, output, deps) {
     const state = waitAMinute.buildPersistedState(taskId, analysis, wamRoot);
     state.lastAction = promptText;
 
-    // Task Dedup
-    const existingTaskId = findDuplicateTask(promptText, wamRoot);
-    if (existingTaskId && existingTaskId !== taskId) {
-      console.log(`[wait-a-minute] Duplicate task detected: "${existingTaskId}" matches current prompt. Reusing existing task.`);
-      taskId = existingTaskId;
-      if (input.sessionID) sessionTasks.set(input.sessionID, taskId);
-      const existingState2 = getTaskState(taskId, wamRoot);
-      if (existingState2) {
-        emitTextPart(output, `[wait-a-minute] Tarea existente detectada: ${taskId} (fase ${existingState2.phase}). Continuando con la tarea existente.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
-        return;
+    // Task Dedup - only if taskId was not explicitly provided or initialized as generic/new
+    if (!input?.taskId || GENERIC_TASK.test(input.taskId)) {
+      const existingTaskId = findDuplicateTask(promptText, wamRoot);
+      if (existingTaskId && existingTaskId !== taskId) {
+        console.log(`[wait-a-minute] Duplicate task detected: "${existingTaskId}" matches current prompt. Reusing existing task.`);
+        taskId = existingTaskId;
+        if (input.sessionID) sessionTasks.set(input.sessionID, taskId);
+        const existingState2 = getTaskState(taskId, wamRoot);
+        if (existingState2) {
+          emitTextPart(output, `[wait-a-minute] Tarea existente detectada: ${taskId} (fase ${existingState2.phase}). Continuando con la tarea existente.`, { sessionID: input.sessionID, messageID: output.message?.id || input.messageID });
+          return;
+        }
       }
     }
 
