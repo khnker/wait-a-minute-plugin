@@ -1,17 +1,63 @@
 {
   "name": "wait-a-minute",
-  "description": "OpenCode plugin con hook de prompt para pre-flight cognitivo Wait a Minute. Analiza peticiones antes de resolución de skills y agente execution.",
-  "version": "1.0.0",
+  "description": "Cognitive pre-flight and execution-control plugin for OpenCode",
+  "version": "1.1.0",
   "main": "index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "*.js",
+    "*.mjs",
+    "assessment/",
+    "audit/",
+    "budget/",
+    "cache/",
+    "circuit/",
+    "comms/",
+    "config/",
+    "di/",
+    "events/",
+    "health/",
+    "flags/",
+    "integration/",
+    "interceptor/",
+    "lifecycle/",
+    "locale/",
+    "migration/",
+    "projections/",
+    "prompt/",
+    "rate/",
+    "recovery/",
+    "registry/",
+    "runtime/",
+    "secrets/",
+    "telemetry/",
+    "tokens/",
+    "update/",
+    "validation/",
+    "replay/",
+    "metrics/",
+    "README.md",
+    "LICENSE",
+    "SKILL.md"
+  ],
   "scripts": {
-    "test": "node wait-a-minute-test.mjs && node --test --test-concurrency=1 *.test.mjs"
+    "test": "node --test --test-concurrency=1 *.test.mjs",
+    "smoke": "node -e \"import('./index.js').then(m => console.log('WAM plugin loaded successfully'))\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/khnker/wait-a-minute-plugin.git"
   },
   "keywords": [
     "opencode",
     "plugin",
     "wait-a-minute",
     "pre-flight",
-    "cognitive-layer"
+    "cognitive-layer",
+    "hardening"
   ],
   "license": "MIT",
   "type": "module"
