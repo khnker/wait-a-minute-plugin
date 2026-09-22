@@ -59,7 +59,7 @@ export function migrateLegacyCognition(taskRoot, taskId) {
     data.observations.forEach(o => appendLine(path.join(dir, FILES.observations), o));
   }
 
-  fs.unlinkSync(legacyFile);
+  fs.renameSync(legacyFile, legacyFile + ".migrated");
   return true;
 }
 
@@ -104,13 +104,14 @@ function appendLine(filePath, obj) {
 
 function readAll(filePath) {
   if (!fs.existsSync(filePath)) return [];
-  return fs.readFileSync(filePath, "utf-8")
+  const seen = new Map();
+  fs.readFileSync(filePath, "utf-8")
     .split("\n")
     .filter(Boolean)
-    .map((l) => {
-      try { return JSON.parse(l); } catch { return null; }
-    })
-    .filter(Boolean);
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter(Boolean)
+    .forEach((obj) => { if (obj.id) seen.set(obj.id, obj); });
+  return Array.from(seen.values());
 }
 
 // -- Hypotheses --
@@ -139,10 +140,8 @@ export function updateHypothesisStatus(taskRoot, taskId, id, status) {
   const lines = readAll(file);
   const target = lines.find((h) => h.id === id);
   if (!target) return null;
-  target.status = status;
-  target.updatedAt = Date.now();
-  fs.writeFileSync(file, lines.map((h) => JSON.stringify(h)).join("\n") + "\n", "utf-8");
-  return target;
+  appendLine(file, { ...target, status, updatedAt: Date.now() });
+  return { ...target, status, updatedAt: Date.now() };
 }
 
 export function getActiveHypotheses(taskRoot, taskId) {
@@ -199,9 +198,8 @@ function updateExperiment(taskRoot, taskId, id, patch) {
   const lines = readAll(file);
   const target = lines.find((e) => e.id === id);
   if (!target) return null;
-  Object.assign(target, patch, { updatedAt: Date.now() });
-  fs.writeFileSync(file, lines.map((e) => JSON.stringify(e)).join("\n") + "\n", "utf-8");
-  return target;
+  appendLine(file, { ...target, ...patch, updatedAt: Date.now() });
+  return { ...target, ...patch, updatedAt: Date.now() };
 }
 
 export function findRepeatedExperiment(taskRoot, taskId, { hypothesisId, actionDescription }) {
