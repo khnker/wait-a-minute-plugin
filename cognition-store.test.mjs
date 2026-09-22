@@ -137,7 +137,7 @@ test("Cognition: buildCompactState returns active/rejected/recent", () => {
   assert.ok(Array.isArray(state.rejectedHypotheses));
   assert.ok(Array.isArray(state.recentExperiments));
   assert.ok(Array.isArray(state.recentObservations));
-  assert.ok(Array.isArray(state.confirmedHypotheses));
+  assert.ok(Array.isArray(state.supportedHypotheses));
   assert.ok(Array.isArray(state.archivedHypotheses));
 });
 

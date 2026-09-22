@@ -242,7 +242,7 @@ export function buildCompactState(taskRoot, taskId) {
       h.status === HYPOTHESIS_STATUS.PROPOSED ||
       h.status === HYPOTHESIS_STATUS.TESTING
     ),
-    confirmedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.SUPPORTED),
+    supportedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.SUPPORTED),
     rejectedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.REJECTED),
     archivedHypotheses: hypotheses.filter((h) => h.status === HYPOTHESIS_STATUS.ARCHIVED),
     recentExperiments: listExperiments(taskRoot, taskId).slice(-5),

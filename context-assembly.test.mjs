@@ -95,7 +95,8 @@ test("Continuation: solo N2, no reconstruye pack", () => {
 
 test("Nueva sesión: recupera solo lo persistente necesario (N3 match), no el transcript", () => {
   resetSessionCache();
-  const p = assembleContext({ prompt: "retomar trabajo en auth: rotación de refresh tokens", taskId: "t-d", classification: "normal", projectPath: ROOT, budget: 4000, taskState: taskState() });
+  // C02: Legacy selector is opt-in only; test it explicitly
+  const p = assembleContext({ prompt: "retomar trabajo en auth: rotación de refresh tokens", taskId: "t-d", classification: "normal", projectPath: ROOT, budget: 4000, taskState: taskState(), useLegacySelector: true });
   const t = lines(p);
   assert.ok(t.includes(capAuth.context_id), "capsule persistente de sesión previa recuperable");
   assert.ok(!t.includes("pagos"), "no arrastra contexto de sesión anterior irrelevante");

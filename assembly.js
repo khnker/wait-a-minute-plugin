@@ -95,12 +95,16 @@ export function assembleContext({
   taskState = null,
   skillRegistry = null,
   selectedSkills = [],
+  useLegacySelector = false,
 } = {}) {
   const levels = { N0: [], N1: [], N2: [], N3: [], N4: [] };
   const rationale = [];
   const taskTokens = tokenize(prompt);
   let routerSufficiency = null;
-  let selectionSource = "legacy";
+  // C02: Context Router is the canonical authority. Legacy selector is opt-in
+  // via WAM_CONTEXT_SELECTOR=legacy in env/options. Default is router-only.
+  const legacySelectorAllowed = process.env.WAM_CONTEXT_SELECTOR === "legacy" || useLegacySelector;
+  let selectionSource = legacySelectorAllowed ? "legacy" : "router";
   const isTrivial = classification === "trivial" || mode === "FAST";
   const isArch = classification === "architectural" || mode === "STRICT";
 
@@ -233,9 +237,12 @@ export function assembleContext({
       if (constraints.trim()) spend("N1", `[wam N1 constraints] ${constraints.slice(0, 400)}`, ADMISSION.CONDITIONAL, "constraints context");
     }
 
-    // -- N3 Session (router-based selection, fallback to legacy) -------------
+    // -- N3 Session (Context Router is canonical authority) -----------------
+    // C02: Router is the sole canonical selector. Legacy selector is opt-in
+    // via WAM_CONTEXT_SELECTOR=legacy in env/options. If router cannot resolve
+    // or returns insufficient without the legacy flag, surface insufficiency —
+    // do NOT silently swap to it.
     if (!isTrivial) {
-      // Try router-based selection first
       const graph = buildGraphFromTaskState(taskState, projectPath);
       const routerPkg = routeAndAdapt(graph, {
         taskId: taskState?.taskId,
@@ -243,19 +250,30 @@ export function assembleContext({
         root: projectPath,
       });
 
-      // Use router result if available, otherwise fallback to legacy selector.
-      // Router is canonical authority for admission/sufficiency; Assembly respects it.
+      // C02: Router is canonical authority. Legacy only if explicitly requested.
       let pkg;
       if (routerPkg.source === "router" && routerPkg.capsules.length > 0) {
         pkg = routerPkg;
         selectionSource = "router";
         routerSufficiency = pkg.sufficiency || null;
         rationale.push("N3: using Context Router for selection");
-      } else {
+      } else if (legacySelectorAllowed) {
         pkg = selectContext(prompt, { budget: flex, root: projectPath, sessionId: getSessionId(projectPath) });
         selectionSource = "legacy";
         routerSufficiency = "insufficient";
-        rationale.push("N3: using legacy selector (router fallback)");
+        rationale.push("N3: using legacy selector (explicit WAM_CONTEXT_SELECTOR=legacy)");
+      } else {
+        pkg = {
+          ...routerPkg,
+          capsules: routerPkg.capsules || [],
+          sufficiency: routerPkg.sufficiency || "insufficient",
+          omitted: routerPkg.omitted || [],
+          missing: routerPkg.missing || [],
+          contract: routerPkg.contract || null,
+        };
+        selectionSource = "router";
+        routerSufficiency = "insufficient";
+        rationale.push("N3: router returned insufficient — no legacy fallback without WAM_CONTEXT_SELECTOR=legacy");
       }
 
       for (const c of pkg.capsules) {
