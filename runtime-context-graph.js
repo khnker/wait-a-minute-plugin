@@ -128,7 +128,7 @@ export function buildRuntimeContextGraph(input = {}) {
     }
   }
 
-  // -- Constraints (constraint constrains task) --
+  // -- Constraints (constraint constrains task/requirement) --
   for (const c of constraints || []) {
     if (!c?.id) continue;
     g.addNode({
@@ -138,11 +138,12 @@ export function buildRuntimeContextGraph(input = {}) {
       metadata: {
         provenance: c.provenance || "user_decided",
         severity: c.severity || "normal",
+        relation: "constraint",
       },
     });
     const target = c.requirementId || taskId;
     if (target) {
-      g.addEdge({ from: target, to: c.id, type: "depends_on_artifact" });
+      g.addEdge({ from: target, to: c.id, type: "related_to" });
     }
   }
 

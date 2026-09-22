@@ -95,6 +95,15 @@ export function assembleContext({
   projectPath = process.cwd(),
   budget = 4000,
   taskState = null,
+  runState = null,
+  evidenceLineage = [],
+  cognitionState = null,
+  decisions = [],
+  constraints = [],
+  artifacts = [],
+  observations = [],
+  hypotheses = [],
+  experiments = [],
   skillRegistry = null,
   selectedSkills = [],
   useLegacySelector = false,
@@ -233,10 +242,10 @@ export function assembleContext({
         const arch = extractRelevantSections("architecture", archDoc, taskTokens, { base: true });
         if (arch.trim()) spend("N1", `[wam N1 architecture] ${arch.slice(0, 600)}`, ADMISSION.CONDITIONAL, "architecture context");
       }
-      const decisions = extractRelevantSections("decisions", ctx.decisions?.body || "", taskTokens, { base: false });
-      if (decisions.trim()) spend("N1", `[wam N1 decisions] ${decisions.slice(0, 600)}`, ADMISSION.CONDITIONAL, "decisions context");
-      const constraints = extractRelevantSections("constraints", ctx.constraints?.body || "", taskTokens, { base: isArch });
-      if (constraints.trim()) spend("N1", `[wam N1 constraints] ${constraints.slice(0, 400)}`, ADMISSION.CONDITIONAL, "constraints context");
+      const projectDecisionsText = extractRelevantSections("decisions", ctx.decisions?.body || "", taskTokens, { base: false });
+      if (projectDecisionsText.trim()) spend("N1", `[wam N1 decisions] ${projectDecisionsText.slice(0, 600)}`, ADMISSION.CONDITIONAL, "decisions context");
+      const projectConstraintsText = extractRelevantSections("constraints", ctx.constraints?.body || "", taskTokens, { base: isArch });
+      if (projectConstraintsText.trim()) spend("N1", `[wam N1 constraints] ${projectConstraintsText.slice(0, 400)}`, ADMISSION.CONDITIONAL, "constraints context");
     }
 
     // -- N3 Session (Context Router is canonical authority) -----------------
@@ -254,14 +263,15 @@ if (!isTrivial) {
       // for the canonical node/edge schema while preserving full coverage.
       const graph = buildRuntimeContextGraph({
         taskState,
-        runState: typeof runState !== "undefined" ? runState : null,
-        evidenceLineage: typeof evidenceLineage !== "undefined" ? evidenceLineage : [],
-        cognitionState: typeof cognitionState !== "undefined" ? cognitionState : null,
-        decisions: typeof decisions !== "undefined" ? decisions : [],
-        constraints: typeof constraints !== "undefined" ? constraints : [],
-        artifacts: typeof artifacts !== "undefined" ? artifacts : [],
-        observations:
-          typeof observations !== "undefined" ? observations : [],
+        runState,
+        evidenceLineage,
+        cognitionState,
+        decisions,
+        constraints,
+        artifacts,
+        observations,
+        hypotheses,
+        experiments,
       });
       const routerPkg = routeAndAdapt(graph, {
         taskId: taskState?.taskId,

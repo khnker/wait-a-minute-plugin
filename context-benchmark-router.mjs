@@ -31,9 +31,12 @@ export function buildBenchmarkGraph(scenario) {
     }
   }
 
-  // Add explicit requires edges if provided, or derive from requiredIds
+  // Add explicit requires edges if provided.
+  // Change 04: Do not derive additional edges from requiredIds when explicit graph is provided.
   const addedEdges = new Set();
-  if (Array.isArray(scenario.requires)) {
+  const hasExplicitGraph = Array.isArray(scenario.requires);
+
+  if (hasExplicitGraph) {
     for (const req of scenario.requires) {
       const requested = req.type || "requires";
       const type = EDGE_TYPES.includes(requested)
@@ -52,11 +55,9 @@ export function buildBenchmarkGraph(scenario) {
         });
       }
     }
-  }
-
-  // If task node exists and requiredIds exist, ensure graph edges connect them if not explicitly set
-  const taskId = scenario.taskId || "task";
-  if (scenario.requiredIds) {
+  } else if (scenario.requiredIds) {
+    // Legacy synthetic graph derived from requiredIds
+    const taskId = scenario.taskId || "task";
     for (const reqId of scenario.requiredIds) {
       const key = `${taskId}->${reqId}:requires_completion`;
       if (!addedEdges.has(key) && graph.getNode(reqId) && graph.getNode(taskId)) {
@@ -70,6 +71,11 @@ export function buildBenchmarkGraph(scenario) {
       }
     }
   }
+
+  // Attach metadata tag indicating synthetic vs explicit ground truth (Change 04)
+  graph.metadata = {
+    syntheticGroundTruth: !hasExplicitGraph
+  };
 
   return graph;
 }
@@ -103,7 +109,7 @@ export function wamRouterSelector(options = {}) {
 
     return {
       selectedIds,
-      usedIds,
+      usedIds: undefined, // Change 05: Do not infer usedIds from selectedIds
       pageFaults: result.sufficient ? 0 : 1,
       reacquiredTokens: 0,
       routerResult: result
