@@ -107,6 +107,13 @@ export function noteFailure(taskRoot, taskId, { hypothesisId, experimentId, reas
     provenance,
     outcome: "failure",
   });
+  // Explicit failure: if the assessment didn't already drive the hypothesis to
+  // a terminal state (SUPPORTED), archive it so callers observing the cognition
+  // store see REJECTED/ARCHIVED instead of stale TESTING. This preserves
+  // noteSuccess semantics (no forced archive on success outcomes).
+  if (hypothesisStatus !== HYPOTHESIS_STATUS.SUPPORTED) {
+    archiveHypothesis(taskRoot, taskId, hypothesisId, reason || "failure");
+  }
   return {
     assessment,
     hypothesisStatus,

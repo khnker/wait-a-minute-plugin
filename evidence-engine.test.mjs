@@ -10,6 +10,7 @@ import {
   createExecutionEvidence,
   linkEvidenceIfBound,
   produceExecutionEvidence,
+  resolveRequirementId,
   EVIDENCE_TYPE_TOOL_OUTPUT,
   EVIDENCE_SOURCE_EXECUTION,
 } from "./evidence-engine.js";
@@ -151,6 +152,106 @@ test("produceExecutionEvidence: returns evidence + payload", () => {
     assert.ok(evidence.id);
     assert.equal(payload.content, '{"ok":true}');
     assert.equal(payload.hypothesisId, "hyp-1");
+  } finally {
+    cleanup();
+  }
+});
+
+test("resolveRequirementId: valid requirement object", () => {
+  assert.equal(resolveRequirementId({ requirement: { id: "req-1" } }), "req-1");
+});
+
+test("resolveRequirementId: undefined when requirement incomplete", () => {
+  assert.equal(resolveRequirementId({ requirement: {} }), undefined);
+  assert.equal(resolveRequirementId({ requirement: { id: null } }), undefined);
+  assert.equal(resolveRequirementId({ requirement: { id: "" } }), undefined);
+  assert.equal(resolveRequirementId({ requirement: { id: 42 } }), undefined);
+  assert.equal(resolveRequirementId({ requirement: null }), undefined);
+  assert.equal(resolveRequirementId({}), undefined);
+});
+
+test("resolveRequirementId: falls back to requirementId when valid", () => {
+  assert.equal(resolveRequirementId({ requirementId: "req-2" }), "req-2");
+  assert.equal(resolveRequirementId({ requirementId: "" }), undefined);
+  assert.equal(resolveRequirementId({ requirementId: null }), undefined);
+});
+
+test("resolveRequirementId: requirement object wins over pre-resolved id", () => {
+  assert.equal(
+    resolveRequirementId({ requirement: { id: "req-obj" }, requirementId: "req-str" }),
+    "req-obj",
+  );
+});
+
+test("buildEvidencePayload: undefined requirementId when no binding", () => {
+  const payload = buildEvidencePayload({ result: "ok", hypothesisId: "hyp-1" });
+  assert.equal(payload.requirementId, undefined);
+});
+
+test("buildEvidencePayload: uses requirement.id when requirement complete", () => {
+  const payload = buildEvidencePayload({
+    requirement: { id: "req-obj" },
+    result: "ok",
+    hypothesisId: "hyp-1",
+  });
+  assert.equal(payload.requirementId, "req-obj");
+});
+
+test("buildEvidencePayload: ignores incomplete requirement object", () => {
+  const payload = buildEvidencePayload({
+    requirement: {},
+    requirementId: "req-fallback",
+    result: "ok",
+    hypothesisId: "hyp-1",
+  });
+  assert.equal(payload.requirementId, "req-fallback");
+});
+
+test("produceExecutionEvidence: produces unbound evidence when requirementId missing", () => {
+  const { root, taskId, cleanup } = setup();
+  try {
+    const { evidence, payload } = produceExecutionEvidence(taskId, root, {
+      result: { ok: true },
+      hypothesisId: "hyp-1",
+    });
+    assert.ok(evidence.id);
+    assert.equal(payload.requirementId, undefined);
+    const stored = getEvidence(taskId, evidence.id, root);
+    assert.equal(stored.requirementId, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("produceExecutionEvidence: produces unbound evidence when requirement object incomplete", () => {
+  const { root, taskId, cleanup } = setup();
+  try {
+    const { evidence, payload } = produceExecutionEvidence(taskId, root, {
+      requirement: {},
+      result: { ok: true },
+      hypothesisId: "hyp-1",
+    });
+    assert.ok(evidence.id);
+    assert.equal(payload.requirementId, undefined);
+    const stored = getEvidence(taskId, evidence.id, root);
+    assert.equal(stored.requirementId, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("produceExecutionEvidence: resolves requirement.id when requirement complete", () => {
+  const { root, taskId, cleanup } = setup();
+  try {
+    const { evidence, payload } = produceExecutionEvidence(taskId, root, {
+      requirement: { id: "req-1", description: "do thing" },
+      result: { ok: true },
+      hypothesisId: "hyp-1",
+    });
+    assert.ok(evidence.id);
+    assert.equal(payload.requirementId, "req-1");
+    const stored = getEvidence(taskId, evidence.id, root);
+    assert.equal(stored.requirementId, "req-1");
   } finally {
     cleanup();
   }

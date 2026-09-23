@@ -40,11 +40,32 @@ export function serializeEvidenceContent(result) {
 }
 
 /**
+ * Resolve a requirementId from a possibly-incomplete requirement object
+ * or a pre-resolved id. Returns the id only when it is a non-empty string;
+ * otherwise returns undefined (evidence stays unbound).
+ *
+ * @param {object} [args]
+ * @param {object} [args.requirement] - requirement object; may be incomplete
+ * @param {string} [args.requirementId] - pre-resolved id (may be undefined)
+ * @returns {string|undefined}
+ */
+export function resolveRequirementId({ requirement, requirementId } = {}) {
+  if (requirement && typeof requirement === "object" && typeof requirement.id === "string" && requirement.id.length > 0) {
+    return requirement.id;
+  }
+  if (typeof requirementId === "string" && requirementId.length > 0) {
+    return requirementId;
+  }
+  return undefined;
+}
+
+/**
  * Build the evidence payload from a successful observation.
  * Pure: no I/O, no lineage graph mutation.
  *
  * @param {object} args
- * @param {string} args.requirementId - optional; absence means evidence is unbound
+ * @param {string} [args.requirementId] - pre-resolved id; ignored if invalid
+ * @param {object} [args.requirement] - requirement object; only used when .id is a non-empty string
  * @param {*} args.result - tool output (string|object|primitive)
  * @param {string} [args.type] - evidence type (default TOOL_OUTPUT)
  * @param {string} [args.source] - source identifier (default execution-engine)
@@ -52,14 +73,16 @@ export function serializeEvidenceContent(result) {
  * @returns {object} payload ready for createEvidence
  */
 export function buildEvidencePayload({
+  requirement,
   requirementId,
   result,
   type = EVIDENCE_TYPE_TOOL_OUTPUT,
   source = EVIDENCE_SOURCE_EXECUTION,
   hypothesisId,
 }) {
+  const resolvedId = resolveRequirementId({ requirement, requirementId });
   return {
-    requirementId,
+    requirementId: resolvedId,
     content: serializeEvidenceContent(result),
     type,
     source,
@@ -121,6 +144,10 @@ export function linkEvidenceIfBound({
  * Full success-path: build → create → (later) link.
  * Returns the evidence record so the caller can carry its id into the
  * observation's facts list.
+ *
+ * Safely resolves requirement binding: when args.requirement is incomplete
+ * or args.requirementId is not a non-empty string, the produced evidence
+ * stays unbound (no requirement.id access, no lineage link).
  *
  * @param {string} taskId
  * @param {string} taskRoot
