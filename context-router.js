@@ -76,8 +76,8 @@ function nodeTokens(node) {
  * OPTIONAL: Extra context.
  */
 function getAdmissionClass(node, taskNode, graph) {
-  // 1. Mandatory: Task/Completion requirements
-  if (node.id === taskNode?.id || node.type === "task" || node.type === "requirement") {
+  // 1. Mandatory: Task/Completion requirements or output type with MANDATORY admission
+  if (node.id === taskNode?.id || node.type === "task" || node.type === "requirement" || (node.type === "output" && node.metadata?.admission === "MANDATORY")) {
     return ADMISSION.MANDATORY;
   }
 
@@ -197,8 +197,12 @@ export function resolveContext(graph, options) {
   const required = new Set();
   const missing = [];
 
-  // Add the task itself
-  required.add(taskId);
+  // Also include any node with admission: "MANDATORY" explicitly
+  for (const node of graph.nodes.values()) {
+    if (node.metadata?.admission === "MANDATORY") {
+      required.add(node.id);
+    }
+  }
 
   // Get direct dependencies
   const deps = graph.getDependencies(taskId);

@@ -85,11 +85,21 @@ export function runScenario(scenario, select) {
     criticalIds: scenario.criticalIds,
   });
 
-  const selectedIds = Array.isArray(out?.selectedIds) ? out.selectedIds : [];
-  const selectedTokens = nodesTokens(selectedIds.map((id) => nodes[id]).filter(Boolean));
-  const pageFaults = Number(out?.pageFaults ?? 0);
-  const reacquiredTokens = Number(out?.reacquiredTokens ?? 0);
-  const usedIds = Array.isArray(out?.usedIds) ? out.usedIds : [];
+// -- Router error vs page fault (Change 06) --
+   // A router error means the selection algorithm could not run at all
+   // (selector returned status: "ERROR"). It is distinct from a page
+   // fault (selected context was insufficient and got recovered).
+   const routerError = out?.status === "ERROR";
+   // Debug: log out to see what we got
+   if (process.env.WAM_DEBUG) {
+     console.error('DEBUG: out =', JSON.stringify(out, null, 2));
+   }
+   const selectedIds = routerError ? [] : (Array.isArray(out?.selectedIds) ? out.selectedIds : []);
+   const selectedTokens = nodesTokens(selectedIds.map((id) => nodes[id]).filter(Boolean));
+   const routerErrors = routerError ? 1 : 0;
+   const pageFaults = routerError ? 0 : Number(out?.pageFaults ?? 0);
+   const reacquiredTokens = Number(out?.reacquiredTokens ?? 0);
+   const usedIds = out?.usedIds !== undefined ? out.usedIds : (Array.isArray(scenario?.usedIds) ? scenario.usedIds : []);
 
   // -- Independent ground-truth oracle integration (P1) --
   //
@@ -157,19 +167,32 @@ export function runScenario(scenario, select) {
     });
   }
 
-  // -- Task Success Rate (TSR) --
+  // -- Router Completeness (C07) --
   //
-  // Default heuristic: if the selector preserved SPR>=1 AND the oracle
-  // verdict is sufficient AND there were no page faults, the task
-  // would have succeeded.  Scenarios can override with `scenario.taskSuccess`.
-  let taskSuccess;
+  // routerComplete: "El closure obligatorio del Router está satisfecho".
+  // Es TRUE cuando todos los requiredIds del escenario están presentes
+  // en selectedIds (el Router cubrió todo lo obligatorio).
+  const routerComplete =
+    scenario.requiredIds.length === 0 ||
+    scenario.requiredIds.every((id) => selectedIds.includes(id));
+
+  // -- Oracle Sufficiency (C07) --
+  //
+  // oracleSufficient: "El oracle independiente considera suficiente el
+  // contexto". Proviene directamente del oracleResult (verdadero ground
+  // truth independiente). Si no hay oracle, es null.
+  const oracleSufficient = oracleResult ? oracleResult.sufficient : null;
+
+  // -- Task Success (C07) --
+  //
+  // taskSuccess: "Las postconditions de la tarea fueron satisfechas".
+  // Cuando NO existe una postcondition ejecutable, taskSuccess = null
+  // (NO true). Solo se calcula cuando scenario.taskSuccess es boolean
+  // (postcondition explícita) o cuando hay una condición ejecutable
+  // verificable (postconditions del escenario).
+  let taskSuccess = null;
   if (typeof scenario.taskSuccess === "boolean") {
     taskSuccess = scenario.taskSuccess;
-  } else {
-    const preservedAll =
-      scenario.requiredIds.length === 0 ||
-      scenario.requiredIds.every((id) => selectedIds.includes(id));
-    taskSuccess = preservedAll && pageFaults === 0;
   }
 
   // -- Retrieval overhead (TTC component) --
@@ -192,6 +215,7 @@ export function runScenario(scenario, select) {
     criticalIds: scenario.criticalIds,
     usedIds,
     pageFaults,
+    routerErrors,
     reacquiredTokens,
     taskSuccess,
     oracleMissing: oracleResult ? oracleResult.missing : null,
@@ -209,6 +233,9 @@ export function runScenario(scenario, select) {
     gates,
     safety,
     optimization,
+    routerComplete,
+    oracleSufficient,
+    taskSuccess,
     oracle: oracleResult
       ? {
           sufficient: oracleResult.sufficient,

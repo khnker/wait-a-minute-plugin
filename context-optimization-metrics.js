@@ -1,13 +1,21 @@
 /**
  * WAM Context Optimization Metrics — C06
  *
- * Records and computes the six metrics defined for context optimization:
+ * Records and computes the metrics defined for context optimization:
  *   - CRR (Context Reduction Rate)        : how aggressively we shrink context
  *   - SPR (Sufficiency Preservation Rate) : how much of the required context survived
  *   - COR (Critical Omission Rate)        : whether a critical node was dropped
  *   - CWR (Context Waste Rate)            : how much kept context was actually used
  *   - PFR (Page Fault Rate)               : how often we had to re-fetch after selection
  *   - RPC (Reacquisition Cost)            : total tokens spent reacquiring missed context
+ *   - TTC (Total Context Cost)            : initialContextTokens + reacquiredTokens
+ *                                            + retrievalOverhead (informational)
+ *
+ * Status as of TASK-09:
+ *   - RPC and TTC are recorded on every metric and aggregated in
+ *     summarize(), but they are INFORMATIONAL only — they are NOT
+ *     part of the hard optimization gates.  No TTC_MAX / RPC_MAX is
+ *     defined yet because there is no empirical baseline.
  *
  * The module is intentionally framework-free: the recording primitives
  * (`record`, `metrics`) can be invoked by any selector (router, builder,
@@ -41,13 +49,16 @@
  * @property {number} SPR  Sufficiency Preservation Rate      (0..1, higher = better)
  * @property {number} COR  Critical Omission Rate             (0..1, lower is better)
  * @property {number} CWR  Context Waste Rate                 (0..1, lower = better)
- * @property {number} PFR  Page Fault Rate                    (0..1, lower is better)
- * @property {number} RPC  Reacquisition Cost (tokens)        (>=0, lower is better)
+ * @property {number} PFR  Page Fault Rate                    (0..1, lower = better)
+ * @property {number} RPC  Reacquisition Cost (tokens)        (>=0, lower is better; informational — not a gate)
  * @property {number} selectedTokens
  * @property {number} requiredTokens
  * @property {number} usedTokens
  * @property {number} pageFaults
  * @property {number} reacquiredTokens
+ * @property {number} initialContextTokens                   (TTC component; defaults to selectedTokens)
+ * @property {number} retrievalOverhead                      (TTC component; defaults to 0)
+ * @property {number} TTC                                    (Total Context Cost; informational — not a gate)
  */
 
 // -- Token estimation --
@@ -122,24 +133,21 @@ export function record(input) {
   const COR = criticalSet.size === 0 ? 0 : clamp01(missingCritical / criticalSet.size);
 
   // CWR: fraction of selected tokens that ended up unused.
-  //     Token-weighted waste is more informative than a raw id ratio.
-  //     When `usedTokens` is not supplied, derive from the actual usedIds set
-  //     (intersected with selectedIds) rather than defaulting to selectedIds.
-  //     This ensures CWR reflects real downstream consumption.
-  const usedSet = new Set(usedIds);
+  // When no explicit usedIds or usedTokens are provided, CWR must be null (no evidence).
   let usedTokens = 0;
+  let CWR = null;
   if (typeof input?.usedTokens === "number") {
     usedTokens = Math.max(0, Math.min(selectedTokens, Number(input.usedTokens)));
-  } else if (selectedIds.length > 0) {
-    // Count usedIds that actually belong to the selected set; estimate
-    // used tokens proportionally to selectedTokens.
+    CWR = selectedTokens > 0 ? clamp01(1 - usedTokens / selectedTokens) : 0;
+  } else if (Array.isArray(input?.usedIds)) {
+    const usedSet = new Set(input.usedIds);
     let usedInSelection = 0;
     for (const id of usedSet) if (selectedSet.has(id)) usedInSelection++;
-    usedTokens = (usedInSelection / selectedIds.length) * selectedTokens;
+    usedTokens = selectedIds.length > 0 ? (usedInSelection / selectedIds.length) * selectedTokens : 0;
+    CWR = selectedTokens > 0 ? clamp01(1 - usedTokens / selectedTokens) : 0;
   } else {
-    usedTokens = 0;
+    CWR = null;
   }
-  const CWR = selectedTokens > 0 ? clamp01(1 - usedTokens / selectedTokens) : 0;
 
   // PFR: page faults normalized by total selected ids (avoids div-by-zero).
   const PFR = selectedIds.length > 0 ? clamp01(pageFaults / selectedIds.length) : 0;
@@ -165,16 +173,36 @@ export function record(input) {
     : null;
   const VSR = oracleMissing ? (oracleMissing.length === 0 ? 1 : 0) : null;
 
-  // TTC (Total Context Cost) = initial selection tokens + reacquired
-  //     tokens + retrieval overhead.  This is the real cost the system
-  //     paid to deliver context, not just the bytes we shipped.
+  // TTC (Total Context Cost) = initialContextTokens + reacquiredTokens +
+  //     retrievalOverhead.  This is the real cost the system paid to
+  //     deliver context, not just the bytes we shipped.
+  //
+  //     Formula (per spec — TASK-09):
+  //       TTC = initialContextTokens
+  //           + reacquiredTokens
+  //           + retrievalOverhead
+  //
+  //     When `initialContextTokens` is not supplied it defaults to
+  //     `selectedTokens` (the tokens we initially shipped before any
+  //     re-fetches).  When `retrievalOverhead` is not supplied it
+  //     defaults to 0 explicitly so the cost decomposition stays
+  //     auditable.
+  //
+  //     NOTE: TTC_MAX is intentionally NOT defined here. There is no
+  //     empirical baseline yet; setting a numeric cap now would be
+  //     arbitrary and could mask regressions before we have data.
+  const initialContextTokens =
+    typeof input?.initialContextTokens === "number" &&
+    Number.isFinite(input.initialContextTokens)
+      ? Math.max(0, input.initialContextTokens)
+      : Math.max(0, selectedTokens);
   const retrievalOverhead =
     typeof input?.retrievalOverhead === "number" &&
     Number.isFinite(input.retrievalOverhead)
       ? Math.max(0, input.retrievalOverhead)
       : 0;
   const TTC = Math.round(
-    Math.max(0, selectedTokens) + Math.max(0, reacquiredTokens) + retrievalOverhead
+    initialContextTokens + Math.max(0, reacquiredTokens) + retrievalOverhead
   );
 
   const out = {
@@ -190,6 +218,7 @@ export function record(input) {
     usedTokens: Math.round(usedTokens),
     pageFaults,
     reacquiredTokens: Math.round(reacquiredTokens),
+    initialContextTokens: Math.round(initialContextTokens),
     TTC,
     retrievalOverhead: Math.round(retrievalOverhead),
   };
@@ -246,6 +275,7 @@ export function summarize(records) {
       usedTokens: Math.round(sum("usedTokens")),
       pageFaults: Math.round(sum("pageFaults")),
       reacquiredTokens: Math.round(sum("reacquiredTokens")),
+      initialContextTokens: Math.round(sum("initialContextTokens")),
       TTC: Math.round(sum("TTC")),
       retrievalOverhead: Math.round(sum("retrievalOverhead")),
       samples: n,
@@ -277,8 +307,16 @@ export function summarize(records) {
  *     not unsafe.  They are tunable per-corpus.
  *       CWR_MAX  (0.5)           kept context was actually used
  *       PFR_MAX  (0.05)          additional fetches triggered by misses
- *       RPC_MAX  (0)             reacquisition cost must be explained
  *       CRR_MIN  (0.0)           any reduction is fine
+ *
+ *     RPC (Reacquisition Cost) and TTC (Total Context Cost) are
+ *     INFORMATIONAL only as of TASK-09.  They are still recorded on
+ *     every metric and surfaced by summarize(), but they are NOT part
+ *     of the hard optimization gates.  Rationale: there is no
+ *     empirical baseline yet, so any numeric cap (RPC_MAX / TTC_MAX)
+ *     would be arbitrary and could mask real regressions before we have
+ *     data.  Once a baseline exists we can promote them back to
+ *     gates with defensible thresholds.
  *
  * `evaluateGates()` evaluates BOTH sets and returns both verdicts.
  * `evaluateSafetyGates()` and `evaluateOptimizationGates()` evaluate
@@ -294,7 +332,6 @@ export const SAFETY_GATES = Object.freeze({
 export const OPTIMIZATION_GATES = Object.freeze({
   CWR_MAX: 0.5,
   PFR_MAX: 0.05,
-  RPC_MAX: 0,
   CRR_MIN: 0.0,
 });
 
@@ -349,9 +386,10 @@ export function evaluateOptimizationGates(m, overrides = {}) {
   if (typeof m.PFR === "number" && m.PFR > g.PFR_MAX) {
     failures.push(`PFR ${m.PFR} > ${g.PFR_MAX}`);
   }
-  if (typeof m.RPC === "number" && m.RPC > g.RPC_MAX) {
-    failures.push(`RPC ${m.RPC} > ${g.RPC_MAX}`);
-  }
+  // NOTE: RPC_MAX was removed from the hard gates as of TASK-09. RPC
+  // (and TTC) remain recorded on every metric and surfaced via
+  // summarize(), but they are informational until we have an
+  // empirical baseline to set a defensible cap.
   // CRR_MIN: if there is reduction at all, fine. We don't push for more.
   if (typeof m.CRR === "number" && m.CRR < g.CRR_MIN) {
     failures.push(`CRR ${m.CRR} < ${g.CRR_MIN}`);

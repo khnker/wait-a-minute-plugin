@@ -48,7 +48,8 @@
     "test": "node scripts/run-tests.mjs",
     "test:legacy": "node --test --test-concurrency=1 wait-a-minute-test.mjs",
     "smoke": "node -e \"import('./index.js').then(m => console.log('WAM plugin loaded successfully'))\"",
-    "pack:test": "node scripts/verify-package.mjs"
+    "pack:test": "node scripts/verify-package.mjs",
+    "wam:next": "node scripts/autonomous-task-runner.mjs --all"
   },
   "repository": {
     "type": "git",

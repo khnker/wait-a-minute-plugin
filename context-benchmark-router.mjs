@@ -89,18 +89,24 @@ export function wamRouterSelector(options = {}) {
   const tokenBudget = options.budget ?? 4000;
   return function select(scenario) {
     const graph = buildBenchmarkGraph(scenario);
-    const taskId = scenario.taskId || "task";
+    const taskId = scenario.taskId && graph.getNode(scenario.taskId) ? scenario.taskId : (graph.getNode("task") ? "task" : (scenario.taskId || graph.nodes.values().next().value?.id || "task"));
 
     let result;
     try {
       result = resolveContext(graph, { taskId, maxTokens: tokenBudget });
     } catch (e) {
-      // Fallback if router fails on malformed scenario graph
+      // Router error: the selection algorithm could not execute.
+      // This is distinct from a page fault (where the selected context
+      // was insufficient and the system recovered additional context).
+      const serializedError = {
+        name: e?.name ?? "Error",
+        message: e?.message ?? String(e),
+        stack: e?.stack ?? null
+      };
       return {
-        selectedIds: [],
-        usedIds: [],
-        pageFaults: 1,
-        reacquiredTokens: 0
+        status: "ERROR",
+        errorType: "ROUTER_ERROR",
+        error: serializedError
       };
     }
 
@@ -108,6 +114,7 @@ export function wamRouterSelector(options = {}) {
     const usedIds = selectedIds; // Router-selected nodes are used
 
     return {
+      status: "OK",
       selectedIds,
       usedIds: undefined, // Change 05: Do not infer usedIds from selectedIds
       pageFaults: result.sufficient ? 0 : 1,

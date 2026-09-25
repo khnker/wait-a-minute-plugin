@@ -73,18 +73,18 @@ export function buildRuntimeContextGraph(input = {}) {
     if (!req?.id) continue;
     requirementIds.add(req.id);
     const outputId = `${req.id}::output`;
-    g.addNode({
-      id: outputId,
-      type: "output",
-      content: req.title || req.description || "",
-      metadata: {
-        provenance: "user_decided",
-        shadowOf: req.id,
-      },
-    });
-    if (taskId) {
-      g.addEdge({ from: taskId, to: outputId, type: "depends_on_artifact" });
-    }
+      g.addNode({
+        id: outputId,
+        type: "output",
+        content: req.title || req.description || "",
+        metadata: {
+          provenance: "user_decided",
+          shadowOf: req.id,
+        },
+      });
+      if (taskId) {
+        g.addEdge({ from: taskId, to: outputId, type: "related_to" });
+      }
   }
 
   // -- Evidence lineage (evidence supports requirement when linked) --
